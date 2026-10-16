@@ -30,19 +30,44 @@ USE_SHELL = platform.system() == "Windows"
 
 
 def get_local_ip():
-    """获取本机局域网 IP 地址"""
+    """获取本机局域网 IP 地址（自动过滤 198.18.* 等代理虚拟网卡）"""
     try:
-        # 创建一个 UDP socket 连接到外部地址
-        # 这不会实际发送数据，只是用来获取本机 IP
+        import psutil
+
+        candidates = []
+        for iface, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if addr.family == socket.AF_INET:
+                    ip = addr.address
+                    if (
+                        ip.startswith("127.")
+                        or ip.startswith("198.18.")
+                        or ip.startswith("169.254.")
+                    ):
+                        continue
+                    if (
+                        ip.startswith("192.168.")
+                        or ip.startswith("10.")
+                        or (ip.startswith("172.") and 16 <= int(ip.split(".")[1]) <= 31)
+                    ):
+                        return ip
+                    candidates.append(ip)
+        if candidates:
+            return candidates[0]
+    except Exception:
+        pass
+
+    try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # 连接到一个外部地址（Google 的 DNS）
         s.connect(("8.8.8.8", 80))
         local_ip = s.getsockname()[0]
         s.close()
-        return local_ip
+        if not local_ip.startswith("198.18."):
+            return local_ip
     except Exception:
-        # 如果获取失败，返回 localhost
-        return "localhost"
+        pass
+
+    return "localhost"
 
 
 def start_frontend():
@@ -68,13 +93,13 @@ def start_frontend():
 
 
 def open_browser(local_ip):
-    """延迟打开浏览器到前端页面"""
+    """延迟打开浏览器到前端页面（本机打开优先使用 localhost 避免代理拦截）"""
     time.sleep(5)  # 等待前端和后端都启动
     try:
-        # 尝试打开端口 80，如果失败则尝试 81、82
+        # 本机打开浏览器优先使用 localhost，保证不受代理/VPN/网络变化影响
         for port in FRONTEND_PORTS:
             try:
-                url = f"http://{local_ip}:{port}"
+                url = f"http://localhost:{port}"
                 webbrowser.open(url)
                 print(f"OK Browser opened to {url}")
                 break
