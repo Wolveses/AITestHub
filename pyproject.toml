@@ -61,7 +61,7 @@ dependencies = [
     "jsonpath-ng>=1.6.0",
     "logzero>=1.7.0",
     "apscheduler>=3.10",
-    "httpx>=0.28.0",
+    "httpx>=0.25.0",
     "pyyaml>=6.0",
 ]
 
