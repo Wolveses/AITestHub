@@ -159,3 +159,5 @@ coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
+.agents/hooks.json
+.cursor/hooks.json
