@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Agent Task 执行器（降级为单动作执行器 + 顺序 fallback）。
 
 原本在后台线程中执行 Task 的 plan，包含 $prev 解析和修复循环。ReAct 大脑层（ReActAgent）
@@ -13,11 +13,14 @@ $prev 模板：step params 中 case_id == "$prev" → 取上一步结果中的 c
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from insight_aitest.modules.ai.backend.agent.skills import SKILLS, SkillContext
 from insight_aitest.modules.ai.backend.persistence.models import Role, TaskStatus
+
+logger = logging.getLogger("insight_aitest.ai.executor")
 
 # 执行类 skill（可被 ReActAgent 反思/重试/修复）
 _EXEC_SKILLS = {"execute_api_case", "execute_ui_case"}
@@ -149,6 +152,13 @@ class TaskExecutor:
         except Exception:
             pass  # 消息持久化失败不应影响已提交的任务终态
 
+        logger.info(
+            "[AI Task %s] 任务执行终态: status=%s, %s",
+            task_id,
+            final_status.value,
+            result_summary["summary"],
+        )
+
         if final_status == TaskStatus.DONE:
             _emit(TaskEvent("done", {"result": result_summary}))
         else:
@@ -186,6 +196,14 @@ class TaskExecutor:
                 TaskEvent("step_error", {"step_index": step_index, "skill": skill_id, "error": err})
             )
             return {"error": err}
+        logger.info(
+            "[AI Task %s] 开始执行步骤 [%d/%d]: skill=%s (%s)",
+            task_id,
+            step_index + 1,
+            total,
+            skill_id,
+            skill.name if skill else skill_id,
+        )
         try:
             # timeout: skill.execute may hang (HTTP no response, Playwright stuck)
             import concurrent.futures
@@ -197,6 +215,13 @@ class TaskExecutor:
                 except concurrent.futures.TimeoutError:
                     raise TimeoutError(f"skill {skill_id} execution exceeded 300s")
             task_db.update_task_step(task_id, step_index, result)
+            logger.info(
+                "[AI Task %s] 步骤 [%d/%d] 执行成功: skill=%s",
+                task_id,
+                step_index + 1,
+                total,
+                skill_id,
+            )
             _emit(
                 TaskEvent(
                     "step_done", {"step_index": step_index, "skill": skill_id, "result": result}
@@ -205,6 +230,14 @@ class TaskExecutor:
             return result
         except Exception as e:
             err_msg = f"步骤执行失败: {e}"
+            logger.error(
+                "[AI Task %s] 步骤 [%d/%d] 执行失败: skill=%s, error=%s",
+                task_id,
+                step_index + 1,
+                total,
+                skill_id,
+                e,
+            )
             task_db.update_task_step(task_id, step_index, {"error": err_msg})
             _emit(
                 TaskEvent(

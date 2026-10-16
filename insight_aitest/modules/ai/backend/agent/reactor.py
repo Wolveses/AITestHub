@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """ReAct 大脑层：在 plan 执行中引入"观察→反思→纠错"循环。
 
 混合式架构：顶层仍是 Plan-and-Solve（planner 不动），每个 step 执行后由 LLM 反思决策。
@@ -11,11 +11,14 @@ ReActAgent 在其上叠加 EXECUTE→REFLECT→DECIDE 微循环（retry/fix/abor
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from insight_aitest.modules.ai.backend.persistence.models import Role, TaskStatus
+
+logger = logging.getLogger("insight_aitest.ai.reactor")
 
 if TYPE_CHECKING:
     from insight_aitest.modules.ai.backend.agent.executor import TaskExecutor
@@ -432,6 +435,15 @@ class ReActAgent:
                         "reasoning": reflection.get("reasoning", ""),
                     },
                 )
+            )
+            logger.info(
+                "[ReAct Task %s] 步骤 [%d/%d] (轮次 %d) 反思决策: decision=%s, 原因: %s",
+                task_id,
+                step_index + 1,
+                total,
+                iteration,
+                decision,
+                reflection.get("reasoning", "")[:100],
             )
 
             trace.append(

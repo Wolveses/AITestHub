@@ -51,11 +51,23 @@ async def chat(
     use_rag = body.use_kb if body.use_kb is not None else conv.rag_enabled
     # KB 升级：按会话所属项目隔离检索（project_id 来自 Conversation，杜绝跨项目污染）
     proj_id = getattr(conv, "project_id", None)
+    logger.info(
+        "[AI Chat] 收到同步对话请求 (会话 %s): query=%r, use_rag=%s",
+        body.conversation_id,
+        body.query[:100],
+        use_rag,
+    )
     # 先持久化 user 消息（保证历史完整，即使 answer 失败也不丢失用户输入）
     db.add_message(body.conversation_id, Role.USER, body.query)
     try:
         result = agent.answer(
             body.query, history_msgs, body.document_ids, use_rag=use_rag, project_id=proj_id
+        )
+        logger.info(
+            "[AI Chat] 同步对话完成 (会话 %s): 回复字数=%d, 引用文献数=%d",
+            body.conversation_id,
+            len(result.answer),
+            len(result.citations),
         )
     except Exception as e:
         # answer 失败：写错误占位消息，与流式路径行为一致
@@ -106,6 +118,14 @@ async def chat_stream(
     # KB 升级：按会话所属项目隔离检索（project_id 来自 Conversation）
     proj_id = getattr(conv, "project_id", None)
 
+    logger.info(
+        "[AI Chat] 收到对话请求 (会话 %s): query=%r, use_rag=%s, thinking_level=%s",
+        body.conversation_id,
+        body.query[:100],
+        use_rag,
+        thinking_switch,
+    )
+
     async def event_gen():
         try:
             async for event in agent.stream_answer_async(
@@ -127,6 +147,12 @@ async def chat_stream(
                     full_answer[0] += event.data
                     yield _sse("token", {"text": event.data})
                 elif event.type == "done":
+                    logger.info(
+                        "[AI Chat] 对话流式完成 (会话 %s): 回复字数=%d, 引用文献数=%d",
+                        body.conversation_id,
+                        len(full_answer[0]),
+                        len(citations_holder[0]),
+                    )
                     db.add_message(
                         body.conversation_id,
                         Role.ASSISTANT,

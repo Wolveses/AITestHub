@@ -541,6 +541,15 @@ async def create_task_stream(
         conversation_id=conv_id,
     )
 
+    logger.info(
+        "[AI Task] 收到任务创建请求 (task_id=%s, conv_id=%s): intent=%r, use_kb=%s, files=%s",
+        task_id,
+        conv_id,
+        body.intent[:100],
+        body.use_kb,
+        filenames,
+    )
+
     # 持久化用户意图消息（修复上下文丢失）
     db.add_message(conv_id, Role.USER, body.intent, task_id=task_id)
 
@@ -592,6 +601,12 @@ async def create_task_stream(
                 if kind == "error":
                     return
             db.update_task_strategies(task_id, strategies, status=TaskStatus.PENDING_SELECT)
+            logger.info(
+                "[AI Task] 任务策略生成完毕 (task_id=%s): 产出 %d 个备选策略: %s",
+                task_id,
+                len(strategies),
+                [s.get("label") or s.get("id") for s in strategies],
+            )
 
             # 持久化策略消息
             strategy_lines = []
@@ -886,6 +901,13 @@ async def select_strategy(
             }:
                 step["params"]["document_ids"] = doc_ids
     db.select_task_strategy(task_id, body.strategy_id, plan)
+    logger.info(
+        "[AI Task] 用户选择策略执行 (task_id=%s): strategy=%s (%s), 规划执行步骤数=%d",
+        task_id,
+        body.strategy_id,
+        selected.get("label", body.strategy_id),
+        len(plan),
+    )
 
     # 持久化策略选择消息
     strategy_label = selected.get("label", body.strategy_id)
