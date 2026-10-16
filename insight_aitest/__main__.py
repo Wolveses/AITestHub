@@ -112,6 +112,13 @@ def open_browser(local_ip):
 def main():
     """启动完整的 Web 应用（后端 + 前端）"""
 
+    # 0. 配置日志持久化
+    from insight_aitest.platform.logging_config import get_log_dir, setup_logging
+
+    log_dir = get_log_dir()
+    log_config = setup_logging(log_dir)
+    log_file_path = log_dir / "app.log"
+
     # 获取本机 IP 地址
     local_ip = get_local_ip()
 
@@ -145,6 +152,9 @@ def main():
 ║  前端界面 / Frontend:                                      ║
 ║    - 本机 / Local:  http://localhost:80                    ║
 ║    - 网络 / Network: http://{local_ip}:80                  ║
+║                                                            ║
+║  服务日志 / Logs:                                          ║
+║    - 文件 / File:   {log_file_path}
 ╠════════════════════════════════════════════════════════════╣
 ║  浏览器将自动打开 / Browser will open automatically        ║
 ║  其他设备可使用网络地址访问 /                              ║
@@ -155,7 +165,7 @@ def main():
     print(banner)
 
     try:
-        uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
+        uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info", log_config=log_config)
     except KeyboardInterrupt:
         print("\n\nStopping Insight-AITest...")
         sys.exit(0)

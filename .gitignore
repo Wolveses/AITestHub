@@ -38,6 +38,7 @@ ENV/
 *.sublime-workspace
 
 # ==================== Logs ====================
+logs/
 *.log
 app.log
 api.log

@@ -41,6 +41,11 @@ def _allowed_origins() -> list[str]:
 
 def build_app() -> FastAPI:
     """装配并返回 FastAPI 应用。"""
+    from insight_aitest.platform.logging_config import setup_logging
+
+    # 配置日志持久化
+    setup_logging()
+
     from insight_aitest.platform.api.platform import (
         build_platform_router,
         set_registry_view,
