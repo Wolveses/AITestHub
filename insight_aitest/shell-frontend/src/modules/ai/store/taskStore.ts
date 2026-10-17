@@ -99,7 +99,11 @@ export interface TaskRca {
   trace: TraceEntry[]
 }
 
+export type WorkMode = 'chat' | 'task';
+
 interface TaskState {
+  workMode: WorkMode;                  // 工作模式：chat（纯对话） | task（测试任务）
+  chatConversationId: number | null;   // 对话模式关联的会话ID
   messagesByTask: Record<number, AgentMessage[]>;  // 按 taskId 分桶的消息缓存
   messages: AgentMessage[];
   currentTask: TaskData | null;
@@ -121,13 +125,16 @@ interface TaskState {
   rca: Record<number, TaskRca | null>;  // taskId -> rca
 
   // Actions
+  setWorkMode: (mode: WorkMode) => void;
   addPendingFiles: (files: File[]) => void;
   removePendingFile: (index: number) => void;
   setThinkingLevel: (level: 'off' | 'low' | 'medium' | 'high') => void;
   setKbMode: (mode: 'off' | 'auto' | 'manual') => void;
   setSelectedDocIds: (ids: number[]) => void;
   sendIntent: (text: string) => Promise<void>;
-  _sendTask: (text: string, uploadedFiles: { filename: string; content: string }[], projectId: number | null, versionId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[], conversationId?: number) => Promise<void>;  // 统一任务管道（LLM做意图识别）
+  _sendChat: (text: string, uploadedFiles: { filename: string; content: string }[], projectId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[]) => Promise<void>;  // 对话模式管道
+  _sendTask: (text: string, uploadedFiles: { filename: string; content: string }[], projectId: number | null, versionId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[], conversationId?: number) => Promise<void>;  // 任务模式管道
+
   _sendIntentSync: (intent: string, uploadedFiles: { filename: string; content: string }[], projectId: number | null, versionId: number | null, documentIds?: number[], conversationId?: number) => Promise<void>;
   stopStreaming: () => void;           // 中断流式
   selectStrategy: (strategyId: string) => Promise<void>;
@@ -224,6 +231,8 @@ function _supplementChatMessages(existing: AgentMessage[], dbMessages: DbMessage
 }
 
 export const useTaskStore = create<TaskState>((set, get) => ({
+  workMode: (localStorage.getItem('ai_work_mode') as WorkMode) || 'chat',
+  chatConversationId: null,
   messagesByTask: {},
   messages: [],
   currentTask: null,
@@ -243,6 +252,11 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   review: {} as Record<number, ReviewState>,
   trace: {} as Record<number, Record<number, TraceEntry[]>>,
   rca: {} as Record<number, TaskRca | null>,
+
+  setWorkMode: (mode: WorkMode) => {
+    localStorage.setItem('ai_work_mode', mode);
+    set({ workMode: mode });
+  },
 
   addPendingFiles: (files: File[]) => {
     set((s) => ({
@@ -267,7 +281,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   sendIntent: async (text: string) => {
-    const { pendingFiles, pendingFileNames, thinkingLevel, kbMode, selectedDocIds, currentTask } = get();
+    const { pendingFiles, pendingFileNames, thinkingLevel, kbMode, selectedDocIds, currentTask, workMode } = get();
     const { currentProjectId, currentVersionId } = useProjectStore.getState();
     const hasFiles = pendingFiles.length > 0;
     const hasText = text.trim().length > 0;
@@ -278,7 +292,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     // 手动档：用用户勾选的文档ID；自动档：null（让RAG自己检索）
     const effectiveDocIds = kbMode === 'manual' && selectedDocIds.length > 0 ? selectedDocIds : undefined;
 
-    // 继承上一任务的 document_ids 和 conversation_id（统一管道：由LLM做意图识别）
+    // 继承上一任务的 document_ids 和 conversation_id
     const inheritedDocIds: number[] = (!hasFiles && currentTask?.context?.document_ids)
       ? currentTask.context.document_ids : [];
 
@@ -318,9 +332,142 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     const allDocIds = effectiveDocIds
       ? [...new Set([...finalDocIds, ...effectiveDocIds])]
       : finalDocIds;
-    const convId = currentTask?.conversation_id ?? undefined;
-    await get()._sendTask(text, uploadedFiles, currentProjectId, currentVersionId, thinkingLevel, useKb, allDocIds, convId);
+
+    if (workMode === 'chat') {
+      await get()._sendChat(text, uploadedFiles, currentProjectId, thinkingLevel, useKb, allDocIds);
+    } else {
+      const convId = currentTask?.conversation_id ?? undefined;
+      await get()._sendTask(text, uploadedFiles, currentProjectId, currentVersionId, thinkingLevel, useKb, allDocIds, convId);
+    }
   },
+
+  // 对话模式管道：调用 /api/modules/ai/tasks/chat（流式问答+思维链，不生成测试用例）
+  _sendChat: async (text: string, uploadedFiles: { filename: string; content: string }[], projectId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[]) => {
+    try {
+      set({ phase: 'executing', phaseMessage: '正在思考与组织回答…', streamingThinking: '', streamingMessage: '' });
+      const abortCtrl = new AbortController();
+      set({ abortCtrl });
+
+      let prompt = text;
+      if (uploadedFiles && uploadedFiles.length > 0) {
+        const fileContentStr = uploadedFiles.map(f => `--- ${f.filename} ---\n${f.content.slice(0, 3000)}`).join('\n\n');
+        prompt = `${prompt}\n\n【参考附件文档】\n${fileContentStr}`.trim();
+      }
+
+      const { currentTask, chatConversationId } = get();
+      const activeConvId = currentTask?.conversation_id ?? chatConversationId ?? undefined;
+
+      const res = await fetch(`${BASE}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: prompt,
+          thinking_level: thinkingLevel,
+          task_id: currentTask?.id ?? undefined,
+          conversation_id: activeConvId,
+          use_kb: useKb,
+          document_ids: documentIds && documentIds.length > 0 ? documentIds : undefined,
+          project_id: projectId ?? undefined,
+        }),
+        signal: abortCtrl.signal,
+      });
+
+      if (!res.ok || !res.body) {
+        const errText = await res.text().catch(() => '');
+        const parsed = parseLLMError(errText || `HTTP ${res.status}`, res.status);
+        toast.error(parsed.message);
+        set((s) => {
+          const tid = s.currentTask?.id;
+          const newMsgs = [...s.messages, { role: 'agent' as const, content: `⚠️ ${parsed.message}` }];
+          return {
+            phase: 'error' as const, phaseMessage: parsed.message, streamingThinking: null, streamingMessage: null, abortCtrl: null,
+            messages: newMsgs,
+            messagesByTask: tid ? { ...s.messagesByTask, [tid]: newMsgs } : s.messagesByTask,
+          };
+        });
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullMessage = '';
+      let fullThinking = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop()!;
+        for (const evt of events) {
+          const type = evt.match(/^event: (.+)$/m)?.[1];
+          const dataStr = evt.match(/^data: (.+)$/m)?.[1] ?? '{}';
+          let data: { text?: string; message?: string; conversation_id?: number };
+          try { data = JSON.parse(dataStr); } catch { continue; }
+
+          if (type === 'thinking') {
+            fullThinking += (data.text || '');
+            set({ streamingThinking: fullThinking });
+          }
+          if (type === 'token') {
+            fullMessage += (data.text || '');
+            set({ streamingMessage: fullMessage });
+          }
+          if (type === 'done') {
+            if (data.conversation_id) {
+              set({ chatConversationId: data.conversation_id });
+            }
+          }
+          if (type === 'error') {
+            const parsed = parseLLMError(data.message);
+            toast.error(parsed.message);
+            fullMessage += `\n\n⚠️ ${parsed.message}`;
+          }
+        }
+      }
+
+      set((s) => {
+        const tid = s.currentTask?.id;
+        const newMsgs: AgentMessage[] = [
+          ...s.messages,
+          {
+            role: 'agent',
+            card: 'chat',
+            content: fullMessage,
+            thinking: fullThinking || undefined,
+            taskId: tid,
+          },
+        ];
+        return {
+          phase: 'idle' as const,
+          phaseMessage: '',
+          streamingThinking: null,
+          streamingMessage: null,
+          abortCtrl: null,
+          messages: newMsgs,
+          messagesByTask: tid ? { ...s.messagesByTask, [tid]: newMsgs } : s.messagesByTask,
+        };
+      });
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        set((s) => {
+          const tid = s.currentTask?.id;
+          const newMsgs = [...s.messages, { role: 'agent' as const, card: 'chat' as const, content: '（已停止生成）' }];
+          return {
+            phase: 'idle' as const, phaseMessage: '', streamingThinking: null, streamingMessage: null, abortCtrl: null,
+            messages: newMsgs,
+            messagesByTask: tid ? { ...s.messagesByTask, [tid]: newMsgs } : s.messagesByTask,
+          };
+        });
+        return;
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(msg);
+      set({ phase: 'error', phaseMessage: msg, streamingThinking: null, streamingMessage: null, abortCtrl: null });
+    }
+  },
+
 
   // 统一任务管道：所有消息走 understand → strategize → execute（LLM 做意图识别）
   _sendTask: async (text: string, uploadedFiles: { filename: string; content: string }[], currentProjectId: number | null, currentVersionId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[], conversationId?: number) => {
@@ -397,7 +544,21 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           if (type === 'thinking') {
             set((s) => ({ streamingThinking: (s.streamingThinking || '') + (data.text || '') }));
           }
+          if (type === 'guidance') {
+            set((s) => {
+              const tid = s.currentTask?.id;
+              const newMsgs = [...s.messages, { role: 'agent' as const, card: 'chat' as const, content: data.text as string }];
+              return {
+                streamingThinking: null,
+                messages: newMsgs,
+                messagesByTask: tid ? { ...s.messagesByTask, [tid]: newMsgs } : s.messagesByTask,
+              };
+            });
+          }
           if (type === 'understand_done') {
+            if ((data as Record<string, unknown>).is_actionable === false || (data as Record<string, unknown>).intent_type === 'greeting_or_empty') {
+              continue;
+            }
             set((s) => {
               const tid = s.currentTask?.id;
               const newMsgs = [...s.messages, { role: 'agent' as const, card: 'understand' as const, content: data.summary }];
@@ -409,22 +570,23 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             });
           }
           if (type === 'done') {
-            task = data.task as TaskData;
+            task = (data.task as TaskData) || null;
             set((s) => {
-              const tid = task!.id;
-              const hasStrategies = task!.strategies && task!.strategies.length > 0;
-              const newMsgs: AgentMessage[] = hasStrategies
-                ? [...s.messages, { role: 'agent', card: 'strategies', taskId: task!.id }]
+              const tid = task?.id;
+              const hasStrategies = !!(task?.strategies && task.strategies.length > 0);
+              const newMsgs: AgentMessage[] = (hasStrategies && task)
+                ? [...s.messages, { role: 'agent', card: 'strategies', taskId: task.id }]
                 : s.messages;
               return {
                 currentTask: task,
                 phase: 'idle' as const, phaseMessage: '', streamingThinking: null, streamingMessage: null, abortCtrl: null,
                 messages: newMsgs,
-                messagesByTask: hasStrategies ? { ...s.messagesByTask, [tid]: newMsgs } : s.messagesByTask,
+                messagesByTask: hasStrategies && tid ? { ...s.messagesByTask, [tid]: newMsgs } : s.messagesByTask,
               };
             });
             get().loadTasks();
           }
+
           if (type === 'error') {
             const parsed = parseLLMError(data.message);
             toast.error(parsed.message);
@@ -876,13 +1038,16 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   resetConversation: () => {
+    get().abortCtrl?.abort();
     set({
       messagesByTask: {},
       messages: [], currentTask: null, pendingFiles: [], pendingFileNames: [],
       stepLogs: [], phase: 'idle', phaseMessage: '', selectedStrategy: null,
       streamingThinking: null, streamingMessage: null, abortCtrl: null,
+      chatConversationId: null,
     });
   },
+
 
   // 用例审阅面板：加载某批次的用例到审阅状态
   loadBatchCases: async (taskId, batchId) => {

@@ -637,12 +637,22 @@ export default {
       emptyAsk: 'Ask the AI. It answers based on your knowledge-base documents.',
       stop: 'Stop',
       // ===== ChatInput / AgentInput =====
+      modeChat: 'Chat',
+      modeChatDesc: 'Q&A and knowledge base search without creating test tasks',
+      modeTask: 'Task',
+      modeTaskDesc: 'Automated test task, planning strategies and generating/reviewing cases',
+      chatPlaceholder: 'Ask any testing questions, discuss strategies, or query knowledge base... (Enter to send)',
+      chatPlaceholderWithFiles: 'Ask questions based on selected attachments... (Enter to send)',
+      taskPlaceholder: 'Enter test requirements, cases to review, or upload PRD/API doc... (Enter to start)',
+      taskPlaceholderWithFiles: 'Documents selected, enter test target or press Enter to analyze... (Enter to start)',
+      startTask: 'Start Task',
       attachUploadFailed: 'Attachment upload failed',
       addAttachment: 'Add attachment',
       addFile: 'Add file',
       inputHint: 'Type a question… (Ctrl/Cmd+Enter to send, paste images supported)',
       placeholderWithFiles: 'Add a note (optional), press Ctrl+Enter to send',
       placeholderDefault: 'Describe a testing task, or upload files + notes (Ctrl+Enter to send, Ctrl+V to paste screenshots)',
+
       // ===== AgentWorkbench =====
       thinkingDefault: 'Thinking…',
       stopGen: 'Stop generating',

@@ -637,12 +637,22 @@ export default {
       emptyAsk: '向 AI 提问吧。它会基于你的知识库文档回答。',
       stop: '停止',
       // ===== ChatInput / AgentInput =====
+      modeChat: '对话',
+      modeChatDesc: '纯问答与知识库检索，解答测试疑问、探讨方案，不创建任务',
+      modeTask: '任务',
+      modeTaskDesc: '自动化测试任务，意图识别、规划测试策略并生成/评审用例',
+      chatPlaceholder: '问我任何测试问题、咨询测试方案，或检索知识库... (Enter 发送)',
+      chatPlaceholderWithFiles: '基于所选附件提问测试问题... (Enter 发送)',
+      taskPlaceholder: '输入测试需求、待评审用例或上传 PRD/接口文档... (Enter 发起)',
+      taskPlaceholderWithFiles: '已选文档，输入测试目标或回车开始分析... (Enter 发起)',
+      startTask: '发起任务',
       attachUploadFailed: '附件上传失败',
       addAttachment: '添加附件',
       addFile: '添加文件',
       inputHint: '输入问题…（Ctrl/Cmd+Enter 发送，可粘贴图片）',
       placeholderWithFiles: '添加说明文字（可选），按 Ctrl+Enter 发送',
       placeholderDefault: '描述测试任务，或上传文件 + 说明（Ctrl+Enter 发送，Ctrl+V 粘贴截图）',
+
       // ===== AgentWorkbench =====
       thinkingDefault: '正在思考…',
       stopGen: '停止生成',

@@ -5,7 +5,7 @@ import { glassTextarea, primaryButton, ghostButton, text as agentText, SPRING } 
 import { X, Square } from 'lucide-react';
 
 export function AgentInput() {
-  const { sendIntent, addPendingFiles, removePendingFile, pendingFileNames, phase, stopStreaming } = useTaskStore();
+  const { sendIntent, addPendingFiles, removePendingFile, pendingFileNames, phase, stopStreaming, workMode } = useTaskStore();
   const [text, setText] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
   const busy = phase === 'uploading' || phase === 'understanding' || phase === 'strategizing' || phase === 'executing';
@@ -41,6 +41,18 @@ export function AgentInput() {
   };
 
   const disabled = busy || (!text.trim() && pendingFileNames.length === 0);
+
+  const placeholder = workMode === 'chat'
+    ? (pendingFileNames.length > 0
+        ? t('ai.chatPlaceholderWithFiles', '基于所选附件提问... (Enter 发送)')
+        : t('ai.chatPlaceholder', '问我任何测试问题、咨询测试方案，或检索知识库... (Enter 发送)'))
+    : (pendingFileNames.length > 0
+        ? t('ai.taskPlaceholderWithFiles', '已选文档，输入测试目标或回车开始分析... (Enter 发起)')
+        : t('ai.taskPlaceholder', '输入测试需求、待评审用例或上传 PRD/接口文档... (Enter 发起)'));
+
+  const sendBtnLabel = workMode === 'chat'
+    ? t('ai.send', '发送')
+    : t('ai.startTask', '发起任务');
 
   return (
     <div>
@@ -100,16 +112,15 @@ export function AgentInput() {
         </button>
         <textarea
           style={glassTextarea}
-          placeholder={
-            pendingFileNames.length > 0
-              ? t('ai.placeholderWithFiles')
-              : t('ai.placeholderDefault')
-          }
+          placeholder={placeholder}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onPaste={onPaste}
           onKeyDown={(e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') submit();
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              submit();
+            }
           }}
           rows={1}
           disabled={busy}
@@ -125,11 +136,12 @@ export function AgentInput() {
             transition: `all 0.15s ${SPRING}`,
             ...(busy ? { background: 'var(--error)', color: 'var(--text-on-accent)' } : {}),
           }}
-          title={busy ? t('ai.stopGen') : t('ai.send')}
+          title={busy ? t('ai.stopGen') : sendBtnLabel}
         >
-          {busy ? <Square size={14} strokeWidth={2.5} fill="currentColor" /> : t('ai.send')}
+          {busy ? <Square size={14} strokeWidth={2.5} fill="currentColor" /> : sendBtnLabel}
         </button>
       </div>
     </div>
   );
 }
+

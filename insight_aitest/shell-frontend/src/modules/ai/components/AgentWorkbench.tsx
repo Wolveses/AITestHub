@@ -18,12 +18,19 @@ import { ThinkingPanel } from './ThinkingPanel';
 import { ThinkingLevelControl, type ThinkingLevel } from './ThinkingLevelControl';
 import { KbToggle } from './KbToggle';
 import { ModelPicker } from './ModelPicker';
+import { WorkModeSelector } from './WorkModeSelector';
 import { glassInputBar, text, SPRING, RADIUS } from './agentStyles';
 import { RotateCcw } from 'lucide-react';
 import agentAvatarDefault from '../../../assets/agent-avatar.jpg';
 
 export function AgentWorkbench() {
-  const { messages, phase, phaseMessage, streamingThinking, streamingMessage, resetConversation, stopStreaming, thinkingLevel, setThinkingLevel, kbMode, setKbMode, selectedDocIds, setSelectedDocIds } = useTaskStore();
+  const {
+    messages, phase, phaseMessage, streamingThinking, streamingMessage,
+    resetConversation, stopStreaming, thinkingLevel, setThinkingLevel,
+    kbMode, setKbMode, selectedDocIds, setSelectedDocIds,
+    workMode, setWorkMode,
+  } = useTaskStore();
+
   const agentName = useAgentProfileStore((s) => s.name);
   const agentAvatar = useAgentProfileStore((s) => s.avatar);
   const avatarSrc = agentAvatar ?? agentAvatarDefault;
@@ -104,21 +111,29 @@ export function AgentWorkbench() {
       {/* 浮动输入栏（Spotlight 风格，悬浮在对话区上方） */}
       <div style={{ padding: '0 24px 16px' }}>
         <div style={{ maxWidth: 720, margin: '0 auto' }}>
-          {/* 思考级别 + 知识库检索 + 模型切换控制（输入栏上方） */}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginBottom: 6 }}>
-            <ModelPicker size="sm" />
-            <KbToggle
-              mode={kbMode}
-              onModeChange={setKbMode}
-              selectedDocIds={selectedDocIds}
-              onDocIdsChange={setSelectedDocIds}
+          {/* 模式选择 + 思考级别 + 知识库检索 + 模型切换控制（输入栏上方） */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+            <WorkModeSelector
+              value={workMode}
+              onChange={setWorkMode}
+              disabled={busy}
             />
-            <ThinkingLevelControl
-              value={thinkingLevel}
-              onChange={(lv: ThinkingLevel) => setThinkingLevel(lv)}
-              size="sm"
-            />
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <ModelPicker size="sm" />
+              <KbToggle
+                mode={kbMode}
+                onModeChange={setKbMode}
+                selectedDocIds={selectedDocIds}
+                onDocIdsChange={setSelectedDocIds}
+              />
+              <ThinkingLevelControl
+                value={thinkingLevel}
+                onChange={(lv: ThinkingLevel) => setThinkingLevel(lv)}
+                size="sm"
+              />
+            </div>
           </div>
+
           <div style={{ ...glassInputBar, padding: 12 }}>
             <AgentInput />
           </div>
