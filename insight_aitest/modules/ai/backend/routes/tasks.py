@@ -448,6 +448,17 @@ async def create_task(
         context = planner.understand(body.intent, uploaded_files)
         context["document_ids"] = body.document_ids or []
         context["project_id"] = body.project_id
+
+        if not context.get("is_actionable", True):
+            guidance = (
+                context.get("guidance")
+                or "您好！当前处于任务模式。请提供具体的功能需求、接口说明，或上传 PRD/接口文档，以便我为您规划测试策略并生成用例；如果您只想咨询或交流，也可以切换到「💬 对话」模式。"
+            )
+            db.update_task_context(task_id, context, status=TaskStatus.DONE)
+            db.update_task_strategies(task_id, [], status=TaskStatus.DONE)
+            db.add_message(conv_id, Role.ASSISTANT, guidance, task_id=task_id)
+            return _task_to_out(db.get_task(task_id))
+
         db.update_task_context(task_id, context, status=TaskStatus.STRATEGIZING)
 
         # 持久化理解结果消息
@@ -578,6 +589,22 @@ async def create_task_stream(
                     return
             context["document_ids"] = body.document_ids or []
             context["project_id"] = body.project_id
+
+            # 意图分析：若用户输入仅为问候/寒暄或严重缺乏被测内容，友好引导，不进入策略生成
+            if not context.get("is_actionable", True):
+                guidance = (
+                    context.get("guidance")
+                    or "您好！当前处于任务模式。请提供具体的功能需求、接口说明，或上传 PRD/接口文档，以便我为您规划测试策略并生成用例；如果您只想咨询或交流，也可以切换到「💬 对话」模式。"
+                )
+                db.update_task_context(task_id, context, status=TaskStatus.DONE)
+                db.update_task_strategies(task_id, [], status=TaskStatus.DONE)
+                db.add_message(conv_id, Role.ASSISTANT, guidance, task_id=task_id)
+                asyncio.run_coroutine_threadsafe(
+                    queue.put(("guidance", "guidance", {"text": guidance})), loop
+                ).result()
+                asyncio.run_coroutine_threadsafe(queue.put(SENTINEL), loop).result()
+                return
+
             db.update_task_context(task_id, context, status=TaskStatus.STRATEGIZING)
 
             # 持久化理解结果消息
@@ -647,6 +674,9 @@ async def create_task_stream(
                     yield _task_sse("error", {"message": msg})
                     return
                 stage, kind, data = item
+                if stage == "guidance":
+                    yield _task_sse("guidance", data)
+                    continue
                 # 进入策略阶段时推一次 phase 事件
                 if stage == "strategize" and not in_strategize:
                     in_strategize = True
@@ -666,6 +696,7 @@ async def create_task_stream(
                     yield _task_sse("error", {"message": str(data)})
                     return
             yield _task_sse("done", {"task": _task_to_out(db.get_task(task_id)).model_dump()})
+
         except Exception as e:
             # 兜底异常同样删除失败任务
             db.delete_task(task_id)
@@ -679,13 +710,17 @@ async def create_task_stream(
 class AgentChatRequest(BaseModel):
     """Agent 工作台轻对话模式请求。
 
-    task_id 非 None 时接入消息持久化：加载历史 + 写入 user/assistant 消息。
+    task_id 非 None 或 conversation_id 非 None 时接入消息持久化：加载历史 + 写入 user/assistant 消息。
     """
 
     message: str
     thinking_level: str | None = None
     task_id: int | None = None
+    conversation_id: int | None = None
     history_turns: int = 6
+    use_kb: bool = False
+    document_ids: list[int] | None = None
+    project_id: int | None = None
 
 
 @router.post("/chat")
@@ -703,7 +738,7 @@ async def agent_chat(
 
     task_id 非 None 时接入消息持久化：加载历史消息 + 写入 user/assistant 消息，
     让 agent 在用户反馈时有上下文记忆（修复缺陷2 反馈失忆）。
-    task_id 为 None 时退化为原行为：纯流式回复，不写 DB。
+    task_id 为 None 时若有 conversation_id 则持久化到该会话，否则新建会话持久化。
 
     用 LLMClient.stream_chat_raw 直接流式（带 reasoning），系统提示用 Agent 人设。
     """
@@ -711,8 +746,8 @@ async def agent_chat(
     if thinking_level not in ("off", "low", "medium", "high"):
         thinking_level = "off"
 
-    # task_id 非 None：加载历史 + 持久化 user/assistant 消息
-    conv_id: int | None = None
+    # task_id 非 None 或 conversation_id 非 None：加载历史 + 持久化 user/assistant 消息
+    conv_id: int | None = body.conversation_id
     history_msgs: list[dict] = []
     has_task_context = False
     if body.task_id is not None:
@@ -727,7 +762,7 @@ async def agent_chat(
                 # 向后兼容：旧 task 无 conversation_id，懒惰创建
                 conv_id = db.create_conversation(
                     title=task.intent[:20] if task.intent else "任务对话",
-                    project_id=task.project_id,
+                    project_id=task.project_id or body.project_id,
                 )
                 with session_scope(db.db_path) as s:
                     t = s.get(Task, body.task_id)
@@ -803,6 +838,45 @@ async def agent_chat(
 
             # 持久化 user 消息（在 LLM 调用前）
             db.add_message(conv_id, Role.USER, body.message, task_id=body.task_id)
+    elif conv_id is not None:
+        conv = db.get_conversation(conv_id)
+        if conv is not None:
+            history = db.list_messages_by_turns(conv_id, turns=body.history_turns)
+            for m in history:
+                history_msgs.append({"role": m.role.value, "content": m.content})
+            db.add_message(conv_id, Role.USER, body.message)
+        else:
+            conv_id = db.create_conversation(
+                title=body.message[:25] if body.message else "AI 对话",
+                project_id=body.project_id,
+            )
+            db.add_message(conv_id, Role.USER, body.message)
+    else:
+        conv_id = db.create_conversation(
+            title=body.message[:25] if body.message else "AI 对话",
+            project_id=body.project_id,
+        )
+        db.add_message(conv_id, Role.USER, body.message)
+
+    # 知识库检索支持
+    if body.use_kb:
+        try:
+            from insight_aitest.modules.ai.backend.deps import get_retriever
+
+            retriever = get_retriever()
+            scored = retriever.retrieve(
+                body.message,
+                document_ids=body.document_ids,
+                project_id=body.project_id,
+            )
+            if scored:
+                chunks = [(s.document.filename, s.chunk.text) for s in scored[:5]]
+                ref_parts = ["【参考资料（知识库）】"]
+                for i, (fn, text) in enumerate(chunks, 1):
+                    ref_parts.append(f"[{i}] （来源：{fn}）\n{text[:300]}")
+                history_msgs.insert(0, {"role": "system", "content": "\n".join(ref_parts)})
+        except Exception as e:
+            logger.warning("[AI Chat] 知识库检索失败，降级为普通对话: %s", e)
 
     # 构造 LLM 消息列表：[system] + history + [user]
     system_msg = build_agent_chat_message(has_task_context=has_task_context)
@@ -853,15 +927,16 @@ async def agent_chat(
                     yield _task_sse("thinking", {"text": text})
                 else:
                     yield _task_sse("token", {"text": text})
-            # 流式结束：持久化 assistant 消息（仅 task_id 模式且有内容）
+            # 流式结束：持久化 assistant 消息（仅 conv_id 存在且有内容）
             answer = "".join(full_answer_holder).strip()
-            if body.task_id is not None and conv_id is not None and answer:
+            if conv_id is not None and answer:
                 db.add_message(conv_id, Role.ASSISTANT, answer, task_id=body.task_id)
-            yield _task_sse("done", {})
+            yield _task_sse("done", {"conversation_id": conv_id})
         except Exception as e:
             yield _task_sse("error", {"message": str(e)})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
 
 
 @router.post("/{task_id}/select", response_model=TaskOut)

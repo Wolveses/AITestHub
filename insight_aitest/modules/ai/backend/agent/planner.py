@@ -46,17 +46,27 @@ _PLAN_PROMPT = """你是一个资深测试 Agent 的规划器。用户给了你�
 [{{"skill": "skill_id", "desc": "步骤描述", "params": {{...}}}}]"""
 
 
-_UNDERSTAND_PROMPT = """你是一个资深测试 Agent。用户给了你一个测试任务，并上传了相关文档。请阅读以下材料，理解测试范围。
+_UNDERSTAND_PROMPT = """你是一个资深测试 Agent。用户给了你一个测试任务，并上传了相关文档（也可能未上传文档）。请阅读以下材料，首先分析用户意图，再理解测试范围。
 
 用户意图：{intent}
 
 上传的文档内容：
 {documents}
 
+意图分类规则：
+1. greeting_or_empty: 用户输入仅为日常问候（如"你好"、"hi"、"在吗"、"早上好"）、礼貌用语、无意义字符或空泛寒暄，且没有上传有效需求文档。此时无法执行测试任务。
+2. case_generate: 用户希望基于输入的需求或上传的文档生成测试用例（功能用例、接口用例、UI用例等）。
+3. case_review: 用户提供了已有的测试用例，希望进行用例评审、质量分析、补充边界或优化建议。
+4. test_execute: 用户希望执行接口测试、UI测试或自动化测试套件。
+5. other: 其它明确的测试相关任务。
+
 请分析并输出一个 JSON 对象（不要额外解释）：
 {{
-  "summary": "用2-3句话总结你理解的测试范围",
-  "scope": ["测试范围1", "测试范围2", "测试范围3"],
+  "intent_type": "greeting_or_empty" | "case_generate" | "case_review" | "test_execute" | "other",
+  "is_actionable": true或false, // 当 intent_type 为 greeting_or_empty 或严重缺少被测目标时必须为 false；有明确测试任务目标时为 true
+  "summary": "用2-3句话总结你理解的测试范围；若 is_actionable 为 false，则简明说明未提供具体的测试需求",
+  "guidance": "当 is_actionable 为 false 时，给出友好的引导话术，提示用户提供功能需求、接口描述或上传 PRD/API 文档，并提示如果只想咨询或交流可切换至「对话模式」；若 is_actionable 为 true 则填空字符串''",
+  "scope": ["测试范围1", "测试范围2", "测试范围3"], // 若不可执行则为 []
   "doc_types": {{
     "has_prd": true或false,
     "has_api_doc": true或false,
@@ -68,6 +78,7 @@ _UNDERSTAND_PROMPT = """你是一个资深测试 Agent。用户给了你一个�
     "ui_test": "若缺少UI截图/设计稿，说明'需要UI截图或设计稿才能生成UI测试用例'；若不缺则填''"
   }}
 }}"""
+
 
 
 _STRATEGY_PROMPT = """你是一个资深测试 Agent。基于以下测试需求理解，提出 3-4 个测试策略选项让用户选择。
@@ -113,6 +124,70 @@ class Planner:
         self.llm = llm
         self.config = config
 
+    def _build_understand_result(
+        self, data: dict | None, intent: str, documents: list[dict]
+    ) -> dict:
+        has_real_docs = any(
+            d.get("content") and len(d["content"].strip()) > 10 for d in documents
+        )
+        intent_lower = intent.strip().lower()
+        is_simple_greeting = (
+            intent_lower in ("你好", "您好", "hi", "hello", "在吗", "嗨", "halo", "早上好", "晚上好", "下午好")
+            and not has_real_docs
+        )
+
+
+        default_guidance = (
+            "您好！当前处于任务模式。请提供具体的功能需求、接口说明，或上传 PRD/接口文档，"
+            "以便我为您规划测试策略并生成用例；如果您只想咨询或交流，也可以切换到「💬 对话」模式。"
+        )
+
+        if not data or not isinstance(data, dict):
+            if is_simple_greeting:
+                return {
+                    "intent_type": "greeting_or_empty",
+                    "is_actionable": False,
+                    "guidance": default_guidance,
+                    "summary": "用户未提供具体测试需求（问候内容）",
+                    "scope": [],
+                    "doc_types": {},
+                    "missing_for": {},
+                }
+            return {
+                "intent_type": "case_generate",
+                "is_actionable": True,
+                "guidance": "",
+                "summary": intent,
+                "scope": [intent],
+                "doc_types": {},
+                "missing_for": {},
+            }
+
+        intent_type = str(data.get("intent_type", "case_generate")).strip()
+        is_actionable = bool(data.get("is_actionable", True))
+
+        if is_simple_greeting:
+            intent_type = "greeting_or_empty"
+            is_actionable = False
+
+        guidance = data.get("guidance", "")
+        if not is_actionable and not guidance:
+            guidance = default_guidance
+
+        return {
+            "intent_type": intent_type,
+            "is_actionable": is_actionable,
+            "guidance": guidance,
+            "summary": data.get("summary", intent),
+            "scope": data.get("scope", []) if isinstance(data.get("scope"), list) else [],
+            "doc_types": (
+                data.get("doc_types", {}) if isinstance(data.get("doc_types"), dict) else {}
+            ),
+            "missing_for": (
+                data.get("missing_for", {}) if isinstance(data.get("missing_for"), dict) else {}
+            ),
+        }
+
     # ===== 阶段 A：理解 =====
 
     def understand(self, intent: str, documents: list[dict]) -> dict:
@@ -130,20 +205,7 @@ class Planner:
         raw = self.llm.chat([{"role": "user", "content": prompt}])
         data = _extract_json(raw)
 
-        if not data or not isinstance(data, dict):
-            # 降级：直接用 intent 作为摘要
-            return {"summary": intent, "scope": [intent], "doc_types": {}, "missing_for": {}}
-
-        return {
-            "summary": data.get("summary", intent),
-            "scope": data.get("scope", []) if isinstance(data.get("scope"), list) else [],
-            "doc_types": (
-                data.get("doc_types", {}) if isinstance(data.get("doc_types"), dict) else {}
-            ),
-            "missing_for": (
-                data.get("missing_for", {}) if isinstance(data.get("missing_for"), dict) else {}
-            ),
-        }
+        return self._build_understand_result(data, intent, documents)
 
     # ===== 阶段 B：策略生成 =====
 
@@ -151,6 +213,9 @@ class Planner:
         self, context: dict, document_ids: list[int] | None = None
     ) -> list[dict]:
         """基于理解摘要 → 测试策略选项（现在注入文档类型和能力限制）。"""
+        if not context.get("is_actionable", True):
+            return []
+
         summary = context.get("summary", "")
         scope = context.get("scope", [])
         scope_text = "、".join(scope) if scope else "未明确"
@@ -312,22 +377,9 @@ class Planner:
                 yield ("error", "模型返回空回复，请重试")
                 return
             data = _extract_json(raw)
-            if not data or not isinstance(data, dict):
-                result = {"summary": intent, "scope": [intent], "doc_types": {}, "missing_for": {}}
-            else:
-                result = {
-                    "summary": data.get("summary", intent),
-                    "scope": data.get("scope", []) if isinstance(data.get("scope"), list) else [],
-                    "doc_types": (
-                        data.get("doc_types", {}) if isinstance(data.get("doc_types"), dict) else {}
-                    ),
-                    "missing_for": (
-                        data.get("missing_for", {})
-                        if isinstance(data.get("missing_for"), dict)
-                        else {}
-                    ),
-                }
+            result = self._build_understand_result(data, intent, documents)
             yield ("result", result)
+
         except Exception as e:
             yield ("error", str(e))
 
@@ -335,6 +387,10 @@ class Planner:
         self, context: dict, thinking_level: str = "off", document_ids: list[int] | None = None
     ) -> Iterator[tuple[str, object]]:
         """流式策略生成：yield (kind, data)。同 understand_stream 结构。"""
+        if not context.get("is_actionable", True):
+            yield ("result", [])
+            return
+
         summary = context.get("summary", "")
         scope = context.get("scope", [])
         scope_text = "、".join(scope) if scope else "未明确"

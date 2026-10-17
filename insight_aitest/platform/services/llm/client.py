@@ -441,8 +441,9 @@ class LLMClient:
             if not has_any:
                 raise LLMUnavailableError("模型流式返回为空，请重试或检查模型配置")
 
-            full_reasoning = "".join(collected_reasoning).strip()
-            full_content = "".join(collected_content).strip()
+            full_reasoning = "".join(str(c) for c in collected_reasoning).strip()
+            full_content = "".join(str(c) for c in collected_content).strip()
+
             log_parts = []
             if full_reasoning:
                 log_parts.append(
