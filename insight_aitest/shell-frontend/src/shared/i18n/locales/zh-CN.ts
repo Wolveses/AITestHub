@@ -879,7 +879,7 @@ export default {
       statusParsing: '解析中',
       statusChunking: '分块中',
       statusEmbedding: '向量化中',
-      statusReady: '就绪',
+      statusReady: '已入库',
       statusParseFailed: '解析失败',
       statusEmbedFailed: '向量化失败',
       statusEmbedPartial: '部分成功',
@@ -908,6 +908,7 @@ export default {
       movingDoc: '正在移动文档',
       targetFolder: '目标目录',
       rootFolderOption: '根目录（未分类）',
+      unassignedFolder: '未归属',
       uploadToFolderHint: '点击或拖拽文件上传到「{{folder}}」目录',
       // 加载/状态
       loadingContent: '加载内容中…',

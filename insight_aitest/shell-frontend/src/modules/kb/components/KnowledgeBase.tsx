@@ -328,6 +328,7 @@ export function KnowledgeBase() {
                 key={d.id}
                 doc={d}
                 folderPath={d.folder_id ? folderPathMap.get(d.folder_id) : undefined}
+                showFolderScope={currentFolderId === null}
                 onSelectFolder={setCurrentFolderId}
                 onDelete={deleteDocument}
                 onPreview={handlePreview}

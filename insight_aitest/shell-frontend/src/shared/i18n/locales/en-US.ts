@@ -879,7 +879,7 @@ export default {
       statusParsing: 'Parsing',
       statusChunking: 'Chunking',
       statusEmbedding: 'Embedding',
-      statusReady: 'Ready',
+      statusReady: 'Indexed',
       statusParseFailed: 'Parse failed',
       statusEmbedFailed: 'Embedding failed',
       statusEmbedPartial: 'Partial',
@@ -908,6 +908,7 @@ export default {
       movingDoc: 'Moving document',
       targetFolder: 'Target Folder',
       rootFolderOption: 'Root (Uncategorized)',
+      unassignedFolder: 'Unassigned',
       uploadToFolderHint: 'Click or drop files to upload into "{{folder}}"',
       // Loading/status
       loadingContent: 'Loading content…',

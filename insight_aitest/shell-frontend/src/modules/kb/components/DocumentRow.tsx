@@ -1,4 +1,4 @@
-import { FileText, Eye, Download, Tag as TagIcon, History, FolderInput } from 'lucide-react';
+import { FileText, Eye, Download, Tag as TagIcon, History, FolderInput, CheckCircle2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Document } from '../store/knowledgeStore';
 import { useConfirmStore } from '../../../shared/store/confirmStore';
@@ -19,7 +19,7 @@ const STATUS_COLOR: Record<string, string> = {
   parsing: "var(--accent)",
   chunking: "var(--accent)",
   embedding: "var(--accent)",
-  ready: 'var(--chart-4)',
+  ready: 'var(--success, #10b981)',
   parse_failed: 'var(--error)',
   embed_failed: 'var(--error)',
   embed_partial: 'var(--chart-3)',
@@ -36,6 +36,7 @@ const DOC_TYPE_KEY: Record<string, string> = {
 interface DocumentRowProps {
   doc: Document;
   folderPath?: { id: number; name: string }[];
+  showFolderScope?: boolean;
   onDelete: (id: number) => void;
   onPreview: (doc: Document) => void;
   onEditMeta: (doc: Document) => void;
@@ -47,6 +48,7 @@ interface DocumentRowProps {
 export function DocumentRow({
   doc,
   folderPath,
+  showFolderScope = false,
   onDelete,
   onPreview,
   onEditMeta,
@@ -74,51 +76,70 @@ export function DocumentRow({
           {doc.filename}
         </div>
         <div style={{ fontSize: 11, color: "var(--text-muted)", display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          {/* 所属目录面包屑标识：各级均可点击直接跳转 */}
-          {folderPath && folderPath.length > 0 && onSelectFolder && (
-            <span
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 2,
-                background: 'var(--bg-active, rgba(59, 130, 246, 0.08))',
-                color: 'var(--primary, #3b82f6)',
-                padding: '1px 6px',
-                borderRadius: 4,
-                fontSize: 11,
-                border: '1px solid rgba(59, 130, 246, 0.18)',
-              }}
-            >
-              <span style={{ marginRight: 2 }}>📁</span>
-              {folderPath.map((item, idx) => (
-                <span
-                  key={item.id}
-                  style={{ display: 'inline-flex', alignItems: 'center' }}
-                >
+          {/* 仅在「全部文档」视图下展示所属目录面包屑或未归属标识 */}
+          {showFolderScope && (
+            folderPath && folderPath.length > 0 && onSelectFolder ? (
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 2,
+                  background: 'var(--bg-active, rgba(59, 130, 246, 0.08))',
+                  color: 'var(--primary, #3b82f6)',
+                  padding: '1px 6px',
+                  borderRadius: 4,
+                  fontSize: 11,
+                  border: '1px solid rgba(59, 130, 246, 0.18)',
+                }}
+              >
+                <span style={{ marginRight: 2 }}>📁</span>
+                {folderPath.map((item, idx) => (
                   <span
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onSelectFolder(item.id);
-                    }}
-                    title={t('kb.jumpToFolder', '点击跳转到此目录')}
-                    style={{
-                      cursor: 'pointer',
-                      fontWeight: idx === folderPath.length - 1 ? 600 : 400,
-                      textDecoration: 'underline',
-                      textDecorationColor: 'transparent',
-                      transition: 'text-decoration-color 0.15s ease',
-                    }}
-                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.textDecorationColor = 'currentColor'; }}
-                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.textDecorationColor = 'transparent'; }}
+                    key={item.id}
+                    style={{ display: 'inline-flex', alignItems: 'center' }}
                   >
-                    {item.name}
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectFolder(item.id);
+                      }}
+                      title={t('kb.jumpToFolder', '点击跳转到此目录')}
+                      style={{
+                        cursor: 'pointer',
+                        fontWeight: idx === folderPath.length - 1 ? 600 : 400,
+                        textDecoration: 'underline',
+                        textDecorationColor: 'transparent',
+                        transition: 'text-decoration-color 0.15s ease',
+                      }}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.textDecorationColor = 'currentColor'; }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.textDecorationColor = 'transparent'; }}
+                    >
+                      {item.name}
+                    </span>
+                    {idx < folderPath.length - 1 && (
+                      <span style={{ margin: '0 3px', opacity: 0.5 }}>/</span>
+                    )}
                   </span>
-                  {idx < folderPath.length - 1 && (
-                    <span style={{ margin: '0 3px', opacity: 0.5 }}>/</span>
-                  )}
-                </span>
-              ))}
-            </span>
+                ))}
+              </span>
+            ) : (
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 3,
+                  background: 'var(--bg-elevated, rgba(148, 163, 184, 0.12))',
+                  color: 'var(--text-muted, #64748b)',
+                  padding: '1px 6px',
+                  borderRadius: 4,
+                  fontSize: 11,
+                  border: '1px solid var(--border-color, rgba(148, 163, 184, 0.2))',
+                }}
+                title={t('kb.unassignedFolder', '未归属')}
+              >
+                📁 {t('kb.unassignedFolder', '未归属')}
+              </span>
+            )
           )}
           {doc.status === 'ready' && <span>{t('kb.chunkCharCount', { chunks: doc.chunk_count, chars: doc.char_count })}</span>}
           {typeLabel && <span style={{ background: 'var(--bg-card)', padding: '0 5px', borderRadius: 3 }}>{typeLabel}</span>}
@@ -131,7 +152,20 @@ export function DocumentRow({
           {doc.description ? ` · ${doc.description}` : ''}
         </div>
       </div>
-      <span style={{ color: st.color, fontSize: 12, flexShrink: 0 }}>{st.text}</span>
+      <span
+        style={{
+          color: st.color,
+          fontSize: 12,
+          flexShrink: 0,
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          fontWeight: doc.status === 'ready' ? 500 : 400,
+        }}
+      >
+        {doc.status === 'ready' && <CheckCircle2 size={13} style={{ color: 'var(--success, #10b981)' }} />}
+        {st.text}
+      </span>
 
       {/* 操作按钮 */}
       <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
