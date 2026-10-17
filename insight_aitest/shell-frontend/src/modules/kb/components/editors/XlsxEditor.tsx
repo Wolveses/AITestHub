@@ -33,18 +33,19 @@ interface UniverApiLike {
   } | null;
 }
 interface UniverSnapshot {
-  sheets?: Record<string, { name?: string; cellData?: Record<string, { v?: unknown }> }>;
+  sheets?: Record<string, { name?: string; cellData?: Record<number, Record<number, { v?: unknown }>> | Record<string, { v?: unknown }> }>;
 }
 interface UniverSheetData {
   id: string;
   name: string;
-  cellData: Record<string, { v: unknown; t: number }>;
+  cellData: Record<number, Record<number, { v: unknown; t: number }>>;
   rowCount: number;
   columnCount: number;
 }
 interface UniverWorkbookData {
   id: string;
   name: string;
+  sheetOrder: string[];
   sheets: Record<string, UniverSheetData>;
 }
 
@@ -80,7 +81,7 @@ export function XlsxEditor({ url, filename, onSave, saving, readOnly = false }: 
           theme: defaultTheme,
           presets: [UniverSheetsCorePreset({ container: containerRef.current })],
         });
-        univerAPI.createWorkbook(workbookData);
+        univerAPI.createWorkbook(workbookData as any);
         univerRef.current = univer;
         apiRef.current = univerAPI;
 
@@ -108,21 +109,28 @@ export function XlsxEditor({ url, filename, onSave, saving, readOnly = false }: 
   /** SheetJS workbook → Univer IWorkbookData（桥接转换） */
   function xlsxToUniver(wb: XLSX.WorkBook, name: string): UniverWorkbookData {
     const sheets: UniverWorkbookData['sheets'] = {};
+    const sheetOrder: string[] = [];
+
     for (const sheetName of wb.SheetNames) {
       const ws = wb.Sheets[sheetName];
       const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
       const cellData: UniverSheetData['cellData'] = {};
+
       for (let r = range.s.r; r <= range.e.r; r++) {
         for (let c = range.s.c; c <= range.e.c; c++) {
           const addr = XLSX.utils.encode_cell({ r, c });
           const cell = ws[addr];
-          if (cell == null) continue;
-          cellData[`${r}_${c}`] = {
-            v: cell.v ?? '',
+          if (cell == null || cell.v == null) continue;
+          if (!cellData[r]) {
+            cellData[r] = {};
+          }
+          cellData[r][c] = {
+            v: cell.v,
             t: cell.t === 'n' ? 2 : cell.t === 'b' ? 3 : 1, // 1=string 2=number 3=boolean
           };
         }
       }
+
       sheets[sheetName] = {
         id: sheetName,
         name: sheetName,
@@ -130,10 +138,13 @@ export function XlsxEditor({ url, filename, onSave, saving, readOnly = false }: 
         rowCount: Math.max(range.e.r + 1, 20),
         columnCount: Math.max(range.e.c + 1, 10),
       };
+      sheetOrder.push(sheetName);
     }
+
     return {
       id: 'workbook-' + Date.now(),
       name,
+      sheetOrder,
       sheets,
     };
   }
@@ -145,16 +156,33 @@ export function XlsxEditor({ url, filename, onSave, saving, readOnly = false }: 
     const snapshot = (fWorkbook?.getSnapshot?.() || fWorkbook?.save?.() || null) as UniverSnapshot | null;
     const wb = XLSX.utils.book_new();
     const sheets = snapshot?.sheets || {};
+
     for (const [, sheetData] of Object.entries(sheets)) {
       const sd = sheetData;
       const aoa: unknown[][] = [];
       const cellData = sd.cellData || {};
-      for (const [key, cell] of Object.entries(cellData)) {
-        const [r, c] = key.split('_').map(Number);
+
+      for (const [rStr, cols] of Object.entries(cellData)) {
+        const r = Number(rStr);
+        if (isNaN(r) || !cols) continue;
         if (!aoa[r]) aoa[r] = [];
-        const cv = cell?.v;
-        aoa[r][c] = cv ?? '';
+
+        // 兼容嵌套对象格式 { [r]: { [c]: { v } } } 或历史平铺 key 格式
+        if (typeof cols === 'object' && cols !== null && !('v' in cols)) {
+          for (const [cStr, cell] of Object.entries(cols as Record<string, { v?: unknown }>)) {
+            const c = Number(cStr);
+            if (!isNaN(c)) {
+              aoa[r][c] = cell?.v ?? '';
+            }
+          }
+        } else {
+          // 备用：平铺 r_c key
+          const cell = cols as { v?: unknown };
+          aoa[r] = aoa[r] || [];
+          aoa[r][0] = cell?.v ?? '';
+        }
       }
+
       const ws = XLSX.utils.aoa_to_sheet(aoa);
       XLSX.utils.book_append_sheet(wb, ws, sd.name || 'Sheet');
     }
@@ -181,44 +209,43 @@ export function XlsxEditor({ url, filename, onSave, saving, readOnly = false }: 
     }
   };
 
-  if (loading) {
-    return (
-      <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-        <Loader2 size={16} className="animate-spin" /> {t('kb.loadXlsxEditor')}
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={{ padding: 24, textAlign: 'center', color: 'var(--error)', fontSize: 13 }}>
-        {error}
-        <br />
-        <a href={url} download style={{ color: 'var(--accent)', fontSize: 12, marginTop: 8, display: 'inline-block' }}>
-          {t('kb.downloadOriginalLocal')}
-        </a>
-      </div>
-    );
-  }
-
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ padding: '6px 12px', borderBottom: '1px solid var(--bg-card)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          {readOnly ? t('kb.xlsxReadOnlyHint') : t('kb.xlsxEditHint')}
-        </span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {!readOnly && (
-            <button onClick={handleSave} disabled={saving} style={btnStyle(saving)}>
-              {saving ? t('kb.saving') : t('kb.save')}
-            </button>
-          )}
-          <a href={url} download onClick={(e) => { e.preventDefault(); handleDownload(); }} style={{ ...btnStyle(false), textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <Download size={13} /> {t('kb.download')}
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
+      {loading && (
+        <div style={{ position: 'absolute', inset: 0, zIndex: 10, background: 'var(--bg-base)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--text-muted)', fontSize: 13 }}>
+          <Loader2 size={16} className="animate-spin" /> {t('kb.loadXlsxEditor')}
+        </div>
+      )}
+
+      {error ? (
+        <div style={{ padding: 24, textAlign: 'center', color: 'var(--error)', fontSize: 13 }}>
+          {error}
+          <br />
+          <a href={url} download style={{ color: 'var(--accent)', fontSize: 12, marginTop: 8, display: 'inline-block' }}>
+            {t('kb.downloadOriginalLocal')}
           </a>
         </div>
-      </div>
-      <div ref={containerRef} style={{ flex: 1, overflow: 'hidden' }} />
+      ) : (
+        <>
+          <div style={{ padding: '6px 12px', borderBottom: '1px solid var(--bg-card)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              {readOnly ? t('kb.xlsxReadOnlyHint') : t('kb.xlsxEditHint')}
+            </span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {!readOnly && (
+                <button onClick={handleSave} disabled={saving} style={btnStyle(saving)}>
+                  {saving ? t('kb.saving') : t('kb.save')}
+                </button>
+              )}
+              <a href={url} download onClick={(e) => { e.preventDefault(); handleDownload(); }} style={{ ...btnStyle(false), textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <Download size={13} /> {t('kb.download')}
+              </a>
+            </div>
+          </div>
+          {/* Univer 挂载容器：必须始终挂载，以便 init 能正常获取 DOM 节点 */}
+          <div ref={containerRef} style={{ flex: 1, overflow: 'hidden' }} />
+        </>
+      )}
     </div>
   );
 }

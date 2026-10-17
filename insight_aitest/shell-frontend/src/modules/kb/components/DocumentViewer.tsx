@@ -10,8 +10,9 @@ import { VersionHistory } from './VersionHistory';
 const PdfViewer = lazy(() => import('./editors/PdfViewer').then((m) => ({ default: m.PdfViewer })));
 const DocxEditor = lazy(() => import('./editors/DocxEditor').then((m) => ({ default: m.DocxEditor })));
 const XlsxEditor = lazy(() => import('./editors/XlsxEditor').then((m) => ({ default: m.XlsxEditor })));
-// 兼容旧只读查看器（docx mammoth 预览降级）
+// 兼容旧只读查看器（docx mammoth 预览降级，xlsx 表格预览）
 const DocxViewer = lazy(() => import('./editors/DocxViewer').then((m) => ({ default: m.DocxViewer })));
+const XlsxViewer = lazy(() => import('./editors/XlsxViewer').then((m) => ({ default: m.XlsxViewer })));
 
 type Mode = 'view' | 'edit';
 
@@ -246,7 +247,7 @@ function Viewer({ kind, doc, content, loadingContent }: {
   if (kind === 'xlsx') {
     return (
       <Suspense fallback={<LoadingText />}>
-        <XlsxEditorLazyReadOnly url={url} filename={doc.filename} />
+        <XlsxViewer url={url} filename={doc.filename} />
       </Suspense>
     );
   }
@@ -270,12 +271,5 @@ function Viewer({ kind, doc, content, loadingContent }: {
       <span>{t('kb.unsupportedFormatHint')}</span>
       <a href={url} download style={{ color: 'var(--accent)', fontSize: 12 }}>{t('kb.downloadOriginal')}</a>
     </div>
-  );
-}
-
-/** 只读模式的 XlsxEditor 包装（View 模式下复用 Univer 渲染） */
-function XlsxEditorLazyReadOnly({ url, filename }: { url: string; filename: string }) {
-  return (
-    <XlsxEditor url={url} filename={filename} onSave={async () => {}} saving={false} readOnly />
   );
 }

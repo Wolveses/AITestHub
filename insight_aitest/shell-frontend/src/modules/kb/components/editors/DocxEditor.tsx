@@ -41,10 +41,11 @@ export function DocxEditor({ url, filename, onSave, saving, readOnly = false }: 
     setError(null);
 
     // 动态导入 SuperDoc 核心包（懒加载，避免撑大首屏）
-    import('superdoc').then(({ SuperDoc }) => {
+    Promise.all([
+      import('superdoc'),
+      import('superdoc/style.css').catch(() => {}),
+    ]).then(([{ SuperDoc }]) => {
       if (destroyed || !containerRef.current) return;
-      // 引入样式
-      import('superdoc/style.css').catch(() => {});
 
       // 从 URL 加载 docx → File
       fetch(url)
@@ -111,49 +112,47 @@ export function DocxEditor({ url, filename, onSave, saving, readOnly = false }: 
     }
   };
 
-  if (loading) {
-    return (
-      <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-        <Loader2 size={16} className="animate-spin" /> {t('kb.loadDocxEditor')}
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={{ padding: 24, textAlign: 'center', color: 'var(--error)', fontSize: 13 }}>
-        {error}
-        <br />
-        <a href={url} download style={{ color: 'var(--accent)', fontSize: 12, marginTop: 8, display: 'inline-block' }}>
-          {t('kb.downloadOriginalLocal')}
-        </a>
-      </div>
-    );
-  }
-
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ padding: '6px 12px', borderBottom: '1px solid var(--bg-card)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          {readOnly ? t('kb.docxReadOnlyHint') : t('kb.docxEditHint')}
-        </span>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {!readOnly && (
-            <button
-              onClick={handleExport}
-              disabled={saving}
-              style={btnStyle(saving)}
-            >
-              {saving ? t('kb.saving') : t('kb.save')}
-            </button>
-          )}
-          <a href={url} download onClick={(e) => { e.preventDefault(); handleDownload(); }} style={{ ...btnStyle(false), textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <Download size={13} /> {t('kb.download')}
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
+      {loading && (
+        <div style={{ position: 'absolute', inset: 0, zIndex: 10, background: 'var(--bg-base)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--text-muted)', fontSize: 13 }}>
+          <Loader2 size={16} className="animate-spin" /> {t('kb.loadDocxEditor')}
+        </div>
+      )}
+
+      {error ? (
+        <div style={{ padding: 24, textAlign: 'center', color: 'var(--error)', fontSize: 13 }}>
+          {error}
+          <br />
+          <a href={url} download style={{ color: 'var(--accent)', fontSize: 12, marginTop: 8, display: 'inline-block' }}>
+            {t('kb.downloadOriginalLocal')}
           </a>
         </div>
-      </div>
-      {/* SuperDoc 挂载容器 */}
-      <div ref={containerRef} style={{ flex: 1, overflow: 'auto' }} />
+      ) : (
+        <>
+          <div style={{ padding: '6px 12px', borderBottom: '1px solid var(--bg-card)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              {readOnly ? t('kb.docxReadOnlyHint') : t('kb.docxEditHint')}
+            </span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {!readOnly && (
+                <button
+                  onClick={handleExport}
+                  disabled={saving}
+                  style={btnStyle(saving)}
+                >
+                  {saving ? t('kb.saving') : t('kb.save')}
+                </button>
+              )}
+              <a href={url} download onClick={(e) => { e.preventDefault(); handleDownload(); }} style={{ ...btnStyle(false), textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <Download size={13} /> {t('kb.download')}
+              </a>
+            </div>
+          </div>
+          {/* SuperDoc 挂载容器：必须始终挂载，以便 onReady 能完成初始化 */}
+          <div ref={containerRef} style={{ flex: 1, overflow: 'auto' }} />
+        </>
+      )}
     </div>
   );
 }
