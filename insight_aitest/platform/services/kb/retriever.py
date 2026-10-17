@@ -49,8 +49,17 @@ class Retriever:
         project_id: int | None = None,
         fallback: bool = True,
     ) -> list["ScoredChunk"]:
-        """三级降级检索：向量 → 关键词 → 原文。"""
+        """三级降级检索：向量 → 关键词 → 原文。
+        如果查询包含明确的 IP 地址等实体标识符，优先执行精确关键词匹配，确保专用实体不被泛化语义掩盖。
+        """
         k = top_k or self.config.top_k
+
+        # 检查是否包含明确的 IP 地址等高精度关键词标识
+        has_ip = bool(re.search(r"\b\d{1,3}(?:\.\d{1,3}){2,3}\b", query))
+        if has_ip:
+            kw_results = self._keyword_retrieve(query, k, document_ids, project_id)
+            if kw_results:
+                return kw_results
 
         # L1: 向量语义搜索
         results = self._vector_retrieve(query, k, document_ids, project_id)
@@ -165,13 +174,13 @@ class Retriever:
         document_ids: list[int] | None,
         project_id: int | None,
     ) -> list["ScoredChunk"]:
-        """SQL LIKE 关键词匹配。提取中文关键词逐个 LIKE 搜索。"""
+        """SQL LIKE 关键词匹配。提取关键词逐个 LIKE 搜索并按加权命中排序。"""
         if not query or not query.strip():
             return []
         if self.kb_db is None:
             return []
 
-        # 提取关键词（中文按2-4字切分 + 英文单词）
+        # 提取关键词
         keywords = self._extract_keywords(query)
         if not keywords:
             return []
@@ -180,29 +189,43 @@ class Retriever:
         from insight_aitest.platform.services.kb.models import Chunk, Document, ScoredChunk
         from sqlalchemy import or_
 
+        # 区分高优先级精准关键词（如完整 IP、纯英文数字实体）与普通分词
+        ips = [kw for kw in keywords if re.match(r"^\d{1,3}(?:\.\d{1,3}){2,3}$", kw)]
+
         with session_scope(self.kb_db.db_path) as s:
-            # 对每个关键词建 LIKE 条件
-            conditions = []
-            for kw in keywords[:8]:  # 最多8个关键词
-                conditions.append(Chunk.text.like(f"%{kw}%"))
-
-            stmt = s.query(Chunk, Document)
-            stmt = stmt.join(Document, Chunk.document_id == Document.id)
-            stmt = stmt.filter(or_(*conditions))
-
+            stmt = s.query(Chunk, Document).join(Document, Chunk.document_id == Document.id)
             if document_ids:
                 stmt = stmt.filter(Chunk.document_id.in_(document_ids))
             if project_id is not None:
                 stmt = stmt.filter(Document.project_id == project_id)
 
-            stmt = stmt.limit(k * 8)  # 多取一些再计分
+            # 如果存在精确 IP 关键词，直接优先按 IP 精确过滤召回
+            if ips:
+                ip_conds = [Chunk.text.like(f"%{ip}%") for ip in ips]
+                ip_rows = stmt.filter(or_(*ip_conds)).limit(k * 4).all()
+                if ip_rows:
+                    return [
+                        ScoredChunk(chunk=chunk, document=doc, score=0.98)
+                        for chunk, doc in ip_rows[:k]
+                    ]
+
+            # 普通关键词检索
+            conditions = [Chunk.text.like(f"%{kw}%") for kw in keywords[:8]]
+            stmt = stmt.filter(or_(*conditions))
+            stmt = stmt.limit(k * 8)
             rows = stmt.all()
 
-        # 按关键词命中数计分
+        # 按关键词命中数及关键词长度加权计分
         scored = []
         for chunk, doc in rows:
-            hit_count = sum(1 for kw in keywords if kw in (chunk.text or ""))
-            score = min(hit_count / max(len(keywords), 1), 0.95)  # 归一化到 [0, 0.95]
+            text = chunk.text or ""
+            # 计算命中得分
+            hit_score = 0.0
+            for kw in keywords:
+                if kw in text:
+                    # 较长关键词权重更高
+                    hit_score += len(kw)
+            score = min(hit_score / max(sum(len(kw) for kw in keywords), 1), 0.95)
             if score > 0:
                 scored.append(
                     ScoredChunk(
@@ -217,12 +240,15 @@ class Retriever:
 
     @staticmethod
     def _extract_keywords(text: str) -> list[str]:
-        """从查询文本提取关键词：中文2-4字片段 + 英文单词。"""
+        """从查询文本提取关键词：IP/点分数字 + 连续英文标识符 + 中文2-4字片段。"""
         keywords = []
-        # 英文单词
+        # 1. IP 地址 / 点分版本号等 (如 192.2.0.163)
+        ips = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){2,3}\b", text)
+        keywords.extend(ips)
+        # 2. 连续英文字母标识符（排除纯单字）
         eng_words = re.findall(r"[a-zA-Z_]{2,}", text)
         keywords.extend(eng_words)
-        # 中文：连续中文字符提取2-4字片段
+        # 3. 中文：连续中文字符提取2-4字片段
         chinese = re.findall(r"[\u4e00-\u9fff]{2,}", text)
         for seg in chinese:
             for l in (4, 3, 2):
