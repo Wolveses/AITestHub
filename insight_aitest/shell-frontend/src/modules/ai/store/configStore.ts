@@ -19,6 +19,7 @@ export interface AIConfig {
   vector_enabled: boolean;
   embed_base_url: string;
   embed_api_key_set: boolean;
+  max_upload_mb: number;
   // 多 Provider
   providers: ProviderOut[];
   active_provider_id: string;
@@ -42,6 +43,7 @@ export interface AIConfigUpdate {
   vector_enabled?: boolean;
   embed_base_url?: string;
   embed_api_key?: string;
+  max_upload_mb?: number;
 }
 
 /** 后端返回的 Provider（api_key 脱敏为 api_key_set）。 */

@@ -86,6 +86,7 @@ class ConfigOut(BaseModel):
     vector_enabled: bool
     embed_base_url: str
     embed_api_key_set: bool
+    max_upload_mb: int = 100
     # 多 Provider
     providers: list[ProviderOut] = []
     active_provider_id: str = ""
@@ -111,6 +112,7 @@ class ConfigUpdate(BaseModel):
     vector_enabled: bool | None = None
     embed_base_url: str | None = None
     embed_api_key: str | None = None
+    max_upload_mb: int | None = None
 
 
 class ProviderUpsert(BaseModel):
@@ -165,6 +167,7 @@ def _to_config_out(cfg: AIConfig) -> ConfigOut:
         vector_enabled=cfg.vector_enabled,
         embed_base_url=cfg.embed_base_url,
         embed_api_key_set=bool(cfg.embed_api_key),
+        max_upload_mb=cfg.max_upload_mb,
         providers=[_provider_to_out(p) for p in (cfg.providers or [])],
         active_provider_id=cfg.active_provider_id or "",
     )
@@ -206,6 +209,7 @@ async def update_config(body: ConfigUpdate, cfg: AIConfig = Depends(get_config))
         "vector_enabled",
         "embed_base_url",
         "embed_api_key",
+        "max_upload_mb",
     ):
         val = getattr(body, field)
         if val is not None:

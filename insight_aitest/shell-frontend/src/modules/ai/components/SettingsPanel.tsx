@@ -41,6 +41,8 @@ export function SettingsPanel() {
         vector_enabled: config.vector_enabled,
         embed_base_url: config.embed_base_url,
         embed_model: config.embed_model,
+        embed_api_key: '',
+        max_upload_mb: config.max_upload_mb ?? 100,
       });
       setVectorExpanded(config.vector_enabled);
     }
@@ -56,7 +58,11 @@ export function SettingsPanel() {
   const saveRag = async () => {
     setMsg(null);
     try {
-      await updateConfig({ ...form });
+      const payload = { ...form };
+      if (!payload.embed_api_key) {
+        delete payload.embed_api_key;
+      }
+      await updateConfig(payload);
       setMsg({ ok: true, text: t('settings.saved') });
     } catch (e) {
       setMsg({ ok: false, text: errorMessage(e, t('settings.saveFailed')) });
@@ -104,6 +110,12 @@ export function SettingsPanel() {
               onChange={(e) => set('embed_base_url', e.target.value)} />
           </Row>
 
+          <Row label={t('settings.embedApiKey')}>
+            <input style={inputStyle} type="password" value={form.embed_api_key ?? ''}
+              placeholder={config.embed_api_key_set ? t('settings.apiKeySet') : t('settings.embedApiKeyPlaceholder')}
+              onChange={(e) => set('embed_api_key', e.target.value)} />
+          </Row>
+
           <Row label={t('settings.vectorModel')}>
             <input style={inputStyle} value={form.embed_model ?? ''}
               onChange={(e) => set('embed_model', e.target.value)} />
@@ -121,6 +133,9 @@ export function SettingsPanel() {
           </Row>
           <Row label={t('settings.chunkOverlap')}>
             <NumInput value={form.chunk_overlap} onChange={(v) => set('chunk_overlap', v)} />
+          </Row>
+          <Row label={t('settings.maxUploadMb')}>
+            <NumInput value={form.max_upload_mb} onChange={(v) => set('max_upload_mb', v)} />
           </Row>
           <Row label={t('settings.topK')}>
             <NumInput value={form.top_k} onChange={(v) => set('top_k', v)} />
