@@ -246,7 +246,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   streamingThinking: null,
   streamingMessage: null,
   thinkingLevel: 'off',
-  kbMode: 'off',
+  kbMode: (localStorage.getItem('ai_kb_mode') as 'off' | 'auto' | 'manual') || 'auto',
   selectedDocIds: [],
   abortCtrl: null,
   review: {} as Record<number, ReviewState>,
@@ -266,7 +266,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   setThinkingLevel: (level) => set({ thinkingLevel: level }),
-  setKbMode: (mode) => set({ kbMode: mode }),
+  setKbMode: (mode) => {
+    localStorage.setItem('ai_kb_mode', mode);
+    set({ kbMode: mode });
+  },
   setSelectedDocIds: (ids) => set({ selectedDocIds: ids }),
 
   stopStreaming: () => {
