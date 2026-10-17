@@ -8,10 +8,10 @@ import { persist } from 'zustand/middleware';
  *   - 这是 UI 偏好，不进后端 LLMConfig（后者是 LLM 连接配置，语义不符）。
  *   - 头像以 base64 data URL 存储，客户端上传时压缩到 ≤256×256（约 < 50KB），localStorage 自包含。
  *
- * 默认名字「拾壹」，默认头像为 null（渲染时回退到静态资源 agent-avatar.jpg）。
+ * 默认名字「小阅」，默认头像为 null（渲染时回退到静态资源 agent-avatar.jpg）。
  */
 
-export const DEFAULT_AGENT_NAME = '拾壹';
+export const DEFAULT_AGENT_NAME = '小阅';
 const STORAGE_KEY = 'insight-eye-agent-profile';
 
 export interface AgentProfileState {
@@ -38,6 +38,12 @@ export const useAgentProfileStore = create<AgentProfileState>()(
       name: STORAGE_KEY,
       // 只持久化数据字段，不持久化 actions
       partialize: (s) => ({ name: s.name, avatar: s.avatar }),
+      onRehydrateStorage: () => (state) => {
+        // 如果本地旧数据默认存的是「拾壹」，自动迁移为「小阅」
+        if (state && (state.name === '拾壹' || !state.name)) {
+          state.name = DEFAULT_AGENT_NAME;
+        }
+      },
     },
   ),
 );
