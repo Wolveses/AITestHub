@@ -10,10 +10,20 @@ export interface Document {
   error_message: string | null;
   project_id: number | null;
   version_id: number | null;
+  folder_id: number | null;
   tags: string[];
   doc_type: string;
   description: string;
   created_at: string;
+}
+
+export interface FolderNode {
+  id: number;
+  name: string;
+  parent_id: number | null;
+  project_id: number | null;
+  children: FolderNode[];
+  doc_count: number;
 }
 
 export interface DocVersion {
@@ -34,11 +44,19 @@ export interface TagCount {
 
 interface KnowledgeState {
   documents: Document[];
+  folders: FolderNode[];
+  currentFolderId: number | null; // null 表示全部，0 表示根目录未分类
   uploading: boolean;
   saving: boolean;
   pollTimer: number | null;
   tags: TagCount[];
   loadDocuments: () => Promise<void>;
+  loadFolders: () => Promise<void>;
+  setCurrentFolderId: (folderId: number | null) => void;
+  createFolder: (name: string, parentId?: number | null) => Promise<void>;
+  updateFolder: (id: number, name?: string, parentId?: number | null) => Promise<void>;
+  deleteFolder: (id: number) => Promise<void>;
+  moveDocument: (docId: number, folderId: number | null) => Promise<void>;
   uploadDocument: (file: File) => Promise<void>;
   deleteDocument: (id: number) => void;
   startPolling: () => void;
@@ -57,20 +75,30 @@ interface KnowledgeState {
 }
 
 const BASE = '/api/modules/kb/documents';
+const FOLDERS_BASE = '/api/modules/kb/folders';
 
 const NON_TERMINAL = ['pending', 'parsing', 'chunking', 'embedding'];
 
-function projectQs(): string {
+function projectQs(extraParams?: Record<string, string | number | null | undefined>): string {
   const { currentProjectId, currentVersionId } = useProjectStore.getState();
   const params = new URLSearchParams();
   if (currentProjectId !== null) params.set('project_id', String(currentProjectId));
   if (currentVersionId !== null) params.set('version_id', String(currentVersionId));
+  if (extraParams) {
+    for (const [k, v] of Object.entries(extraParams)) {
+      if (v !== undefined && v !== null) {
+        params.set(k, String(v));
+      }
+    }
+  }
   const qs = params.toString();
   return qs ? `?${qs}` : '';
 }
 
 export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   documents: [],
+  folders: [],
+  currentFolderId: null,
   uploading: false,
   saving: false,
   pollTimer: null,
@@ -78,7 +106,12 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
 
   loadDocuments: async () => {
     try {
-      const qs = projectQs();
+      const { currentFolderId } = get();
+      const extra: Record<string, any> = {};
+      if (currentFolderId !== null) {
+        extra.folder_id = currentFolderId;
+      }
+      const qs = projectQs(extra);
       const r = await fetch(`${BASE}${qs}`);
       const docs = await r.json();
       set({ documents: docs });
@@ -93,10 +126,82 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
     }
   },
 
+  loadFolders: async () => {
+    try {
+      const qs = projectQs();
+      const r = await fetch(`${FOLDERS_BASE}${qs}`);
+      if (r.ok) {
+        const folders = await r.json();
+        set({ folders });
+      }
+    } catch {
+      /* 静默 */
+    }
+  },
+
+  setCurrentFolderId: (folderId: number | null) => {
+    set({ currentFolderId: folderId });
+    get().loadDocuments();
+  },
+
+  createFolder: async (name: string, parentId?: number | null) => {
+    const { currentProjectId } = useProjectStore.getState();
+    const r = await fetch(FOLDERS_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        parent_id: parentId ?? null,
+        project_id: currentProjectId ?? null,
+      }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await get().loadFolders();
+  },
+
+  updateFolder: async (id: number, name?: string, parentId?: number | null) => {
+    const body: Record<string, any> = {};
+    if (name !== undefined) body.name = name;
+    if (parentId !== undefined) body.parent_id = parentId;
+    const r = await fetch(`${FOLDERS_BASE}/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await get().loadFolders();
+  },
+
+  deleteFolder: async (id: number) => {
+    const r = await fetch(`${FOLDERS_BASE}/${id}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await r.text());
+    if (get().currentFolderId === id) {
+      set({ currentFolderId: null });
+    }
+    await get().loadFolders();
+    await get().loadDocuments();
+  },
+
+  moveDocument: async (docId: number, folderId: number | null) => {
+    const r = await fetch(`${BASE}/${docId}/move`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder_id: folderId }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await get().loadDocuments();
+    await get().loadFolders();
+  },
+
   uploadDocument: async (file: File) => {
     set({ uploading: true });
     try {
-      const qs = projectQs();
+      const { currentFolderId } = get();
+      const extra: Record<string, any> = {};
+      if (currentFolderId && currentFolderId > 0) {
+        extra.folder_id = currentFolderId;
+      }
+      const qs = projectQs(extra);
       const fd = new FormData();
       fd.append('file', file);
       const r = await fetch(`${BASE}${qs}`, { method: 'POST', body: fd });
@@ -105,6 +210,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
         throw new Error(msg);
       }
       await get().loadDocuments();
+      await get().loadFolders();
     } finally {
       set({ uploading: false });
     }
@@ -113,6 +219,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   deleteDocument: async (id: number) => {
     await fetch(`${BASE}/${id}`, { method: 'DELETE' });
     await get().loadDocuments();
+    await get().loadFolders();
   },
 
   startPolling: () => {

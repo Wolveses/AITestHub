@@ -4,8 +4,10 @@
 from fastapi import APIRouter
 
 from .documents import router as documents_router
+from .folders import router as folders_router
 
 router = APIRouter()
 router.include_router(documents_router)
+router.include_router(folders_router)
 
 __all__ = ["router"]

@@ -45,6 +45,7 @@ class DocumentOut(BaseModel):
     error_message: str | None
     project_id: int | None = None
     version_id: int | None = None
+    folder_id: int | None = None
     tags: list[str] = []
     doc_type: str = ""
     description: str = ""
@@ -68,6 +69,7 @@ class DocumentOut(BaseModel):
             error_message=doc.error_message,
             project_id=doc.project_id,
             version_id=doc.version_id,
+            folder_id=getattr(doc, "folder_id", None),
             tags=[str(t) for t in tags],
             doc_type=getattr(doc, "doc_type", "") or "",
             description=getattr(doc, "description", "") or "",
@@ -79,13 +81,33 @@ def _doc_to_out(doc) -> DocumentOut:
     return DocumentOut.from_doc(doc)
 
 
+class MoveDocumentIn(BaseModel):
+    folder_id: int | None = None
+
+
 @router.get("", response_model=list[DocumentOut])
 async def list_documents(
     project_id: int | None = None,
     version_id: int | None = None,
+    folder_id: int | None = None,
     db: KBDatabase = Depends(get_kb_db),
 ) -> list[DocumentOut]:
-    return [_doc_to_out(d) for d in db.list_documents(project_id=project_id, version_id=version_id)]
+    return [
+        _doc_to_out(d)
+        for d in db.list_documents(project_id=project_id, version_id=version_id, folder_id=folder_id)
+    ]
+
+
+@router.patch("/{doc_id}/move", response_model=DocumentOut)
+async def move_document(
+    doc_id: int,
+    body: MoveDocumentIn,
+    db: KBDatabase = Depends(get_kb_db),
+) -> DocumentOut:
+    ok = db.move_document(doc_id, body.folder_id)
+    if not ok:
+        raise HTTPException(404, "文档不存在")
+    return _doc_to_out(db.get_document(doc_id))
 
 
 @router.post("", response_model=DocumentOut)
@@ -93,6 +115,7 @@ async def upload_document(
     file: UploadFile,
     project_id: int | None = None,
     version_id: int | None = None,
+    folder_id: int | None = None,
     db: KBDatabase = Depends(get_kb_db),
     cfg: AIConfig = Depends(get_config),
 ) -> DocumentOut:
@@ -120,7 +143,7 @@ async def upload_document(
     storage_path = docs_dir / f"{uuid.uuid4().hex}{ext}"
     storage_path.write_bytes(content)
 
-    # 5. 入库（关联项目/版本）
+    # 5. 入库（关联项目/版本/文件夹）
     doc_id = db.create_document(
         file.filename,
         str(storage_path),
@@ -128,6 +151,7 @@ async def upload_document(
         file.content_type,
         project_id=project_id,
         version_id=version_id,
+        folder_id=folder_id,
     )
 
     # 6. 后台线程处理

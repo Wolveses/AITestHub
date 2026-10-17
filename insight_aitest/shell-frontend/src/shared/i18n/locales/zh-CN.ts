@@ -896,6 +896,19 @@ export default {
       typeTestDoc: '测试文档',
       // 编辑文档信息弹窗
       editDocInfo: '编辑文档信息',
+      // 目录与导航
+      directoryTitle: '目录导航',
+      allDocuments: '全部文档',
+      newRootFolder: '新建根目录',
+      newSubFolder: '新建子目录',
+      folderNamePlaceholder: '输入目录名…',
+      confirmDeleteFolder: '确定要删除该目录吗？其内部文档将移至未分类。',
+      moveToFolder: '移动到目录',
+      moveDocTitle: '移动文档',
+      movingDoc: '正在移动文档',
+      targetFolder: '目标目录',
+      rootFolderOption: '根目录（未分类）',
+      uploadToFolderHint: '点击或拖拽文件上传到「{{folder}}」目录',
       // 加载/状态
       loadingContent: '加载内容中…',
       loading: '加载中…',

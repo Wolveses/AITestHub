@@ -89,10 +89,34 @@ class Document(MappedAsDataclass, Base):
     content_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     version_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    folder_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     # KB 升级：标签与元数据（幂等补列，旧数据为空）
     tags: Mapped[str] = mapped_column(Text, default="")  # JSON 数组字符串
     doc_type: Mapped[str] = mapped_column(Text, default="")
     description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+
+
+class Folder(MappedAsDataclass, Base):
+    """知识库逻辑目录（文件夹）。
+    
+    层级目录树：通过 parent_id 自关联；
+    project_id：支持项目内独立目录或全局公共目录。
+    """
+
+    __tablename__ = "kb_folders"
+    __table_args__ = (
+        Index("idx_folders_parent", "parent_id"),
+        Index("idx_folders_project", "project_id"),
+    )
+
+    id: Mapped[int | None] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, default=None
+    )
+    name: Mapped[str] = mapped_column(Text, default="")
+    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
 

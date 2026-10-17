@@ -1,4 +1,4 @@
-import { FileText, Eye, Download, Tag as TagIcon, History } from 'lucide-react';
+import { FileText, Eye, Download, Tag as TagIcon, History, FolderInput } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Document } from '../store/knowledgeStore';
 import { useConfirmStore } from '../../../shared/store/confirmStore';
@@ -35,13 +35,25 @@ const DOC_TYPE_KEY: Record<string, string> = {
 
 interface DocumentRowProps {
   doc: Document;
+  folderPath?: { id: number; name: string }[];
   onDelete: (id: number) => void;
   onPreview: (doc: Document) => void;
   onEditMeta: (doc: Document) => void;
   onShowVersions: (doc: Document) => void;
+  onMove?: (doc: Document) => void;
+  onSelectFolder?: (folderId: number | null) => void;
 }
 
-export function DocumentRow({ doc, onDelete, onPreview, onEditMeta, onShowVersions }: DocumentRowProps) {
+export function DocumentRow({
+  doc,
+  folderPath,
+  onDelete,
+  onPreview,
+  onEditMeta,
+  onShowVersions,
+  onMove,
+  onSelectFolder,
+}: DocumentRowProps) {
   const { t } = useTranslation();
   const statusKey = STATUS_KEY[doc.status];
   const statusColor = STATUS_COLOR[doc.status] ?? "var(--text-secondary)";
@@ -62,6 +74,52 @@ export function DocumentRow({ doc, onDelete, onPreview, onEditMeta, onShowVersio
           {doc.filename}
         </div>
         <div style={{ fontSize: 11, color: "var(--text-muted)", display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          {/* 所属目录面包屑标识：各级均可点击直接跳转 */}
+          {folderPath && folderPath.length > 0 && onSelectFolder && (
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 2,
+                background: 'var(--bg-active, rgba(59, 130, 246, 0.08))',
+                color: 'var(--primary, #3b82f6)',
+                padding: '1px 6px',
+                borderRadius: 4,
+                fontSize: 11,
+                border: '1px solid rgba(59, 130, 246, 0.18)',
+              }}
+            >
+              <span style={{ marginRight: 2 }}>📁</span>
+              {folderPath.map((item, idx) => (
+                <span
+                  key={item.id}
+                  style={{ display: 'inline-flex', alignItems: 'center' }}
+                >
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelectFolder(item.id);
+                    }}
+                    title={t('kb.jumpToFolder', '点击跳转到此目录')}
+                    style={{
+                      cursor: 'pointer',
+                      fontWeight: idx === folderPath.length - 1 ? 600 : 400,
+                      textDecoration: 'underline',
+                      textDecorationColor: 'transparent',
+                      transition: 'text-decoration-color 0.15s ease',
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.textDecorationColor = 'currentColor'; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.textDecorationColor = 'transparent'; }}
+                  >
+                    {item.name}
+                  </span>
+                  {idx < folderPath.length - 1 && (
+                    <span style={{ margin: '0 3px', opacity: 0.5 }}>/</span>
+                  )}
+                </span>
+              ))}
+            </span>
+          )}
           {doc.status === 'ready' && <span>{t('kb.chunkCharCount', { chunks: doc.chunk_count, chars: doc.char_count })}</span>}
           {typeLabel && <span style={{ background: 'var(--bg-card)', padding: '0 5px', borderRadius: 3 }}>{typeLabel}</span>}
           {doc.tags?.length > 0 && (
@@ -89,6 +147,11 @@ export function DocumentRow({ doc, onDelete, onPreview, onEditMeta, onShowVersio
         <button onClick={() => onShowVersions(doc)} title={t('kb.versionHistory')} style={iconBtnStyle}>
           <History size={14} />
         </button>
+        {onMove && (
+          <button onClick={() => onMove(doc)} title={t('kb.moveToFolder', '移动到目录')} style={iconBtnStyle}>
+            <FolderInput size={14} />
+          </button>
+        )}
         <button
           onClick={() => confirm({
             title: t('kb.confirmDeleteTitle'),

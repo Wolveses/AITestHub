@@ -896,6 +896,19 @@ export default {
       typeTestDoc: 'Test doc',
       // Edit document info dialog
       editDocInfo: 'Edit document info',
+      // Directory & Navigation
+      directoryTitle: 'Directory',
+      allDocuments: 'All Documents',
+      newRootFolder: 'New root folder',
+      newSubFolder: 'New subfolder',
+      folderNamePlaceholder: 'Folder name…',
+      confirmDeleteFolder: 'Delete this folder? Its documents will be moved to uncategorized.',
+      moveToFolder: 'Move to folder',
+      moveDocTitle: 'Move Document',
+      movingDoc: 'Moving document',
+      targetFolder: 'Target Folder',
+      rootFolderOption: 'Root (Uncategorized)',
+      uploadToFolderHint: 'Click or drop files to upload into "{{folder}}"',
       // Loading/status
       loadingContent: 'Loading content…',
       loading: 'Loading…',

@@ -28,6 +28,7 @@ from insight_aitest.platform.services.kb.models import (
     DocumentStatus,
     DocumentVersion,
     EmbedStatus,
+    Folder,
 )
 
 
@@ -62,6 +63,8 @@ def _ensure_document_meta_columns(db_path: str) -> None:
             conn.execute("ALTER TABLE documents ADD COLUMN doc_type TEXT DEFAULT ''")
         if "description" not in cols:
             conn.execute("ALTER TABLE documents ADD COLUMN description TEXT DEFAULT ''")
+        if "folder_id" not in cols:
+            conn.execute("ALTER TABLE documents ADD COLUMN folder_id INTEGER")
         conn.commit()
 
 
@@ -72,14 +75,14 @@ class KBDatabase:
         self._local = threading.local()  # vec0 原生连接仍用线程本地（ORM 通道另走 session_scope）
         self._vec_available: bool = False
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-        # documents/chunks/document_versions 建 ORM 表（IF NOT EXISTS，存量表不动；只建本模块表）
+        # documents/chunks/document_versions/kb_folders 建 ORM 表（IF NOT EXISTS，存量表不动；只建本模块表）
         Base.metadata.create_all(
             get_engine(db_path),
-            tables=[Document.__table__, Chunk.__table__, DocumentVersion.__table__],
+            tables=[Document.__table__, Chunk.__table__, DocumentVersion.__table__, Folder.__table__],
         )
         # 增量迁移：旧 documents 表补 project_id/version_id 列（幂等）
         _ensure_project_columns(db_path)
-        # 增量迁移：documents 表补 tags/doc_type/description 列（KB 升级，幂等）
+        # 增量迁移：documents 表补 tags/doc_type/description/folder_id 列（KB 升级，幂等）
         _ensure_document_meta_columns(db_path)
         # vec0 扩展加载：仅扩展加载/建表失败时降级（缺可选依赖）。
         # 维度不一致（ValueError）是数据完整性错误，必须抛出。
@@ -167,6 +170,7 @@ class KBDatabase:
         mime_type: str | None,
         project_id: int | None = None,
         version_id: int | None = None,
+        folder_id: int | None = None,
     ) -> int:
         with session_scope(self.db_path) as s:
             d = Document(
@@ -176,6 +180,7 @@ class KBDatabase:
                 mime_type=mime_type,
                 project_id=project_id,
                 version_id=version_id,
+                folder_id=folder_id,
             )
             s.add(d)
             s.flush()
@@ -190,6 +195,7 @@ class KBDatabase:
         status_filter: str | None = None,
         project_id: int | None = None,
         version_id: int | None = None,
+        folder_id: int | None = None,
     ) -> list[Document]:
         stmt = select(Document)
         if status_filter:
@@ -198,9 +204,104 @@ class KBDatabase:
             stmt = stmt.where(Document.project_id == project_id)
         if version_id is not None:
             stmt = stmt.where(Document.version_id == version_id)
+        if folder_id is not None:
+            if folder_id == 0:  # 0 表示未分类/根目录
+                stmt = stmt.where(Document.folder_id.is_(None))
+            else:
+                stmt = stmt.where(Document.folder_id == folder_id)
         stmt = stmt.order_by(Document.created_at.desc())
         with session_scope(self.db_path) as s:
             return list(s.scalars(stmt))
+
+    def move_document(self, doc_id: int, folder_id: int | None) -> bool:
+        """移动文档到指定文件夹（None 或 0 表示移到根目录）。"""
+        actual_folder_id = None if (folder_id is None or folder_id == 0) else folder_id
+        with session_scope(self.db_path) as s:
+            d = s.get(Document, doc_id)
+            if d is None:
+                return False
+            d.folder_id = actual_folder_id
+            d.updated_at = datetime.now()
+            return True
+
+    # ===== 文件夹目录（Folder）CRUD =====
+
+    def create_folder(
+        self,
+        name: str,
+        parent_id: int | None = None,
+        project_id: int | None = None,
+    ) -> Folder:
+        with session_scope(self.db_path) as s:
+            f = Folder(
+                name=name.strip(),
+                parent_id=parent_id if parent_id and parent_id > 0 else None,
+                project_id=project_id,
+            )
+            s.add(f)
+            s.flush()
+            return Folder(
+                id=f.id,
+                name=f.name,
+                parent_id=f.parent_id,
+                project_id=f.project_id,
+                created_at=f.created_at,
+                updated_at=f.updated_at,
+            )
+
+    def list_folders(self, project_id: int | None = None) -> list[Folder]:
+        stmt = select(Folder)
+        if project_id is not None:
+            stmt = stmt.where(Folder.project_id == project_id)
+        stmt = stmt.order_by(Folder.name.asc())
+        with session_scope(self.db_path) as s:
+            return [
+                Folder(
+                    id=f.id,
+                    name=f.name,
+                    parent_id=f.parent_id,
+                    project_id=f.project_id,
+                    created_at=f.created_at,
+                    updated_at=f.updated_at,
+                )
+                for f in s.scalars(stmt)
+            ]
+
+    def update_folder(
+        self,
+        folder_id: int,
+        name: str | None = None,
+        parent_id: int | None = -1,  # -1 表示不修改
+    ) -> bool:
+        with session_scope(self.db_path) as s:
+            f = s.get(Folder, folder_id)
+            if f is None:
+                return False
+            if name is not None:
+                f.name = name.strip()
+            if parent_id != -1:
+                f.parent_id = None if (parent_id is None or parent_id <= 0) else parent_id
+            f.updated_at = datetime.now()
+            return True
+
+    def delete_folder(self, folder_id: int) -> bool:
+        """删除文件夹：将其下文档的 folder_id 重置为 NULL，子文件夹 parent_id 重置为 NULL 后删除。"""
+        with session_scope(self.db_path) as s:
+            f = s.get(Folder, folder_id)
+            if f is None:
+                return False
+            # 1. 解除直属文档的归属
+            from sqlalchemy import update
+            s.execute(
+                update(Document).where(Document.folder_id == folder_id).values(folder_id=None)
+            )
+            # 2. 解除子文件夹的 parent_id
+            s.execute(
+                update(Folder).where(Folder.parent_id == folder_id).values(parent_id=None)
+            )
+            # 3. 删除文件夹
+            s.delete(f)
+            return True
 
     def count_by_project(self, project_id: int | None) -> int:
         """统计某项目下的文档数（project_id=None 统计未分类）。"""
