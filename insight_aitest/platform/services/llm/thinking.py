@@ -38,7 +38,7 @@ _REASONING_MODEL_PATTERNS = [
     re.compile(r"deepseek.*reason", re.IGNORECASE),
     # 通义 QwQ / Qwen 推理
     re.compile(r"qwq", re.IGNORECASE),
-    re.compile(r"qwen.*think", re.IGNORECASE),
+    re.compile(r"qwen", re.IGNORECASE),
     # Claude thinking
     re.compile(r"claude.*think", re.IGNORECASE),
     # 通用后缀
@@ -82,12 +82,20 @@ def _is_openai_reasoning(model: str) -> bool:
     return bool(re.match(r"^(o1|o3|o4|gpt-5)", model, re.IGNORECASE))
 
 
-def _is_glm_reasoning(model: str) -> bool:
-    """智谱 GLM thinking 系列（用 thinking={"type":"enabled"}）。"""
-    return bool(
-        re.search(r"glm.*think", model, re.IGNORECASE)
-        or re.match(r"glm-4\.[56]", model, re.IGNORECASE)
-    )
+# 通义 Qwen 系列思考档位对应的 Token 预算
+_QWEN_BUDGET_MAP = {
+    "low": 1024,
+    "medium": 4096,
+    "high": 8192,
+}
+
+
+def _is_qwen_reasoning(model: str) -> bool:
+    """通义千问 Qwen 系列（DashScope / 百炼兼容 API）：支持 enable_thinking 与 thinking_budget。"""
+    # 纯原生推理模型（如 qwq、-r1）不接受 enable_thinking 参数
+    if _is_native_reasoning(model):
+        return False
+    return bool(re.search(r"qwen", model, re.IGNORECASE))
 
 
 def resolve_thinking_params(model: str, level: ThinkingLevel = "off") -> dict:
@@ -96,6 +104,13 @@ def resolve_thinking_params(model: str, level: ThinkingLevel = "off") -> dict:
     返回 {} 表示不注入任何参数（普通模型 / level=off / 原生推理模型）。
     调用方：kwargs.update(resolve_thinking_params(model, level))。
     """
+    # 通义 Qwen 系列（百炼/DashScope）：显式支持 enable_thinking 开关与 thinking_budget
+    if _is_qwen_reasoning(model):
+        if not level or level == "off":
+            return {"extra_body": {"enable_thinking": False}}
+        budget = _QWEN_BUDGET_MAP.get(level, 4096)
+        return {"extra_body": {"enable_thinking": True, "thinking_budget": budget}}
+
     if not level or level == "off":
         return {}
 

@@ -344,7 +344,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   // 对话模式管道：调用 /api/modules/ai/tasks/chat（流式问答+思维链，不生成测试用例）
   _sendChat: async (text: string, uploadedFiles: { filename: string; content: string }[], projectId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[]) => {
     try {
-      set({ phase: 'executing', phaseMessage: '正在思考与组织回答…', streamingThinking: '', streamingMessage: '' });
+      set({ phase: 'executing', phaseMessage: '', streamingThinking: null, streamingMessage: null });
       const abortCtrl = new AbortController();
       set({ abortCtrl });
 
@@ -407,8 +407,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           try { data = JSON.parse(dataStr); } catch { continue; }
 
           if (type === 'thinking') {
-            fullThinking += (data.text || '');
-            set({ streamingThinking: fullThinking });
+            if (get().thinkingLevel !== 'off') {
+              fullThinking += (data.text || '');
+              set({ streamingThinking: fullThinking });
+            }
           }
           if (type === 'token') {
             fullMessage += (data.text || '');
@@ -435,7 +437,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             role: 'agent',
             card: 'chat',
             content: fullMessage,
-            thinking: fullThinking || undefined,
+            thinking: get().thinkingLevel !== 'off' && fullThinking ? fullThinking : undefined,
             taskId: tid,
           },
         ];
@@ -473,7 +475,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   _sendTask: async (text: string, uploadedFiles: { filename: string; content: string }[], currentProjectId: number | null, currentVersionId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[], conversationId?: number) => {
     try {
       // understand + strategize（流式 SSE）
-      set({ phase: 'understanding', phaseMessage: PHASE_MESSAGES.understanding, streamingThinking: '' });
+      set({ phase: 'understanding', phaseMessage: PHASE_MESSAGES.understanding, streamingThinking: null, streamingMessage: null });
       const abortCtrl = new AbortController();
       set({ abortCtrl });
 
@@ -542,7 +544,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             set({ phase: p, phaseMessage: PHASE_MESSAGES[p] || '' });
           }
           if (type === 'thinking') {
-            set((s) => ({ streamingThinking: (s.streamingThinking || '') + (data.text || '') }));
+            if (get().thinkingLevel !== 'off') {
+              set((s) => ({ streamingThinking: (s.streamingThinking || '') + (data.text || '') }));
+            }
           }
           if (type === 'guidance') {
             set((s) => {

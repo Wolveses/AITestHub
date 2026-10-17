@@ -20,7 +20,7 @@ import { KbToggle } from './KbToggle';
 import { ModelPicker } from './ModelPicker';
 import { WorkModeSelector } from './WorkModeSelector';
 import { glassInputBar, text, SPRING, RADIUS } from './agentStyles';
-import { RotateCcw } from 'lucide-react';
+import { RotateCcw, ArrowDown } from 'lucide-react';
 import agentAvatarDefault from '../../../assets/agent-avatar.jpg';
 
 export function AgentWorkbench() {
@@ -35,47 +35,89 @@ export function AgentWorkbench() {
   const agentAvatar = useAgentProfileStore((s) => s.avatar);
   const avatarSrc = agentAvatar ?? agentAvatarDefault;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
+  const [showScrollBottomBtn, setShowScrollBottomBtn] = useState(false);
+  const prevMsgCountRef = useRef(messages.length);
   const { t } = useTranslation();
 
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const atBottom = distanceToBottom <= 60;
+    isAtBottomRef.current = atBottom;
+    setShowScrollBottomBtn(!atBottom);
+  };
+
+  const scrollToBottom = (smooth = false) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    isAtBottomRef.current = true;
+    setShowScrollBottomBtn(false);
+    if (smooth) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
+  };
+
+  // 当用户发了新消息时：强制复位到吸底并滚动到底部
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    if (messages.length > prevMsgCountRef.current) {
+      isAtBottomRef.current = true;
+      setShowScrollBottomBtn(false);
+      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    }
+    prevMsgCountRef.current = messages.length;
+  }, [messages.length]);
+
+  // 当处于吸底状态时跟随流式更新；若用户主动向上滚动阅读则不打断
+  useEffect(() => {
+    if (isAtBottomRef.current) {
+      const el = scrollRef.current;
+      if (el) {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
   }, [messages, phase, streamingMessage, streamingThinking]);
 
   const busy = phase === 'uploading' || phase === 'understanding' || phase === 'strategizing' || phase === 'executing';
-  const showStreamingBubble = streamingMessage !== null && streamingMessage !== undefined;
-  const showThinkingChain = busy && (streamingThinking !== null && streamingThinking !== undefined);
+  const showStreamingBubble = typeof streamingMessage === 'string' && streamingMessage.length > 0;
+  const showThinkingChain = busy && thinkingLevel !== 'off' && typeof streamingThinking === 'string' && streamingThinking.trim().length > 0;
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
       <style>{aiKeyframes}</style>
       {/* 对话区域 */}
-      <div ref={scrollRef} style={{ flex: 1, overflow: 'auto', padding: '24px 0' }}>
+      <div ref={scrollRef} onScroll={handleScroll} style={{ flex: 1, overflow: 'auto', padding: '24px 0' }}>
         <div style={{ maxWidth: 720, margin: '0 auto', padding: '0 24px' }}>
           {messages.length === 0 && !busy && <AgentWelcomeState name={agentName} avatar={avatarSrc} />}
           {messages.map((msg, i) => (
             <MessageBubble key={i} msg={msg} />
           ))}
-          {/* 思维链 */}
+          {/* 思维链（仅在思考级别未关闭且有思考内容时展示） */}
           {showThinkingChain && (
             <ThinkingPanel thinking={streamingThinking!} streaming />
           )}
-          {/* 流式文本气泡（LLM 生成中） */}
+          {/* 流式文本气泡（仅在已有 token 内容时展示，避免展示空内容+光标气泡） */}
           {showStreamingBubble && (
             <MessageBubble
               msg={{ role: 'agent', card: 'chat', content: streamingMessage + ' ▌' }}
             />
           )}
-          {/* 等待首个 token */}
+          {/* 等待首个 token 的微提示 */}
           {busy && !showStreamingBubble && !showThinkingChain && (
             <div style={{ marginBottom: 16, color: text.muted, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)', animation: 'agent-pulse 1.2s ease-in-out infinite' }} />
-              {phaseMessage || t('ai.thinkingDefault')}
+              {workMode === 'chat'
+                ? (thinkingLevel !== 'off' ? '正在思考…' : '正在组织回答…')
+                : (phaseMessage || t('ai.thinkingDefault'))}
             </div>
           )}
-          {/* 任务进度 */}
-          {busy && (
+          {/* 任务进度（仅任务模式展示三阶段计时步骤卡片） */}
+          {busy && workMode === 'task' && (
             <>
-              <AgentProgress phase={phase} message={phaseMessage} thinking={streamingThinking} />
+              <AgentProgress phase={phase} message={phaseMessage} thinking={thinkingLevel !== 'off' ? streamingThinking : null} />
               {(phase === 'understanding' || phase === 'strategizing') && (
                 <div style={{ textAlign: 'center', marginBottom: 12 }}>
                   <button
@@ -107,6 +149,36 @@ export function AgentWorkbench() {
           )}
         </div>
       </div>
+
+      {/* 滚动到底部快捷悬浮按钮 */}
+      {showScrollBottomBtn && (
+        <button
+          onClick={() => scrollToBottom(true)}
+          style={{
+            position: 'absolute',
+            bottom: 84,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 20,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            background: 'var(--bg-elevated)',
+            color: 'var(--text-secondary)',
+            border: '1px solid var(--border)',
+            borderRadius: 999,
+            padding: '6px 14px',
+            fontSize: 12,
+            fontWeight: 500,
+            cursor: 'pointer',
+            boxShadow: 'var(--shadow-popup, 0 4px 12px rgba(0,0,0,0.15))',
+            transition: 'all 0.2s ease',
+          }}
+        >
+          <ArrowDown size={13} strokeWidth={2} />
+          <span>{t('ai.scrollToBottom')}</span>
+        </button>
+      )}
 
       {/* 浮动输入栏（Spotlight 风格，悬浮在对话区上方） */}
       <div style={{ padding: '0 24px 16px' }}>
@@ -243,6 +315,8 @@ function MessageBubble({ msg }: { msg: AgentMessage }) {
     );
   }
 
+  const thinkingLevel = useTaskStore((s) => s.thinkingLevel);
+
   return (
     <div
       style={{
@@ -265,8 +339,8 @@ function MessageBubble({ msg }: { msg: AgentMessage }) {
           boxShadow: 'var(--shadow-card)',
         }}
       >
-        {/* chat 模式的思考过程（落定后可折叠） */}
-        {!isUser && msg.thinking && <ThinkingPanel thinking={msg.thinking} />}
+        {/* chat 模式的思考过程（落定后可折叠，仅在思考未关闭时展示） */}
+        {!isUser && msg.thinking && thinkingLevel !== 'off' && <ThinkingPanel thinking={msg.thinking} />}
         {isUser ? (
           <span>{msg.content}</span>
         ) : (
