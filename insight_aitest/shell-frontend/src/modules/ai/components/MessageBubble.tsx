@@ -8,16 +8,6 @@ import { CitationCard, groupCitations } from './CitationCard';
 import { ThinkingPanel } from './ThinkingPanel';
 import { Paperclip } from 'lucide-react';
 
-/** 把回答正文里的 [n] 转成 Markdown 链接 [[n]](#cite-n)，供自定义 a 渲染器拦截。
- * 仅当本条消息有 citations 且 n 在范围内才转换（避免误伤普通 [数字] 文本）。 */
-function citeTransform(content: string, citeCount: number): string {
-  if (citeCount === 0) return content;
-  // 先转义已有 Markdown 链接里的 [] 避免误改（简单起见：跳过 http 链接行的处理）
-  return content.replace(/\[(\d+)\]/g, (m, n) => {
-    const idx = parseInt(n, 10);
-    return idx >= 1 && idx <= citeCount ? `[[${idx}]](#cite-${idx})` : m;
-  });
-}
 
 export function MessageBubble({
   message,
@@ -32,7 +22,22 @@ export function MessageBubble({
   const { t } = useTranslation();
 
   const citeCount = message.citations?.length ?? 0;
-  const rendered = isUser ? message.content : citeTransform(message.content, citeCount);
+  const referencedIndices = new Set<number>();
+  let rendered = message.content || '';
+  if (!isUser && citeCount > 0) {
+    rendered = rendered.replace(/\[(\d+)\]/g, (m, n) => {
+      const idx = parseInt(n, 10);
+      if (idx >= 1 && idx <= citeCount) {
+        referencedIndices.add(idx);
+        return `[[${idx}]](#cite-${idx})`;
+      }
+      return m;
+    });
+  }
+
+  const groupedCitations = !isUser && message.citations && message.citations.length > 0
+    ? groupCitations(message.citations, referencedIndices)
+    : [];
 
   const handleCitationClick = (n: number) => {
     setHighlightedCite(n);
@@ -96,13 +101,13 @@ export function MessageBubble({
           </ReactMarkdown>
         </div>
       </div>
-      {!isUser && message.citations && message.citations.length > 0 && (
+      {!isUser && groupedCitations.length > 0 && (
         <div style={{ marginTop: 8 }}>
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             <Paperclip size={12} strokeWidth={1.5} />
             {t('ai.referenceSource', '引用来源')}
           </div>
-          {groupCitations(message.citations).map((group, i) => (
+          {groupedCitations.map((group, i) => (
             <CitationCard
               key={`${group.document_id ?? group.document_name}-${i}`}
               group={group}

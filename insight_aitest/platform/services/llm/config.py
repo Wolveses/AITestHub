@@ -38,7 +38,7 @@ class LLMConfig:
     )
     semantic_breakpoint: float = 2.58  # 语义断点 std 倍数（仅 semantic 生效）
     top_k: int = 4
-    min_score: float = 0.1
+    min_score: float = 0.3
     max_upload_mb: int = 100
     max_chunks_per_doc: int = 5000
 

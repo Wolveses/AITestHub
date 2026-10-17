@@ -368,14 +368,23 @@ function MessageBubble({
   const thinkingLevel = useTaskStore((s) => s.thinkingLevel);
   const citeCount = msg.citations?.length ?? 0;
 
-  // 将正文中的 [n] 转换为 Markdown 链接 [[n]](#cite-n)
+  // 统计正文中实际引用的 [n] 序号
+  const referencedIndices = new Set<number>();
   let renderedContent = msg.content || '';
   if (!isUser && citeCount > 0) {
     renderedContent = renderedContent.replace(/\[(\d+)\]/g, (match, n) => {
       const idx = parseInt(n, 10);
-      return idx >= 1 && idx <= citeCount ? `[[${idx}]](#cite-${idx})` : match;
+      if (idx >= 1 && idx <= citeCount) {
+        referencedIndices.add(idx);
+        return `[[${idx}]](#cite-${idx})`;
+      }
+      return match;
     });
   }
+
+  const groupedCitations = !isUser && msg.citations && msg.citations.length > 0
+    ? groupCitations(msg.citations, referencedIndices)
+    : [];
 
   const handleCitationClick = (n: number) => {
     setHighlightedCite(n);
@@ -470,14 +479,14 @@ function MessageBubble({
         )}
       </div>
 
-      {/* 引用来源卡片列表 */}
-      {!isUser && msg.citations && msg.citations.length > 0 && (
+      {/* 引用来源卡片列表：仅当正文真正引用了参考资料时展示 */}
+      {!isUser && groupedCitations.length > 0 && (
         <div style={{ marginTop: 8, maxWidth: '80%', width: '100%' }}>
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             <Paperclip size={12} strokeWidth={1.5} />
             {t('ai.referenceSource', '引用来源')}
           </div>
-          {groupCitations(msg.citations).map((group, i) => (
+          {groupedCitations.map((group, i) => (
             <CitationCard
               key={`${group.document_id ?? group.document_name}-${i}`}
               group={group}

@@ -15,13 +15,21 @@ export interface GroupedCitation {
 
 /**
  * 将平铺的 citations 数组按 document_id（相同文档）分组归纳，
- * 保持原本的 1-based 序号与出现顺序
+ * 保持原本的 1-based 序号与出现顺序。
+ * 如果提供了 referencedIndices（正文中实际引用的序号集合），则只保留被引用的项目；
+ * 若正文未引用任何序号，返回空数组，避免展示无引用的参考资料卡片。
  */
-export function groupCitations(citations: Citation[]): GroupedCitation[] {
+export function groupCitations(citations: Citation[], referencedIndices?: Set<number> | null): GroupedCitation[] {
   const groups: GroupedCitation[] = [];
   const map = new Map<number | string, GroupedCitation>();
 
   citations.forEach((c, idx) => {
+    const itemIndex = idx + 1;
+    // 如果传入了正文引用序号集合，只展示正文中出现过的序号
+    if (referencedIndices && !referencedIndices.has(itemIndex)) {
+      return;
+    }
+
     const key = c.document_id ?? c.document_name;
     let group = map.get(key);
     if (!group) {
@@ -34,7 +42,7 @@ export function groupCitations(citations: Citation[]): GroupedCitation[] {
       groups.push(group);
     }
     group.items.push({
-      index: idx + 1,
+      index: itemIndex,
       citation: c,
     });
   });

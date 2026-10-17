@@ -869,6 +869,7 @@ async def agent_chat(
                 body.message,
                 document_ids=body.document_ids,
                 project_id=body.project_id,
+                fallback=False,
             )
             if scored:
                 chunks = [(s.document.filename, s.chunk.text) for s in scored[:5]]

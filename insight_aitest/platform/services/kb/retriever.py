@@ -47,6 +47,7 @@ class Retriever:
         top_k: int | None = None,
         document_ids: list[int] | None = None,
         project_id: int | None = None,
+        fallback: bool = True,
     ) -> list["ScoredChunk"]:
         """三级降级检索：向量 → 关键词 → 原文。"""
         k = top_k or self.config.top_k
@@ -61,8 +62,10 @@ class Retriever:
         if results:
             return results
 
-        # L3: 文档原文兜底
-        return self._fulltext_fallback(query, k, document_ids, project_id)
+        # L3: 文档原文兜底（仅在允许 fallback 时触发，如用例生成器；常规对话不兜底无关文档）
+        if fallback:
+            return self._fulltext_fallback(query, k, document_ids, project_id)
+        return []
 
     def keyword_search(
         self,
