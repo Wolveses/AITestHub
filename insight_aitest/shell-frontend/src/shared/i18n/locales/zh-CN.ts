@@ -488,7 +488,7 @@ export default {
       // 模块名（与 manifest 一致）
       ai: '测试 Agent',
       kb: '知识库',
-      testcase: '用例生成',
+      testcase: '用例管理',
       api: 'API 自动化',
       performance: '性能监控',
       ui: 'UI 自动化',
@@ -959,9 +959,9 @@ export default {
       metaInfo: '标签/信息',
     },
 
-    // === 用例生成模块 ===
+    // === 用例管理模块 ===
     testcase: {
-      title: '用例生成',
+      title: '用例管理',
       caseList: '用例列表',
       generate: '生成用例',
       imageGenerate: '图片生成',

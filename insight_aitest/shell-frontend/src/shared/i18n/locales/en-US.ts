@@ -488,7 +488,7 @@ export default {
       // Module names (aligned with manifest)
       ai: 'Test Agent',
       kb: 'Knowledge Base',
-      testcase: 'Test Case Generation',
+      testcase: 'Test Case Management',
       api: 'API Automation',
       performance: 'Performance',
       ui: 'UI Automation',

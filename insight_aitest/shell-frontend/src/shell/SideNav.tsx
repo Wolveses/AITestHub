@@ -25,8 +25,11 @@ export function SideNav({ modules, collapsed, isMobile, onNavigate }: SideNavPro
     infra: t('nav.infrastructure'),
   };
 
-  // 当前语言的模块名
+  // 当前语言的模块名（优先从 i18n 字典匹配 nav.{moduleId}，如未配置则降级使用 manifest 名称）
   const moduleName = (m: ModuleManifest) => {
+    const key = `nav.${m.id}`;
+    const translated = t(key);
+    if (translated && translated !== key) return translated;
     if (i18n.language === 'en-US') return m.name.en ?? m.name.zh ?? m.id;
     return m.name.zh ?? m.name.en ?? m.id;
   };

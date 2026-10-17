@@ -1,14 +1,14 @@
 id: testcase
 name:
-  zh: 用例生成
-  en: Test Case Generation
+  zh: 用例管理
+  en: Test Case Management
 version: 2.0.0
 category: testing
 icon: TestTube
 order: 1
 description:
-  zh: AI 驱动的测试用例生成（分析→选点→生成→审阅）
-  en: AI-driven test case generation
+  zh: AI 驱动的测试用例生成与用例资产管理（分析→选点→生成→审阅）
+  en: AI-driven test case generation and management
 backend:
   router: testcase.backend.routes:router
   dependencies: []
@@ -16,7 +16,7 @@ frontend:
   route: /testcase
   entry: testcase:TestCaseApp
   nav:
-    label: {zh: 用例生成, en: Test Cases}
+    label: {zh: 用例管理, en: Test Cases}
     icon: TestTube
     show_in_dashboard: true
 default_enabled: true
