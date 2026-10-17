@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Message } from '../store/conversationStore';
 import { AttachmentChips } from './AttachmentChips';
-import { CitationCard } from './CitationCard';
+import { CitationCard, groupCitations } from './CitationCard';
 import { ThinkingPanel } from './ThinkingPanel';
 import { Paperclip } from 'lucide-react';
 
@@ -19,7 +19,13 @@ function citeTransform(content: string, citeCount: number): string {
   });
 }
 
-export function MessageBubble({ message }: { message: Message }) {
+export function MessageBubble({
+  message,
+  onPreviewDoc,
+}: {
+  message: Message;
+  onPreviewDoc?: (documentId: number, documentName: string) => void;
+}) {
   const isUser = message.role === 'user';
   const [highlightedCite, setHighlightedCite] = useState<number | null>(null);
   const [flashKey, setFlashKey] = useState(0); // 重启闪烁动画用
@@ -31,7 +37,7 @@ export function MessageBubble({ message }: { message: Message }) {
   const handleCitationClick = (n: number) => {
     setHighlightedCite(n);
     setFlashKey((k) => k + 1); // 重复点击同一引用时重新触发动画
-    // 滚动到对应卡片
+    // 滚动到对应卡片并展示片段
     requestAnimationFrame(() => {
       const el = document.querySelector(`[data-cite-index="${n}"]`);
       el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -92,13 +98,17 @@ export function MessageBubble({ message }: { message: Message }) {
       </div>
       {!isUser && message.citations && message.citations.length > 0 && (
         <div style={{ marginTop: 8 }}>
-          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}><Paperclip size={12} strokeWidth={1.5} />{t('ai.referenceSource')}</div>
-          {message.citations.map((c, i) => (
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <Paperclip size={12} strokeWidth={1.5} />
+            {t('ai.referenceSource', '引用来源')}
+          </div>
+          {groupCitations(message.citations).map((group, i) => (
             <CitationCard
-              key={`${i}-${flashKey}`}
-              citation={c}
-              index={i + 1}
-              highlight={highlightedCite === i + 1}
+              key={`${group.document_id ?? group.document_name}-${i}`}
+              group={group}
+              highlightIndex={highlightedCite}
+              flashKey={flashKey}
+              onPreview={onPreviewDoc}
             />
           ))}
         </div>

@@ -859,6 +859,7 @@ async def agent_chat(
         db.add_message(conv_id, Role.USER, body.message)
 
     # 知识库检索支持
+    citations_data: list[dict] = []
     if body.use_kb:
         try:
             from insight_aitest.modules.ai.backend.deps import get_retriever
@@ -871,7 +872,27 @@ async def agent_chat(
             )
             if scored:
                 chunks = [(s.document.filename, s.chunk.text) for s in scored[:5]]
-                ref_parts = ["【参考资料（知识库）】"]
+                citations_data = [
+                    {
+                        "document_id": s.document.id,
+                        "document_name": s.document.filename,
+                        "chunk_index": s.chunk.chunk_index,
+                        "snippet": s.chunk.text,
+                        "score": s.score,
+                    }
+                    for s in scored[:5]
+                ]
+                ref_parts = [
+                    "【参考资料（知识库）】",
+                    "规则：",
+                    "1. 回答中引用资料时，必须在对应陈述句句末标注 [1]、[2] 等序号；",
+                    "2. 在回答的最末尾必须以如下格式列出所有引用的参考来源（相同文档来源的序号合并展示）：",
+                    "---",
+                    "**参考资料：**",
+                    "- [序号] 《文档名称》",
+                    "",
+                    "参考内容如下：",
+                ]
                 for i, (fn, text) in enumerate(chunks, 1):
                     ref_parts.append(f"[{i}] （来源：{fn}）\n{text[:300]}")
                 history_msgs.insert(0, {"role": "system", "content": "\n".join(ref_parts)})
@@ -913,6 +934,8 @@ async def agent_chat(
 
         loop.run_in_executor(None, _produce)
         try:
+            if citations_data:
+                yield _task_sse("citations", {"citations": citations_data})
             while True:
                 item = await queue.get()
                 if item is SENTINEL:
@@ -931,8 +954,14 @@ async def agent_chat(
             # 流式结束：持久化 assistant 消息（仅 conv_id 存在且有内容）
             answer = "".join(full_answer_holder).strip()
             if conv_id is not None and answer:
-                db.add_message(conv_id, Role.ASSISTANT, answer, task_id=body.task_id)
-            yield _task_sse("done", {"conversation_id": conv_id})
+                db.add_message(
+                    conv_id,
+                    Role.ASSISTANT,
+                    answer,
+                    citations=citations_data if citations_data else None,
+                    task_id=body.task_id,
+                )
+            yield _task_sse("done", {"conversation_id": conv_id, "citations": citations_data})
         except Exception as e:
             yield _task_sse("error", {"message": str(e)})
 

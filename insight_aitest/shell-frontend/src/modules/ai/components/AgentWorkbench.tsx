@@ -20,8 +20,11 @@ import { KbToggle } from './KbToggle';
 import { ModelPicker } from './ModelPicker';
 import { WorkModeSelector } from './WorkModeSelector';
 import { glassInputBar, text, SPRING, RADIUS } from './agentStyles';
-import { RotateCcw, ArrowDown } from 'lucide-react';
+import { RotateCcw, ArrowDown, Paperclip } from 'lucide-react';
 import agentAvatarDefault from '../../../assets/agent-avatar.jpg';
+import { CitationCard, groupCitations } from './CitationCard';
+import { DocumentViewer } from '../../kb/components/DocumentViewer';
+import type { Document } from '../../kb/store/knowledgeStore';
 
 export function AgentWorkbench() {
   const {
@@ -39,6 +42,41 @@ export function AgentWorkbench() {
   const [showScrollBottomBtn, setShowScrollBottomBtn] = useState(false);
   const prevMsgCountRef = useRef(messages.length);
   const { t } = useTranslation();
+
+  // 文档预览弹窗状态
+  const [previewDoc, setPreviewDoc] = useState<Document | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  const handlePreviewDoc = async (docId: number, docName: string) => {
+    try {
+      const res = await fetch(`/api/modules/kb/documents/${docId}`);
+      if (res.ok) {
+        const d: Document = await res.json();
+        setPreviewDoc(d);
+        setPreviewOpen(true);
+        return;
+      }
+    } catch {
+      /* 静默 */
+    }
+    // 降级兜底：构造基础 Document 对象直接供 DocumentViewer 使用
+    setPreviewDoc({
+      id: docId,
+      filename: docName,
+      status: 'ready',
+      char_count: 0,
+      chunk_count: 0,
+      error_message: null,
+      project_id: null,
+      version_id: null,
+      folder_id: null,
+      tags: [],
+      doc_type: '',
+      description: '',
+      created_at: new Date().toISOString(),
+    });
+    setPreviewOpen(true);
+  };
 
   const handleScroll = () => {
     const el = scrollRef.current;
@@ -93,7 +131,7 @@ export function AgentWorkbench() {
         <div style={{ maxWidth: 720, margin: '0 auto', padding: '0 24px' }}>
           {messages.length === 0 && !busy && <AgentWelcomeState name={agentName} avatar={avatarSrc} />}
           {messages.map((msg, i) => (
-            <MessageBubble key={i} msg={msg} />
+            <MessageBubble key={i} msg={msg} onPreviewDoc={handlePreviewDoc} />
           ))}
           {/* 思维链（仅在思考级别未关闭且有思考内容时展示） */}
           {showThinkingChain && (
@@ -103,6 +141,7 @@ export function AgentWorkbench() {
           {showStreamingBubble && (
             <MessageBubble
               msg={{ role: 'agent', card: 'chat', content: streamingMessage + ' ▌' }}
+              onPreviewDoc={handlePreviewDoc}
             />
           )}
           {/* 等待首个 token 的微提示 */}
@@ -225,6 +264,9 @@ export function AgentWorkbench() {
           )}
         </div>
       </div>
+
+      {/* 文档全屏预览/查看器弹窗 */}
+      <DocumentViewer doc={previewDoc} open={previewOpen} onOpenChange={setPreviewOpen} />
     </div>
   );
 }
@@ -254,13 +296,21 @@ function AgentWelcomeState({ name, avatar }: { name: string; avatar: string }) {
   );
 }
 
-function MessageBubble({ msg }: { msg: AgentMessage }) {
+function MessageBubble({
+  msg,
+  onPreviewDoc,
+}: {
+  msg: AgentMessage;
+  onPreviewDoc?: (documentId: number, documentName: string) => void;
+}) {
   const isUser = msg.role === 'user';
   const { t } = useTranslation();
   // ReAct trace / rca：progress 卡片下展示 trace，中止时弹出 RCA
   const trace = useTaskStore((s) => (msg.taskId ? s.trace[msg.taskId] : undefined));
   const taskRca = useTaskStore((s) => (msg.taskId ? s.rca[msg.taskId] : undefined));
   const [rcaOpen, setRcaOpen] = useState(false);
+  const [highlightedCite, setHighlightedCite] = useState<number | null>(null);
+  const [flashKey, setFlashKey] = useState(0);
   const hasTrace = !!trace && Object.keys(trace).length > 0;
   // 当出现 rca 且尚未交互关闭时，默认展示
   const rcaVisible = !!taskRca && rcaOpen;
@@ -316,13 +366,34 @@ function MessageBubble({ msg }: { msg: AgentMessage }) {
   }
 
   const thinkingLevel = useTaskStore((s) => s.thinkingLevel);
+  const citeCount = msg.citations?.length ?? 0;
+
+  // 将正文中的 [n] 转换为 Markdown 链接 [[n]](#cite-n)
+  let renderedContent = msg.content || '';
+  if (!isUser && citeCount > 0) {
+    renderedContent = renderedContent.replace(/\[(\d+)\]/g, (match, n) => {
+      const idx = parseInt(n, 10);
+      return idx >= 1 && idx <= citeCount ? `[[${idx}]](#cite-${idx})` : match;
+    });
+  }
+
+  const handleCitationClick = (n: number) => {
+    setHighlightedCite(n);
+    setFlashKey((k) => k + 1);
+    // 滚动到对应卡片并展示片段
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-cite-index="${n}"]`);
+      el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  };
 
   return (
     <div
       style={{
         marginBottom: 16,
         display: 'flex',
-        justifyContent: isUser ? 'flex-end' : 'flex-start',
+        flexDirection: 'column',
+        alignItems: isUser ? 'flex-end' : 'flex-start',
         animation: 'agent-msg-enter 0.35s cubic-bezier(0.16,1,0.3,1)',
       }}
     >
@@ -345,8 +416,36 @@ function MessageBubble({ msg }: { msg: AgentMessage }) {
           <span>{msg.content}</span>
         ) : (
           <div className="markdown-body">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {msg.content || ''}
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                a({ href, children, ...props }) {
+                  const m = href?.match(/^#cite-(\d+)$/);
+                  if (m) {
+                    const n = parseInt(m[1], 10);
+                    return (
+                      <a
+                        href={href}
+                        className="cite-mark"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          handleCitationClick(n);
+                        }}
+                        {...props}
+                      >
+                        {children}
+                      </a>
+                    );
+                  }
+                  return (
+                    <a href={href} target="_blank" rel="noreferrer" {...props}>
+                      {children}
+                    </a>
+                  );
+                },
+              }}
+            >
+              {renderedContent}
             </ReactMarkdown>
           </div>
         )}
@@ -370,6 +469,25 @@ function MessageBubble({ msg }: { msg: AgentMessage }) {
           </div>
         )}
       </div>
+
+      {/* 引用来源卡片列表 */}
+      {!isUser && msg.citations && msg.citations.length > 0 && (
+        <div style={{ marginTop: 8, maxWidth: '80%', width: '100%' }}>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <Paperclip size={12} strokeWidth={1.5} />
+            {t('ai.referenceSource', '引用来源')}
+          </div>
+          {groupCitations(msg.citations).map((group, i) => (
+            <CitationCard
+              key={`${group.document_id ?? group.document_name}-${i}`}
+              group={group}
+              highlightIndex={highlightedCite}
+              flashKey={flashKey}
+              onPreview={onPreviewDoc}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

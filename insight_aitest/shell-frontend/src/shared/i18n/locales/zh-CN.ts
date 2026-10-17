@@ -607,6 +607,7 @@ export default {
       detach: '在新窗口打开',
       noMessages: '开始一段新对话吧',
       docPreview: '文档预览',
+      clickToPreviewDoc: '点击预览该文档',
       // ===== AIApp =====
       backToAgent: '← 返回 Agent',
       ragChat: 'RAG 问答',

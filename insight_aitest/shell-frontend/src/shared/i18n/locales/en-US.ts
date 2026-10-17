@@ -607,6 +607,7 @@ export default {
       detach: 'Open in new window',
       noMessages: 'Start a new conversation',
       docPreview: 'Document preview',
+      clickToPreviewDoc: 'Click to preview document',
       // ===== AIApp =====
       backToAgent: '← Back to Agent',
       ragChat: 'RAG Chat',

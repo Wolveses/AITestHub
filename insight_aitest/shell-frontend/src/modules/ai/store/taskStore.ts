@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { toast } from 'sonner';
 import { useProjectStore } from '../../../shared/store/projectStore';
 import { parseLLMError } from './llmErrors';
+import type { Citation } from './conversationStore';
 
 export interface PlanStep {
   skill: string;
@@ -47,6 +48,7 @@ export interface AgentMessage {
        | 'case_review';     // 审阅面板阶段3
   thinking?: string;                   // 对话模式的思考过程（落定后存）
   taskId?: number;
+  citations?: Citation[];              // 知识库引用资料
 }
 
 /** 审阅面板中的单条用例 */
@@ -193,6 +195,7 @@ function _rebuildMessages(task: TaskData): AgentMessage[] {
 interface DbMessage {
   role: string;
   content: string;
+  citations?: Citation[];
   task_id?: number | null;
   created_at?: string | null;
 }
@@ -224,6 +227,7 @@ function _supplementChatMessages(existing: AgentMessage[], dbMessages: DbMessage
         content: m.content || undefined,
         card: 'chat' as const,
         taskId: m.task_id ?? undefined,
+        citations: m.citations,
       });
     }
   }
@@ -396,6 +400,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       let buffer = '';
       let fullMessage = '';
       let fullThinking = '';
+      let streamCitations: Citation[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -406,9 +411,14 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         for (const evt of events) {
           const type = evt.match(/^event: (.+)$/m)?.[1];
           const dataStr = evt.match(/^data: (.+)$/m)?.[1] ?? '{}';
-          let data: { text?: string; message?: string; conversation_id?: number };
+          let data: { text?: string; message?: string; conversation_id?: number; citations?: Citation[] };
           try { data = JSON.parse(dataStr); } catch { continue; }
 
+          if (type === 'citations') {
+            if (data.citations && Array.isArray(data.citations)) {
+              streamCitations = data.citations;
+            }
+          }
           if (type === 'thinking') {
             if (get().thinkingLevel !== 'off') {
               fullThinking += (data.text || '');
@@ -422,6 +432,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           if (type === 'done') {
             if (data.conversation_id) {
               set({ chatConversationId: data.conversation_id });
+            }
+            if (data.citations && Array.isArray(data.citations) && streamCitations.length === 0) {
+              streamCitations = data.citations;
             }
           }
           if (type === 'error') {
@@ -442,6 +455,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             content: fullMessage,
             thinking: get().thinkingLevel !== 'off' && fullThinking ? fullThinking : undefined,
             taskId: tid,
+            citations: streamCitations.length > 0 ? streamCitations : undefined,
           },
         ];
         return {
