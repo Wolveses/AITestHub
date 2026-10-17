@@ -36,7 +36,7 @@ def setup_logging(
 ) -> dict[str, Any]:
     """配置日志持久化输出到文件，并返回供 Uvicorn 使用的 log_config。
 
-    - 业务日志 (logzero.logger) 自动写入 logs/insight_aitest.log
+    - 业务日志 (logzero.logger) 自动写入 logs/app.log
     - 服务请求日志 (uvicorn / uvicorn.access) 同步写入同一日志文件
     """
     global _is_configured
