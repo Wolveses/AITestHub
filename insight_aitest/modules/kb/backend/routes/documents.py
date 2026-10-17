@@ -178,20 +178,11 @@ async def delete_document(
 
 @router.post("/{doc_id}/reindex", response_model=DocumentOut)
 async def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOut:
-    """重新索引（换 embedding 模型后用）。删旧向量与 chunks，状态置 pending。"""
+    """重新索引（换 embedding 模型后用）。删旧向量与 chunks，后台重新解析向量化。"""
     doc = db.get_document(doc_id)
     if not doc:
         raise HTTPException(404, "文档不存在")
-    conn = db.get_connection()
-    chunk_ids = [
-        r["id"]
-        for r in conn.execute("SELECT id FROM chunks WHERE document_id = ?", (doc_id,)).fetchall()
-    ]
-    for cid in chunk_ids:
-        conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (cid,))
-    conn.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
-    conn.commit()
-    db.update_document_status(doc_id, DocumentStatus.PENDING)
+    threading.Thread(target=_reindex_in_bg, args=(doc_id, db), daemon=True).start()
     return _doc_to_out(db.get_document(doc_id))
 
 

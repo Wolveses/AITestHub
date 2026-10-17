@@ -141,12 +141,20 @@ class LLMClient:
         embed_key = self._config.embed_api_key or self._config.llm_api_key
         if not embed_key:
             raise LLMConfigError("未配置 LLM API Key，请在设置中配置。")
-        resp = self._embed_client.embeddings.create(model=self._embed_model, input=texts)
-        # 按 index 排序确保顺序与输入一致
-        ordered = sorted(resp.data, key=lambda d: d.index)
-        # L2 归一化：sqlite-vec 默认用 L2（欧氏）距离，归一化后
-        # L2 距离与余弦距离等价（||a-b||² = 2(1-cos)），RAG 召回更准
-        return [_normalize(d.embedding) for d in ordered]
+        if not texts:
+            return []
+
+        # 多数第三方提供商（如 DashScope 百炼）限制单批次请求不超过 25 条，取安全上限 20 自动子批次切分
+        batch_size = min(getattr(self._config, "embed_batch_size", 20) or 20, 20)
+        all_normalized: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            chunk_texts = texts[i : i + batch_size]
+            resp = self._embed_client.embeddings.create(model=self._embed_model, input=chunk_texts)
+            ordered = sorted(resp.data, key=lambda d: d.index)
+            # L2 归一化：sqlite-vec 默认用 L2（欧氏）距离，归一化后
+            # L2 距离与余弦距离等价（||a-b||² = 2(1-cos)），RAG 召回更准
+            all_normalized.extend([_normalize(d.embedding) for d in ordered])
+        return all_normalized
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed([text])[0]
@@ -155,7 +163,13 @@ class LLMClient:
         self._ensure_key()
         # 合并思考级别参数（按模型族探测，off/不支持时为空 dict）
         call_kwargs = dict(kwargs)
-        call_kwargs.update(resolve_thinking_params(self._chat_model, thinking_level))
+        thinking_params = resolve_thinking_params(self._chat_model, thinking_level)
+        if "extra_body" in thinking_params:
+            merged_extra = dict(call_kwargs.get("extra_body") or {})
+            merged_extra.update(thinking_params["extra_body"])
+            call_kwargs["extra_body"] = merged_extra
+        else:
+            call_kwargs.update(thinking_params)
 
         req_id = uuid.uuid4().hex[:8]
         start_time = time.time()
@@ -374,7 +388,13 @@ class LLMClient:
         self._ensure_key()
         # 合并思考级别参数（按模型族探测，off/不支持时为空 dict）
         call_kwargs = dict(kwargs)
-        call_kwargs.update(resolve_thinking_params(self._chat_model, thinking_level))
+        thinking_params = resolve_thinking_params(self._chat_model, thinking_level)
+        if "extra_body" in thinking_params:
+            merged_extra = dict(call_kwargs.get("extra_body") or {})
+            merged_extra.update(thinking_params["extra_body"])
+            call_kwargs["extra_body"] = merged_extra
+        else:
+            call_kwargs.update(thinking_params)
 
         req_id = uuid.uuid4().hex[:8]
         start_time = time.time()
@@ -430,7 +450,8 @@ class LLMClient:
                     if reasoning:
                         has_any = True
                         collected_reasoning.append(reasoning)
-                        yield ("reasoning", reasoning)
+                        if thinking_level != "off":
+                            yield ("reasoning", reasoning)
                     if delta.content:
                         has_any = True
                         collected_content.append(delta.content)

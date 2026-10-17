@@ -141,8 +141,9 @@ async def chat_stream(
                     # spec §6.4：data 包成 {"citations":[...]}，对齐前端解析
                     yield _sse("citations", {"citations": [c.__dict__ for c in event.data]})
                 elif event.type == "thinking":
-                    thinking_text[0] += event.data
-                    yield _sse("thinking", {"text": event.data})
+                    if thinking_switch != "off":
+                        thinking_text[0] += event.data
+                        yield _sse("thinking", {"text": event.data})
                 elif event.type == "token":
                     full_answer[0] += event.data
                     yield _sse("token", {"text": event.data})

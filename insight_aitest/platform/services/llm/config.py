@@ -28,7 +28,7 @@ class LLMConfig:
     embed_api_key: str = ""  # 空 = 回退 llm_api_key
     embed_model: str = "text-embedding-3-small"
     embed_dim: int = 1536
-    embed_batch_size: int = 64
+    embed_batch_size: int = 20
 
     # 知识库管线（与向量检索正交：分块在 vector 关闭时仍用于文档存储）
     chunk_size: int = 500
@@ -39,7 +39,7 @@ class LLMConfig:
     semantic_breakpoint: float = 2.58  # 语义断点 std 倍数（仅 semantic 生效）
     top_k: int = 4
     min_score: float = 0.1
-    max_upload_mb: int = 20
+    max_upload_mb: int = 100
     max_chunks_per_doc: int = 5000
 
     # Rerank（LLM-as-reranker：向量召回 N 候选 → LLM 打分 → 重排取 top_k）

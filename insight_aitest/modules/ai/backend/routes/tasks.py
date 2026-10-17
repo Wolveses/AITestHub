@@ -924,7 +924,8 @@ async def agent_chat(
                     return
                 kind, text = item
                 if kind == "reasoning":
-                    yield _task_sse("thinking", {"text": text})
+                    if thinking_level != "off":
+                        yield _task_sse("thinking", {"text": text})
                 else:
                     yield _task_sse("token", {"text": text})
             # 流式结束：持久化 assistant 消息（仅 conv_id 存在且有内容）
