@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { MessageSquare, Zap, FileText, AlertCircle, Check, RefreshCw } from 'lucide-react';
+import { Zap, FileText, AlertCircle, Check, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { text, RADIUS } from './agentStyles';
 import { useProjectStore } from '../../../shared/store/projectStore';
@@ -79,13 +79,7 @@ export function KbToggle({ mode, onModeChange, selectedDocIds, onDocIdsChange }:
           borderRadius: RADIUS.sm,
           overflow: 'hidden',
         }}>
-          {/* 关闭 */}
-          <button
-            onClick={() => onModeChange('off')}
-            title={t('ai.kbPureLlmTitle')}
-            style={btnStyle(mode === 'off', false)}
-          ><MessageSquare size={iconSize} strokeWidth={1.5} /> {t('ai.pureLlm')}</button>
-          {/* 自动 (向量) */}
+          {/* 自动 (知识库) */}
           <button
             onClick={() => onModeChange('auto')}
             title={vectorReady ? t('ai.kbAutoTitle') : t('ai.kbAutoNeedConfig')}

@@ -250,7 +250,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   streamingThinking: null,
   streamingMessage: null,
   thinkingLevel: 'off',
-  kbMode: (localStorage.getItem('ai_kb_mode') as 'off' | 'auto' | 'manual') || 'auto',
+  kbMode: ((localStorage.getItem('ai_kb_mode') as 'off' | 'auto' | 'manual') === 'manual' ? 'manual' : 'auto') as 'off' | 'auto' | 'manual',
   selectedDocIds: [],
   abortCtrl: null,
   review: {} as Record<number, ReviewState>,
