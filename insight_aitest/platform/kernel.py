@@ -114,6 +114,11 @@ def build_app() -> FastAPI:
 
     app.include_router(build_projects_router(), prefix="/api/platform")
 
+    # 4.2 用户与认证路由
+    from insight_aitest.platform.auth.routes import router as auth_router
+
+    app.include_router(auth_router, prefix="/api/platform")
+
     # 5. 模块路由（按拓扑序注册）
     for lm in registry.modules:
         if lm.router is not None:

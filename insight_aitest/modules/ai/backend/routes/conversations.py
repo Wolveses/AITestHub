@@ -12,6 +12,10 @@ from insight_aitest.modules.ai.backend.persistence.database import AIDatabase
 router = APIRouter(prefix="/conversations", tags=["ai-conversations"])
 
 
+from insight_aitest.platform.auth.deps import get_current_user_optional
+from insight_aitest.platform.auth.models import User
+
+
 class ConversationOut(BaseModel):
     id: int
     title: str
@@ -49,23 +53,28 @@ def _out(conv) -> ConversationOut:
 
 @router.get("", response_model=list[ConversationOut])
 async def list_conversations(
-    project_id: int | None = None, db: AIDatabase = Depends(get_db)
+    project_id: int | None = None,
+    current_user: User | None = Depends(get_current_user_optional),
+    db: AIDatabase = Depends(get_db),
 ) -> list[ConversationOut]:
-    return [_out(c) for c in db.list_conversations(project_id=project_id)]
+    uid = current_user.id if current_user else None
+    return [_out(c) for c in db.list_conversations(project_id=project_id, user_id=uid)]
 
 
 @router.post("", response_model=ConversationOut)
 async def create_conversation(
-    body: ConversationCreate | None = None, db: AIDatabase = Depends(get_db)
+    body: ConversationCreate | None = None,
+    current_user: User | None = Depends(get_current_user_optional),
+    db: AIDatabase = Depends(get_db),
 ) -> ConversationOut:
     title = body.title if body and body.title else "新会话"
     rag = body.rag_enabled if body and body.rag_enabled is not None else True
     think = body.thinking_level if body and body.thinking_level is not None else "off"
     pid = body.project_id if body else None
-    # 去重：复用已有的空会话（无消息），避免重复创建空会话行污染侧栏
-    # 原子化 get-or-create：修复并发竞态（find+create 分离时两个请求可能各自创建）
+    uid = current_user.id if current_user else None
+    # 去重：复用当前用户已有的空会话（无消息），避免重复创建空会话行污染侧栏
     cid = db.get_or_create_empty_conversation(
-        title, rag_enabled=rag, thinking_level=think, project_id=pid
+        title, rag_enabled=rag, thinking_level=think, project_id=pid, user_id=uid
     )
     return _out(db.get_conversation(cid))
 

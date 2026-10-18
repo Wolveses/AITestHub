@@ -41,6 +41,9 @@ from insight_aitest.modules.ai.backend.persistence.models import TaskStatus, Rol
 from insight_aitest.modules.ai.backend.agent.prompts import build_agent_chat_message
 from insight_aitest.modules.ai.backend.agent.reactor import ReActAgent, ReActConfig
 
+from insight_aitest.platform.auth.deps import get_current_user_optional
+from insight_aitest.platform.auth.models import User
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tasks", tags=["ai-tasks"])
@@ -327,9 +330,11 @@ def _parse_file_content(filename: str, content: bytes, llm, config) -> str:
 @router.get("", response_model=list[TaskOut])
 async def list_tasks(
     project_id: int | None = None,
+    current_user: User | None = Depends(get_current_user_optional),
     db: AIDatabase = Depends(get_db),
 ) -> list[TaskOut]:
-    return [_task_to_out(t) for t in db.list_tasks(project_id=project_id)]
+    uid = current_user.id if current_user else None
+    return [_task_to_out(t) for t in db.list_tasks(project_id=project_id, user_id=uid)]
 
 
 @router.post("/upload")
@@ -405,12 +410,14 @@ async def upload_files(
 @router.post("", response_model=TaskOut)
 async def create_task(
     body: TaskCreateRequest,
+    current_user: User | None = Depends(get_current_user_optional),
     db: AIDatabase = Depends(get_db),
     planner=Depends(get_planner),
     kb_db=Depends(get_kb_db),
 ) -> TaskOut:
     """提交意图 + 文件内容 → understand + strategize → 返回 pending_select task。"""
     uploaded_files = body.files or []
+    uid = current_user.id if current_user else None
 
     # 修复上下文丢失：后续任务无新文件时，从 KB 获取已有文档内容
     if not uploaded_files and body.document_ids:
@@ -429,6 +436,7 @@ async def create_task(
             conv_id = db.create_conversation(
                 title=body.intent[:50] if body.intent else "新任务",
                 project_id=body.project_id,
+                user_id=uid,
             )
 
         # 创建 task（UNDERSTANDING 状态，关联 conversation）
@@ -439,6 +447,7 @@ async def create_task(
             version_id=body.version_id,
             use_kb=body.use_kb,
             conversation_id=conv_id,
+            user_id=uid,
         )
 
         # 持久化用户意图消息（修复上下文丢失：后续 agent_chat 可加载历史）
@@ -507,6 +516,7 @@ async def create_task(
 @router.post("/stream")
 async def create_task_stream(
     body: TaskCreateRequest,
+    current_user: User | None = Depends(get_current_user_optional),
     db: AIDatabase = Depends(get_db),
     planner=Depends(get_planner),
     kb_db=Depends(get_kb_db),
@@ -524,6 +534,7 @@ async def create_task_stream(
     与 POST /tasks 同语义，但推送思考过程。前端默认调此端点，失败可降级回 POST /tasks。
     """
     uploaded_files = body.files or []
+    uid = current_user.id if current_user else None
 
     # 修复上下文丢失：后续任务无新文件时，从 KB 获取已有文档内容
     if not uploaded_files and body.document_ids:
@@ -541,6 +552,7 @@ async def create_task_stream(
         conv_id = db.create_conversation(
             title=body.intent[:50] if body.intent else "新任务",
             project_id=body.project_id,
+            user_id=uid,
         )
 
     task_id = db.create_task(
@@ -550,6 +562,7 @@ async def create_task_stream(
         version_id=body.version_id,
         use_kb=body.use_kb,
         conversation_id=conv_id,
+        user_id=uid,
     )
 
     logger.info(

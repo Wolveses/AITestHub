@@ -315,6 +315,8 @@ function MessageBubble({
   // 当出现 rca 且尚未交互关闭时，默认展示
   const rcaVisible = !!taskRca && rcaOpen;
 
+  const thinkingLevel = useTaskStore((s) => s.thinkingLevel);
+
   // card 类消息（understand/strategies/progress/result）走卡片渲染；chat 走普通气泡
   if (!isUser && msg.card && msg.card !== 'chat') {
     return (
@@ -365,7 +367,6 @@ function MessageBubble({
     );
   }
 
-  const thinkingLevel = useTaskStore((s) => s.thinkingLevel);
   const citeCount = msg.citations?.length ?? 0;
 
   // 统计正文中实际引用的 [n] 序号

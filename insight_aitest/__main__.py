@@ -171,5 +171,35 @@ def main():
         sys.exit(0)
 
 
+def handle_cli_commands() -> bool:
+    """检查是否传入了 CLI 运维命令，若执行了命令返回 True，否则返回 False 正常启动服务。"""
+    args = sys.argv[1:]
+    if not args:
+        return False
+
+    cmd = args[0]
+    if cmd in ("reset-admin", "reset_admin"):
+        from insight_aitest.platform.auth.database import UserDatabase, DEFAULT_ADMIN_PASSWORD
+
+        new_pwd = DEFAULT_ADMIN_PASSWORD
+        if "--password" in args:
+            idx = args.index("--password")
+            if idx + 1 < len(args):
+                new_pwd = args[idx + 1]
+            else:
+                print("错误: --password 参数缺少具体的密码值")
+                sys.exit(1)
+        elif len(args) > 1 and not args[1].startswith("-"):
+            new_pwd = args[1]
+
+        user_db = UserDatabase()
+        user_db.reset_admin_password(new_pwd)
+        print(f"\n✅ 管理员 (admin) 密码已成功重置为: {new_pwd}\n")
+        return True
+
+    return False
+
+
 if __name__ == "__main__":
-    main()
+    if not handle_cli_commands():
+        main()

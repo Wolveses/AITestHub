@@ -44,6 +44,7 @@ class Conversation(MappedAsDataclass, Base):
     # 思考级别：off/low/medium/high（off=普通对话，其余按模型族探测注入 reasoning 参数）
     thinking_level: Mapped[str] = mapped_column(Text, server_default="off", default="off")
     project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     summary_json: Mapped[dict | None] = mapped_column(
         "summary_json", JSON, nullable=True, default=None
     )
@@ -159,10 +160,10 @@ class Task(MappedAsDataclass, Base):
     # 用例生成来源模式（full=完整 agent 闭环 / quick_analyze=轻量分析+生成 /
     # quick_image=轻量截图生成 / batch=两阶段批量）-- 区分 /tasks/quick 等轻量入口
     source_mode: Mapped[str] = mapped_column(Text, default="full")
-    # 缺陷2修复：task 关联会话（nullable，task 结果可写入会话历史）
     conversation_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, default=None
     )
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)

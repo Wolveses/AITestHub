@@ -1,12 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import axios from 'axios';
-import { Menu, X } from 'lucide-react';
+import { Menu, X, Users, LogOut, Sun, Moon } from 'lucide-react';
 import { platformIcons } from './icons';
 import { SettingsPanel } from '../modules/ai/components/SettingsPanel';
 import { ProjectSelector } from './ProjectSelector';
 import { useIsMobile } from '../shared/hooks/useIsMobile';
 import LanguageSwitcher from '../shared/components/LanguageSwitcher';
+import { useAuthStore } from '../shared/store/authStore';
+import { useThemeStore } from '../shared/store/themeStore';
+import { UserManageModal } from './UserManageModal';
 
 interface TopBarProps {
   onToggleSidebar: () => void;
@@ -15,6 +18,9 @@ interface TopBarProps {
 export function TopBar({ onToggleSidebar }: TopBarProps) {
   const { t } = useTranslation();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [userManageOpen, setUserManageOpen] = useState(false);
+  const { user, logout } = useAuthStore();
+  const { theme, toggleTheme } = useThemeStore();
   const [version, setVersion] = useState<string>('2.2.0');
   const isMobile = useIsMobile();
 
@@ -65,29 +71,118 @@ export function TopBar({ onToggleSidebar }: TopBarProps) {
           </button>
           <strong>Insight-AITest 平台</strong>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <ProjectSelector />
           <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>v{version}</span>
           <LanguageSwitcher />
+
+          {/* 主题切换（对所有用户开放） */}
           <button
-            onClick={() => setSettingsOpen(true)}
-            title={t('topbar.modelAndPlatformSettings')}
+            onClick={toggleTheme}
+            title={theme === 'dark' ? '切换为浅色模式' : '切换为深色模式'}
             style={{
               background: 'none',
               border: 'none',
-              color: settingsOpen ? "var(--accent)" : "var(--text-secondary)",
+              color: 'var(--text-secondary)',
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
               padding: 4,
               ...(isMobile ? { minWidth: 44, minHeight: 44, justifyContent: 'center', borderRadius: 4 } : {}),
             }}
-            aria-label={t('topbar.settings')}
+            aria-label="切换主题"
           >
-            <platformIcons.Settings size={18} />
+            {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
           </button>
+
+          {/* 平台设置（仅管理员可见） */}
+          {user?.role === 'admin' && (
+            <button
+              onClick={() => setSettingsOpen(true)}
+              title={t('topbar.modelAndPlatformSettings')}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: settingsOpen ? "var(--accent)" : "var(--text-secondary)",
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                padding: 4,
+                ...(isMobile ? { minWidth: 44, minHeight: 44, justifyContent: 'center', borderRadius: 4 } : {}),
+              }}
+              aria-label={t('topbar.settings')}
+            >
+              <platformIcons.Settings size={18} />
+            </button>
+          )}
+
+          {/* 用户管理入口（仅管理员可见） */}
+          {user?.role === 'admin' && (
+            <button
+              onClick={() => setUserManageOpen(true)}
+              title="用户管理（管理员）"
+              style={{
+                background: 'none',
+                border: 'none',
+                color: userManageOpen ? 'var(--accent)' : 'var(--text-secondary)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                padding: 4,
+              }}
+            >
+              <Users size={18} />
+            </button>
+          )}
+
+          {/* 用户信息与登出 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 6, borderLeft: '1px solid var(--border)' }}>
+            <div
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: '50%',
+                background: user?.role === 'admin' ? 'rgba(16,185,129,0.2)' : 'rgba(59,130,246,0.2)',
+                color: user?.role === 'admin' ? 'var(--accent)' : 'var(--primary, #3b82f6)',
+                border: '1px solid currentColor',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              {(user?.display_name || user?.username || 'U').slice(0, 1).toUpperCase()}
+            </div>
+            {!isMobile && (
+              <span style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 500, maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {user?.display_name || user?.username}
+              </span>
+            )}
+            <button
+              onClick={() => logout()}
+              title="退出登录"
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                padding: '4px',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+            >
+              <LogOut size={16} />
+            </button>
+          </div>
         </div>
       </header>
+
+      {/* 管理员用户管理弹窗 */}
+      <UserManageModal
+        open={userManageOpen}
+        onClose={() => setUserManageOpen(false)}
+      />
 
       {settingsOpen && (
         <div

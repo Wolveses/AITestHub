@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { PlatformRouter } from './routing';
+import { AuthPage } from './shell/AuthPage';
+import { useAuthStore } from './shared/store/authStore';
 import type { ModuleManifest } from './shell/types';
 import './index.css';
 
@@ -10,6 +12,12 @@ type State =
 
 export default function App() {
   const [state, setState] = useState<State>({ status: 'loading' });
+  const { token, checkAuth } = useAuthStore();
+  const [authChecked, setAuthChecked] = useState(false);
+
+  useEffect(() => {
+    checkAuth().finally(() => setAuthChecked(true));
+  }, [checkAuth]);
 
   useEffect(() => {
     fetch('/api/platform/modules')
@@ -21,9 +29,15 @@ export default function App() {
       .catch((e) => setState({ status: 'error', message: String(e) }));
   }, []);
 
-  if (state.status === 'loading') {
+  if (!authChecked || state.status === 'loading') {
     return <div style={{ padding: 48, color: "var(--text-secondary)" }}>加载平台…</div>;
   }
+
+  // 未登录或 token 无效拦截展示登录/注册页
+  if (!token) {
+    return <AuthPage />;
+  }
+
   if (state.status === 'error') {
     return (
       <div style={{ padding: 48, color: "var(--text-primary)" }}>

@@ -58,11 +58,14 @@ def _ensure_task_columns(db_path: str) -> None:
             ("version_id", "INTEGER"),
             ("use_kb", "BOOLEAN"),
             ("source_mode", "TEXT"),
+            ("user_id", "INTEGER"),
         ]:
             if col not in cols:
                 conn.execute(f"ALTER TABLE agent_tasks ADD COLUMN {col} {col_type}")
         # source_mode 补默认值（旧库新增列时为 NULL，回填 'full'）
         conn.execute("UPDATE agent_tasks SET source_mode = 'full' WHERE source_mode IS NULL")
+        # 历史 task 统一归属给 admin (user_id=1)
+        conn.execute("UPDATE agent_tasks SET user_id = 1 WHERE user_id IS NULL")
 
         # 补 agent_tasks.conversation_id 列（缺陷2修复：task 关联会话）
         if "conversation_id" not in cols:
@@ -76,15 +79,19 @@ def _ensure_task_columns(db_path: str) -> None:
 
 
 def _ensure_conversation_project_column(db_path: str) -> None:
-    """增量迁移：给旧 conversations 表补 project_id + summary_json 列（幂等）。"""
+    """增量迁移：给旧 conversations 表补 project_id + user_id + summary_json 列（幂等）。"""
     import sqlite3
 
     with sqlite3.connect(db_path) as conn:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(conversations)")}
         if "project_id" not in cols:
             conn.execute("ALTER TABLE conversations ADD COLUMN project_id INTEGER")
+        if "user_id" not in cols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER")
         if "summary_json" not in cols:
             conn.execute("ALTER TABLE conversations ADD COLUMN summary_json JSON")
+        # 将历史无归属的旧会话统一归属给初始管理员 admin (user_id=1)
+        conn.execute("UPDATE conversations SET user_id = 1 WHERE user_id IS NULL")
         conn.commit()
 
 
@@ -148,6 +155,7 @@ class AIDatabase:
         rag_enabled: bool = True,
         thinking_level: str = "off",
         project_id: int | None = None,
+        user_id: int | None = None,
     ) -> int:
         with session_scope(self.db_path) as s:
             c = Conversation(
@@ -155,6 +163,7 @@ class AIDatabase:
                 rag_enabled=rag_enabled,
                 thinking_level=thinking_level,
                 project_id=project_id,
+                user_id=user_id,
             )
             s.add(c)
             s.flush()
@@ -164,10 +173,14 @@ class AIDatabase:
         with session_scope(self.db_path) as s:
             return s.get(Conversation, conv_id)
 
-    def list_conversations(self, project_id: int | None = None) -> list[Conversation]:
+    def list_conversations(
+        self, project_id: int | None = None, user_id: int | None = None
+    ) -> list[Conversation]:
         stmt = select(Conversation).order_by(Conversation.updated_at.desc())
         if project_id is not None:
             stmt = stmt.where(Conversation.project_id == project_id)
+        if user_id is not None:
+            stmt = stmt.where(Conversation.user_id == user_id)
         with session_scope(self.db_path) as s:
             return list(s.scalars(stmt))
 
@@ -203,20 +216,21 @@ class AIDatabase:
             s.delete(c)
             return True
 
-    def find_empty_conversation(self, project_id: int | None) -> Conversation | None:
-        """查找指定项目下无消息的会话（用于创建去重）。"""
+    def find_empty_conversation(
+        self, project_id: int | None, user_id: int | None = None
+    ) -> Conversation | None:
+        """查找指定项目/用户下无消息的会话（用于创建去重）。"""
         from sqlalchemy import select as sa_select
 
         # 子查询：有消息的 conversation_id 集合
         msg_conv_ids = sa_select(Message.conversation_id).distinct()
+        stmt = select(Conversation)
+        if project_id is not None:
+            stmt = stmt.where(Conversation.project_id == project_id)
+        if user_id is not None:
+            stmt = stmt.where(Conversation.user_id == user_id)
         stmt = (
-            select(Conversation)
-            .where(
-                Conversation.project_id == project_id
-                if project_id is not None
-                else Conversation.project_id.is_(None)
-            )
-            .where(~Conversation.id.in_(msg_conv_ids))
+            stmt.where(~Conversation.id.in_(msg_conv_ids))
             .order_by(Conversation.created_at.desc())
             .limit(1)
         )
@@ -229,22 +243,19 @@ class AIDatabase:
         rag_enabled: bool = True,
         thinking_level: str = "off",
         project_id: int | None = None,
+        user_id: int | None = None,
     ) -> int:
-        """原子化 get-or-create：在单个 session 内查找空会话或创建新会话。
-
-        修复并发竞态：find + create 分离时两个请求可能各自创建。
-        """
+        """原子化 get-or-create：在单个 session 内查找当前用户空会话或创建新会话。"""
         from sqlalchemy import select as sa_select
 
         msg_conv_ids = sa_select(Message.conversation_id).distinct()
+        find_stmt = select(Conversation)
+        if project_id is not None:
+            find_stmt = find_stmt.where(Conversation.project_id == project_id)
+        if user_id is not None:
+            find_stmt = find_stmt.where(Conversation.user_id == user_id)
         find_stmt = (
-            select(Conversation)
-            .where(
-                Conversation.project_id == project_id
-                if project_id is not None
-                else Conversation.project_id.is_(None)
-            )
-            .where(~Conversation.id.in_(msg_conv_ids))
+            find_stmt.where(~Conversation.id.in_(msg_conv_ids))
             .order_by(Conversation.created_at.desc())
             .limit(1)
         )
@@ -257,6 +268,7 @@ class AIDatabase:
                 rag_enabled=rag_enabled,
                 thinking_level=thinking_level,
                 project_id=project_id,
+                user_id=user_id,
             )
             s.add(c)
             s.flush()
@@ -409,6 +421,7 @@ class AIDatabase:
                 version_id=version_id,
                 use_kb=use_kb,
                 conversation_id=conversation_id,
+                user_id=user_id,
             )
             s.add(t)
             s.flush()
@@ -418,10 +431,14 @@ class AIDatabase:
         with session_scope(self.db_path) as s:
             return s.get(Task, task_id)
 
-    def list_tasks(self, limit: int = 50, project_id: int | None = None) -> list[Task]:
+    def list_tasks(
+        self, limit: int = 50, project_id: int | None = None, user_id: int | None = None
+    ) -> list[Task]:
         stmt = select(Task).order_by(Task.created_at.desc()).limit(limit)
         if project_id is not None:
             stmt = stmt.where(Task.project_id == project_id)
+        if user_id is not None:
+            stmt = stmt.where(Task.user_id == user_id)
         with session_scope(self.db_path) as s:
             return list(s.scalars(stmt))
 
