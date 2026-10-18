@@ -1,19 +1,11 @@
 import { useState, useEffect } from 'react';
-import { Zap, FileText, AlertCircle, Check, RefreshCw } from 'lucide-react';
+import { Zap, FileText, AlertCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { text, RADIUS } from './agentStyles';
 import { useProjectStore } from '../../../shared/store/projectStore';
+import { DocPickerModal } from './DocPickerModal';
 
 export type KbMode = 'off' | 'auto' | 'manual';
-
-interface DocInfo {
-  id: number;
-  filename: string;
-  doc_type: string;
-  status: string;
-  char_count: number;
-  created_at: string | null;
-}
 
 interface Props {
   mode: KbMode;
@@ -27,54 +19,59 @@ const BASE = '/api/modules/ai/tasks';
 export function KbToggle({ mode, onModeChange, selectedDocIds, onDocIdsChange }: Props) {
   const { t } = useTranslation();
   const { currentProjectId } = useProjectStore();
-  const [docs, setDocs] = useState<DocInfo[]>([]);
   const [stats, setStats] = useState({ total_docs: 0, total_chunks: 0, vector_enabled: false });
-  const [showPicker, setShowPicker] = useState(false);
-  const [reindexing, setReindexing] = useState<Set<number>>(new Set());
+  const [modalOpen, setModalOpen] = useState(false);
 
   useEffect(() => {
     const params = currentProjectId != null ? `?project_id=${currentProjectId}` : '';
     fetch(`${BASE}/kb/stats${params}`)
       .then(r => r.ok ? r.json() : { total_docs: 0, total_chunks: 0, vector_enabled: false })
-      .then(setStats).catch(() => setStats({ total_docs: 0, total_chunks: 0, vector_enabled: false }));
-    fetch(`${BASE}/kb/documents${params}`)
-      .then(r => r.ok ? r.json() : [])
-      .then(data => setDocs(Array.isArray(data) ? data : []))
-      .catch(() => setDocs([]));
+      .then(setStats)
+      .catch(() => setStats({ total_docs: 0, total_chunks: 0, vector_enabled: false }));
   }, [currentProjectId]);
 
   const vectorReady = stats.vector_enabled;
   const iconSize = 13;
 
-  const toggleDoc = (id: number) => {
-    const next = selectedDocIds.includes(id)
-      ? selectedDocIds.filter(x => x !== id)
-      : [...selectedDocIds, id];
-    onDocIdsChange(next);
-  };
-
-  const reindex = async (docId: number) => {
-    setReindexing(prev => new Set([...prev, docId]));
-    await fetch(`${BASE}/kb/reindex`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ document_ids: [docId] }),
-    });
-    setReindexing(prev => { const n = new Set(prev); n.delete(docId); return n; });
-  };
-
-  const docTypeLabel = (dt: string) => {
-    if (dt.includes('prd') || dt.includes('需求')) return '📋 PRD';
-    if (dt.includes('api') || dt.includes('接口')) return '🔌 接口文档';
-    if (dt.includes('ui') || dt.includes('截图') || dt.includes('image')) return '🖼 UI截图';
-    return '📄 其他';
-  };
-
   return (
-    <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, position: 'relative' }}>
-      {/* 三段式切换 */}
-      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+    <div style={{ display: 'inline-flex', alignItems: 'center', position: 'relative' }}>
+      {/* 状态提示语：绝对定位悬浮在组件上方，不挤压高度 */}
+      <div
+        style={{
+          position: 'absolute',
+          bottom: 'calc(100% + 4px)',
+          left: 0,
+          whiteSpace: 'nowrap',
+          fontSize: 10,
+          lineHeight: '12px',
+          pointerEvents: 'none',
+        }}
+      >
+        {mode === 'auto' && (
+          <span style={{ color: vectorReady ? text.accent : 'var(--warning)' }}>
+            {vectorReady
+              ? <>✅ {t('ai.kbVectorReady')} · {stats.total_docs} {t('ai.kbDocs')} / {stats.total_chunks} {t('ai.kbChunks')}</>
+              : <>⚠️ {t('ai.kbVectorNotReady')}</>
+            }
+          </span>
+        )}
+
+        {mode === 'manual' && (
+          <span style={{ color: selectedDocIds.length > 0 ? text.accent : 'var(--text-muted)' }}>
+            {selectedDocIds.length > 0
+              ? <>📎 已选择 <strong style={{ color: 'var(--primary, #3b82f6)' }}>{selectedDocIds.length}</strong> {t('ai.kbDocs')}</>
+              : <>📎 未选文档 (点击手动选库)</>
+            }
+          </span>
+        )}
+      </div>
+
+      {/* 按钮栏 */}
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, height: 28 }}>
         <div style={{
           display: 'inline-flex',
+          height: 28,
+          boxSizing: 'border-box',
           border: '1px solid var(--border-strong)',
           borderRadius: RADIUS.sm,
           overflow: 'hidden',
@@ -85,104 +82,48 @@ export function KbToggle({ mode, onModeChange, selectedDocIds, onDocIdsChange }:
             title={vectorReady ? t('ai.kbAutoTitle') : t('ai.kbAutoNeedConfig')}
             style={btnStyle(mode === 'auto', !vectorReady)}
           ><Zap size={iconSize} strokeWidth={1.5} /> {t('ai.kbAuto')}</button>
-          {/* 手动 */}
+
+          {/* 手动选库 */}
           <button
-            onClick={() => { onModeChange('manual'); setShowPicker(true); }}
+            onClick={() => {
+              if (mode !== 'manual') {
+                onModeChange('manual');
+              }
+              setModalOpen(true);
+            }}
             title={t('ai.kbManualTitle')}
             style={btnStyle(mode === 'manual', false)}
-          ><FileText size={iconSize} strokeWidth={1.5} /> {t('ai.kbManual')}</button>
+          >
+            <FileText size={iconSize} strokeWidth={1.5} />
+            {t('ai.kbManual')}
+            {selectedDocIds.length > 0 ? ` (${selectedDocIds.length})` : ''}
+          </button>
         </div>
+
         {!vectorReady && mode === 'auto' && (
           <AlertCircle size={iconSize} strokeWidth={1.5} style={{ color: 'var(--warning, var(--accent))' }} />
         )}
       </div>
 
-      {/* 自动档：向量状态提示 */}
-      {mode === 'auto' && (
-        <div style={{ fontSize: 10, color: vectorReady ? text.accent : 'var(--warning)', paddingLeft: 4 }}>
-          {vectorReady
-            ? <>✅ {t('ai.kbVectorReady')} · {stats.total_docs} {t('ai.kbDocs')} / {stats.total_chunks} {t('ai.kbChunks')}</>
-            : <>⚠️ {t('ai.kbVectorNotReady')}</>
-          }
-        </div>
-      )}
-
-      {/* 手动档：文档选择器 */}
-      {mode === 'manual' && (
-        <>
-          <button
-            onClick={() => setShowPicker(!showPicker)}
-            style={{
-              fontSize: 10, color: text.accent, background: 'none', border: 'none',
-              cursor: 'pointer', textAlign: 'left', padding: '2px 4px',
-            }}
-          >
-            {selectedDocIds.length > 0
-              ? `📎 ${t('ai.kbSelected')} ${selectedDocIds.length} ${t('ai.kbDocs')}`
-              : `📎 ${t('ai.kbSelectDocs')}`}
-            {' '}{showPicker ? '▾' : '▸'}
-          </button>
-          {showPicker && (
-            <div style={{
-              border: '1px solid var(--border-strong)', borderRadius: 6,
-              background: 'var(--bg-card)', padding: 6, maxHeight: 200, overflow: 'auto',
-              fontSize: 10, minWidth: 260,
-            }}>
-              {docs.length === 0 && (
-                <div style={{ color: text.muted, padding: 8, textAlign: 'center' }}>
-                  {t('ai.kbNoDocs')}
-                </div>
-              )}
-              {docs.map(d => (
-                <div key={d.id} style={{
-                  display: 'flex', alignItems: 'center', gap: 4, padding: '4px 6px',
-                  borderRadius: 4, cursor: 'pointer',
-                  background: selectedDocIds.includes(d.id) ? 'rgba(16,185,129,0.08)' : 'transparent',
-                }} onClick={() => toggleDoc(d.id)}>
-                  <span style={{
-                    width: 14, height: 14, borderRadius: 3, flexShrink: 0,
-                    border: `1px solid ${selectedDocIds.includes(d.id) ? 'var(--accent)' : 'var(--border-strong)'}`,
-                    background: selectedDocIds.includes(d.id) ? 'var(--accent)' : 'transparent',
-                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  }}>
-                    {selectedDocIds.includes(d.id) && <Check size={10} strokeWidth={2} color="var(--text-on-accent)" />}
-                  </span>
-                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {d.filename}
-                  </span>
-                  <span style={{ color: text.muted, whiteSpace: 'nowrap' }}>
-                    {docTypeLabel(d.doc_type)}
-                  </span>
-                  {d.status !== 'ready' && d.status !== 'done' && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); reindex(d.id); }}
-                      disabled={reindexing.has(d.id)}
-                      title={t('ai.kbReindex')}
-                      style={{
-                        background: 'none', border: 'none', cursor: 'pointer', padding: 2,
-                        color: text.muted, opacity: reindexing.has(d.id) ? 0.5 : 1,
-                      }}
-                    >
-                      <RefreshCw size={10} strokeWidth={1.5} />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )}
+      {/* 弹窗选择文档（目录树 + 级联全选） */}
+      <DocPickerModal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        selectedDocIds={selectedDocIds}
+        onConfirm={onDocIdsChange}
+      />
     </div>
   );
 }
 
 function btnStyle(active: boolean, warning: boolean): React.CSSProperties {
   return {
-    padding: '4px 8px',
+    height: '100%',
+    padding: '0 8px',
     fontSize: 11,
     cursor: 'pointer',
     border: 'none',
-    borderRight: '1px solid var(--bg-elevated)',
+    borderRight: '1px solid var(--border-strong)',
     background: active
       ? (warning ? 'rgba(250,173,20,0.14)' : 'rgba(16,185,129,0.14)')
       : 'transparent',
@@ -194,6 +135,7 @@ function btnStyle(active: boolean, warning: boolean): React.CSSProperties {
     fontFamily: 'inherit',
     display: 'inline-flex',
     alignItems: 'center',
+    boxSizing: 'border-box',
     gap: 3,
   };
 }

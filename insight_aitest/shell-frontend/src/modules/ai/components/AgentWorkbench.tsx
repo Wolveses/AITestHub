@@ -229,7 +229,7 @@ export function AgentWorkbench() {
               onChange={setWorkMode}
               disabled={busy}
             />
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
               <ModelPicker size="sm" />
               <KbToggle
                 mode={kbMode}

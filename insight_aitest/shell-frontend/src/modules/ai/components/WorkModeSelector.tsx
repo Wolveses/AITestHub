@@ -19,6 +19,8 @@ export function WorkModeSelector({ value, onChange, disabled }: WorkModeSelector
       style={{
         display: 'inline-flex',
         alignItems: 'center',
+        height: 28,
+        boxSizing: 'border-box',
         background: 'var(--bg-card)',
         border: '1px solid var(--border)',
         borderRadius: 999,
@@ -35,8 +37,10 @@ export function WorkModeSelector({ value, onChange, disabled }: WorkModeSelector
         style={{
           display: 'inline-flex',
           alignItems: 'center',
+          height: 22,
+          boxSizing: 'border-box',
           gap: 5,
-          padding: '4px 12px',
+          padding: '0 10px',
           borderRadius: 999,
           border: value === 'chat' ? '1px solid rgba(16,185,129,0.3)' : '1px solid transparent',
           background: value === 'chat' ? 'rgba(16,185,129,0.14)' : 'transparent',
@@ -60,8 +64,10 @@ export function WorkModeSelector({ value, onChange, disabled }: WorkModeSelector
         style={{
           display: 'inline-flex',
           alignItems: 'center',
+          height: 22,
+          boxSizing: 'border-box',
           gap: 5,
-          padding: '4px 12px',
+          padding: '0 10px',
           borderRadius: 999,
           border: value === 'task' ? '1px solid rgba(16,185,129,0.3)' : '1px solid transparent',
           background: value === 'task' ? 'rgba(16,185,129,0.14)' : 'transparent',

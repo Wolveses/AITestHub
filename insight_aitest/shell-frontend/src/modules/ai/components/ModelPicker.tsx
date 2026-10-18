@@ -42,7 +42,6 @@ export function ModelPicker({ size = 'sm', isMobile }: Props) {
 
   const fontSize = size === 'sm' ? 11 : 12;
   const iconSize = size === 'sm' ? 13 : 14;
-  const padding = isMobile ? '8px 10px' : '4px 10px';
 
   const handlePick = async (id: string) => {
     setOpen(false);
@@ -62,7 +61,9 @@ export function ModelPicker({ size = 'sm', isMobile }: Props) {
         title={active ? `${active.name} · ${active.chat_model}` : t('ai.noProviderConfigured')}
         style={{
           ...(isMobile ? { minWidth: 44, minHeight: 44, justifyContent: 'center' } : {}),
-          padding,
+          padding: isMobile ? '0 10px' : '0 10px',
+          height: 28,
+          boxSizing: 'border-box',
           fontSize,
           cursor: saving ? 'wait' : 'pointer',
           border: '1px solid var(--border-strong)',

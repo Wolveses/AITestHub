@@ -1,16 +1,15 @@
+import { useState, useRef, useEffect } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { useTranslation } from 'react-i18next';
-import { Brain, HelpCircle } from 'lucide-react';
+import { Brain, ChevronDown, HelpCircle, Check } from 'lucide-react';
 import { text, RADIUS, SPRING } from './agentStyles';
 
 /**
- * 思考级别选择器 + 「？」规则提示。
+ * 思考级别选择器（自动折叠/展开下拉式）。
  *
- * 级别：off（关闭）/ low（低）/ medium（中）/ high（高）。
- * 开关始终可主动开启；不支持思考参数的模型由后端安全忽略（不注入参数）。
- * 「？」hover 显示规则说明（每级含义 + 耗时/token 提醒）。
- *
- * 受控组件：value/onchange 由父组件管理（会话级 thinking_level）。
+ * 级别：off（关）/ low（低）/ medium（中）/ high（高）。
+ * 默认折叠：仅展示大脑图标 + 当前级别文案 + 下拉箭头。
+ * 点击展开：展开轻量下拉浮层选择级别与规则提示。
  */
 
 export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high';
@@ -35,93 +34,177 @@ export function ThinkingLevelControl({
   size = 'sm',
   isMobile,
 }: Props) {
-  const fontSize = size === 'sm' ? 11 : 12;
-  const padding = isMobile ? '8px 10px' : '4px 10px';
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
+
+  const fontSize = size === 'sm' ? 11 : 12;
+  const padding = isMobile ? '6px 10px' : '4px 8px';
+
+  // 点击外部自动收起
+  useEffect(() => {
+    if (!open) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [open]);
+
+  const currentLevel = LEVELS.find((l) => l.value === value) || LEVELS[0];
+  const isActive = value !== 'off';
 
   return (
     <Tooltip.Provider delayDuration={200}>
-      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-        <Brain
-          size={13}
-          strokeWidth={1.5}
-          style={{ color: value !== 'off' ? text.accent : text.muted, flexShrink: 0 }}
-        />
-        <div
-          role="radiogroup"
-          aria-label={t('ai.thinkingLevelAriaLabel')}
+      <div ref={containerRef} style={{ position: 'relative', display: 'inline-flex' }}>
+        {/* 折叠触发按钮 */}
+        <button
+          type="button"
+          onClick={() => setOpen((prev) => !prev)}
           style={{
             display: 'inline-flex',
+            alignItems: 'center',
+            height: 28,
+            boxSizing: 'border-box',
+            gap: 5,
+            padding,
+            fontSize,
+            cursor: 'pointer',
             border: `1px solid var(--border-strong)`,
             borderRadius: RADIUS.sm,
-            overflow: 'hidden',
+            background: isActive ? 'rgba(16,185,129,0.12)' : 'transparent',
+            color: isActive ? text.accent : text.secondary,
+            fontWeight: isActive ? 600 : 400,
+            transition: `all 0.15s ${SPRING}`,
+            fontFamily: 'inherit',
           }}
+          title={t('ai.thinkingLevelAriaLabel', '思考级别')}
         >
-          {LEVELS.map((lv) => {
-            const active = value === lv.value;
-            return (
-              <button
-                key={lv.value}
-                role="radio"
-                aria-checked={active}
-                onClick={() => onChange(lv.value)}
-                style={{
-                  ...(!isMobile ? {} : { minWidth: 44, minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'center' }),
-                  padding,
-                  fontSize,
-                  cursor: 'pointer',
-                  border: 'none',
-                  borderRight: lv.value !== 'high' ? `1px solid var(--bg-elevated)` : 'none',
-                  background: active ? 'rgba(16,185,129,0.14)' : 'transparent',
-                  color: active ? text.accent : text.secondary,
-                  fontWeight: active ? 600 : 400,
-                  transition: `all 0.15s ${SPRING}`,
-                  fontFamily: 'inherit',
-                }}
-                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'rgba(136,136,136,0.08)'; }}
-                onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
-              >
-                {t(lv.labelKey)}
-              </button>
-            );
-          })}
-        </div>
+          <Brain
+            size={13}
+            strokeWidth={1.5}
+            style={{ color: isActive ? text.accent : text.muted, flexShrink: 0 }}
+          />
+          <span>思考: {t(currentLevel.labelKey)}</span>
+          <ChevronDown
+            size={12}
+            strokeWidth={1.5}
+            style={{
+              transform: open ? 'rotate(180deg)' : 'none',
+              transition: 'transform 0.15s ease',
+              opacity: 0.6,
+            }}
+          />
+        </button>
 
-        {/* 「？」规则提示 */}
-        <Tooltip.Root>
-          <Tooltip.Trigger asChild>
-            <button
-              type="button"
-              aria-label={t('ai.thinkingLevelHelpAria')}
+        {/* 展开浮层菜单 */}
+        {open && (
+          <div
+            style={{
+              position: 'absolute',
+              bottom: 'calc(100% + 6px)',
+              right: 0,
+              minWidth: 150,
+              backgroundColor: 'var(--bg-elevated, #fff)',
+              border: '1px solid var(--border-strong)',
+              borderRadius: 8,
+              boxShadow: 'var(--shadow-elevated, 0 8px 20px rgba(0,0,0,0.15))',
+              padding: 4,
+              zIndex: 1100,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 2,
+            }}
+          >
+            {LEVELS.map((lv) => {
+              const selected = value === lv.value;
+              return (
+                <div
+                  key={lv.value}
+                  onClick={() => {
+                    onChange(lv.value);
+                    setOpen(false);
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '6px 10px',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    cursor: 'pointer',
+                    color: selected ? text.accent : 'var(--text-primary)',
+                    fontWeight: selected ? 600 : 400,
+                    background: selected ? 'rgba(16,185,129,0.1)' : 'transparent',
+                    transition: 'background 0.15s ease',
+                  }}
+                  className="hover-bg"
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>{t(lv.labelKey)}</span>
+                  </div>
+                  {selected && <Check size={13} strokeWidth={2} style={{ color: text.accent }} />}
+                </div>
+              );
+            })}
+
+            {/* 底部规则说明提示 */}
+            <div
               style={{
-                background: 'none', border: 'none', cursor: 'help', padding: 2,
-                color: text.muted, display: 'inline-flex', alignItems: 'center',
-                transition: `color 0.15s ${SPRING}`,
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = text.secondary)}
-              onMouseLeave={(e) => (e.currentTarget.style.color = text.muted)}
-            >
-              <HelpCircle size={14} strokeWidth={1.5} />
-            </button>
-          </Tooltip.Trigger>
-          <Tooltip.Portal>
-            <Tooltip.Content
-              sideOffset={6}
-              style={{
-                background: 'var(--bg-elevated)',
-                border: '1px solid var(--border-strong)',
-                borderRadius: RADIUS.sm,
-                padding: '10px 12px',
-                maxWidth: 280,
-                boxShadow: 'var(--shadow-elevated)',
-                zIndex: 1100,
+                marginTop: 4,
+                paddingTop: 6,
+                borderTop: '1px solid var(--border)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                paddingLeft: 8,
+                paddingRight: 6,
+                fontSize: 11,
+                color: text.muted,
               }}
             >
-              <ThinkingRules />
-              <Tooltip.Arrow style={{ fill: 'var(--bg-elevated)', stroke: 'var(--border-strong)' }} />
-            </Tooltip.Content>
-          </Tooltip.Portal>
-        </Tooltip.Root>
+              <span>说明</span>
+              <Tooltip.Root>
+                <Tooltip.Trigger asChild>
+                  <button
+                    type="button"
+                    onClick={(e) => e.stopPropagation()}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'help',
+                      padding: 2,
+                      color: text.muted,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <HelpCircle size={13} strokeWidth={1.5} />
+                  </button>
+                </Tooltip.Trigger>
+                <Tooltip.Portal>
+                  <Tooltip.Content
+                    sideOffset={6}
+                    style={{
+                      background: 'var(--bg-elevated)',
+                      border: '1px solid var(--border-strong)',
+                      borderRadius: RADIUS.sm,
+                      padding: '10px 12px',
+                      maxWidth: 280,
+                      boxShadow: 'var(--shadow-elevated)',
+                      zIndex: 1200,
+                    }}
+                  >
+                    <ThinkingRules />
+                    <Tooltip.Arrow style={{ fill: 'var(--bg-elevated)', stroke: 'var(--border-strong)' }} />
+                  </Tooltip.Content>
+                </Tooltip.Portal>
+              </Tooltip.Root>
+            </div>
+          </div>
+        )}
       </div>
     </Tooltip.Provider>
   );
