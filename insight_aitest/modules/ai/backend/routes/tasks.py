@@ -886,8 +886,9 @@ async def agent_chat(
                 ref_parts = [
                     "【参考资料（知识库）】",
                     "规则：",
-                    "1. 回答中引用资料时，必须在对应陈述句句末标注 [1]、[2] 等序号；",
-                    "2. 在回答的最末尾必须以如下格式列出所有引用的参考来源（相同文档来源的序号合并展示）：",
+                    "1. 仅基于参考资料及当前上下文回答；若参考资料中未提及或无法获取答案，直接回复无法回答，切勿编造；",
+                    "2. 回答中引用资料时，必须在对应陈述句句末标注 [1]、[2] 等序号；",
+                    "3. 在回答的最末尾必须以如下格式列出所有引用的参考来源（相同文档来源的序号合并展示）：",
                     "---",
                     "**参考资料：**",
                     "- [序号] 《文档名称》",
@@ -897,6 +898,14 @@ async def agent_chat(
                 for i, (fn, text) in enumerate(chunks, 1):
                     ref_parts.append(f"[{i}] （来源：{fn}）\n{text[:300]}")
                 history_msgs.insert(0, {"role": "system", "content": "\n".join(ref_parts)})
+            else:
+                # 开启知识库但未检索到相关片段：明确提示参考资料为空
+                empty_ref_msg = (
+                    "【参考资料（知识库）】\n"
+                    "参考资料：为空（未检索到相关文档片段）。"
+                    "\n规则：仅基于参考资料及上下文回答，由于参考资料为空，请直接告知无法回答该问题。"
+                )
+                history_msgs.insert(0, {"role": "system", "content": empty_ref_msg})
         except Exception as e:
             logger.warning("[AI Chat] 知识库检索失败，降级为普通对话: %s", e)
 
