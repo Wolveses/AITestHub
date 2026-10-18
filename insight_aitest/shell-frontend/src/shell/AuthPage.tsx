@@ -129,10 +129,10 @@ export function AuthPage() {
             <Shield size={28} strokeWidth={2} />
           </div>
           <h1 style={{ fontSize: 20, fontWeight: 700, margin: '0 0 6px', color: 'var(--text-primary)' }}>
-            Insight-AITest
+            AITest 平台
           </h1>
           <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: 0 }}>
-            自动化测试与 AI 辅助分析工作台
+            AI 测试助手
           </p>
         </div>
 
