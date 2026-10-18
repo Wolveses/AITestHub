@@ -317,10 +317,10 @@ export default {
         versionValue: '2.0.0',
         author: '作者',
         authorValue: 'Aceyuan361',
-        description: 'Insight-AITest 是一款 AI 驱动的测试与监控平台，覆盖 API 自动化、UI 自动化、性能监控、测试用例生成与知识库等能力。',
+        description: 'AITest 是一款 AI 驱动的测试平台，覆盖测试用例生成与知识库等能力。',
         license: '许可证',
         licenseValue: 'MIT',
-        projectName: 'Insight-AITest',
+        projectName: 'AITest',
       },
 
       // ===== 各模块帮助（help.{module}.*） =====

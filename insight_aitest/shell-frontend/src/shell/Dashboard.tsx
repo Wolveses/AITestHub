@@ -67,7 +67,7 @@ export function Dashboard({ modules }: DashboardProps) {
 
   return (
     <div style={{ padding: 24, color: "var(--text-primary)" }}>
-      <h1 style={{ marginBottom: 4 }}>Insight-AITest {i18n.language === 'en-US' ? 'Platform' : '平台'}</h1>
+      <h1 style={{ marginBottom: 4 }}>AITest {i18n.language === 'en-US' ? 'Platform' : '平台'}</h1>
       <p style={{ color: "var(--text-secondary)", marginBottom: 24 }}>{t('dashboard.versionTag')}</p>
 
       {recent.length > 0 && (

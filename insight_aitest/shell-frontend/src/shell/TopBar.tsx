@@ -69,7 +69,7 @@ export function TopBar({ onToggleSidebar }: TopBarProps) {
           >
             <Menu size={18} strokeWidth={1.5} />
           </button>
-          <strong>Insight-AITest 平台</strong>
+          <strong>AITest 平台</strong>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <ProjectSelector />
