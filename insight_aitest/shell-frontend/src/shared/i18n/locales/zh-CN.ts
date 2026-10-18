@@ -629,7 +629,7 @@ export default {
       ragOnHint: '知识库检索（点击关闭，转为纯聊）',
       ragOffHint: '纯对话（点击开启知识库检索）',
       ragLabel: 'RAG',
-      pureChat: '纯聊',
+      pureChat: '对话',
       taskFlowHint: '计划 → 确认 → 执行\n自动生成测试用例',
       noIntent: '(无意图)',
       taskStepCount: '{{current}}/{{total}} 步',

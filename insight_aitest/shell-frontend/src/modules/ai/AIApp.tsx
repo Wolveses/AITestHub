@@ -2,7 +2,6 @@ import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ConversationSidebar } from './components/ConversationSidebar';
 import { AgentWorkbench } from './components/AgentWorkbench';
-import { useConversationStore } from './store/conversationStore';
 import { useTaskStore } from './store/taskStore';
 import { useConfigStore } from './store/configStore';
 import { useAgentProfileStore } from './store/agentProfileStore';
@@ -14,15 +13,13 @@ import { ModuleHelpButton } from '../../shared/components/ModuleHelpButton';
 export function AIApp() {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
-  const { loadConversations } = useConversationStore();
-  const { loadTasks } = useTaskStore();
+  const { loadAllHistory } = useTaskStore();
   const { config, loadConfig } = useConfigStore();
   const agentName = useAgentProfileStore((s) => s.name);
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
 
   useEffect(() => {
-    loadConversations();
-    loadTasks();
+    loadAllHistory();
     loadConfig();
   }, [currentProjectId]);
 

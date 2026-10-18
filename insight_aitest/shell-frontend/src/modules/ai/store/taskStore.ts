@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { toast } from 'sonner';
 import { useProjectStore } from '../../../shared/store/projectStore';
 import { parseLLMError } from './llmErrors';
-import type { Citation } from './conversationStore';
+import type { Citation, Conversation } from './conversationStore';
 
 export interface PlanStep {
   skill: string;
@@ -126,6 +126,12 @@ interface TaskState {
   trace: Record<number, Record<number, TraceEntry[]>>;  // taskId -> stepIndex -> entries
   rca: Record<number, TaskRca | null>;  // taskId -> rca
 
+  conversations: Conversation[];       // 会话列表（包含对话会话）
+  loadConversations: () => Promise<void>; // 加载会话列表
+  selectConversation: (id: number) => Promise<void>; // 切换历史会话
+  deleteConversation: (id: number) => Promise<void>; // 删除历史会话
+  loadAllHistory: () => Promise<void>; // 同时刷新 tasks 和 conversations
+
   // Actions
   setWorkMode: (mode: WorkMode) => void;
   addPendingFiles: (files: File[]) => void;
@@ -237,6 +243,7 @@ function _supplementChatMessages(existing: AgentMessage[], dbMessages: DbMessage
 export const useTaskStore = create<TaskState>((set, get) => ({
   workMode: (localStorage.getItem('ai_work_mode') as WorkMode) || 'chat',
   chatConversationId: null,
+  conversations: [],
   messagesByTask: {},
   messages: [],
   currentTask: null,
@@ -256,6 +263,96 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   review: {} as Record<number, ReviewState>,
   trace: {} as Record<number, Record<number, TraceEntry[]>>,
   rca: {} as Record<number, TaskRca | null>,
+  loadConversations: async () => {
+    try {
+      const { currentProjectId } = useProjectStore.getState();
+      const q = currentProjectId !== null ? `?project_id=${currentProjectId}` : '';
+      const r = await fetch(`/api/modules/ai/conversations${q}`);
+      if (!r.ok) return;
+      const convs = await r.json();
+      if (Array.isArray(convs)) {
+        set({ conversations: convs });
+      }
+    } catch {
+      // 静默失败
+    }
+  },
+
+  selectConversation: async (convId: number) => {
+    const { phase, messagesByTask } = get();
+    if (phase !== 'idle' && phase !== 'done' && phase !== 'error') return;
+
+    // 检查缓存
+    let msgs: AgentMessage[] = messagesByTask[convId] ?? [];
+    if (msgs.length === 0) {
+      try {
+        const r = await fetch(`/api/modules/ai/conversations/${convId}`);
+        if (r.ok) {
+          const data = await r.json();
+          const dbMsgs = data.messages || [];
+          msgs = dbMsgs.map((m: { role: string; content?: string; citations?: Citation[]; thinking?: string }) => ({
+            role: m.role === 'assistant' ? 'agent' : 'user',
+            content: m.content || '',
+            card: 'chat' as const,
+            thinking: m.thinking,
+            citations: m.citations,
+          }));
+        }
+      } catch {
+        // 静默
+      }
+    }
+
+    set({
+      chatConversationId: convId,
+      currentTask: null,
+      messages: msgs,
+      messagesByTask: { ...messagesByTask, [convId]: msgs },
+      stepLogs: [],
+      phase: 'idle',
+      phaseMessage: '',
+      selectedStrategy: null,
+      streamingThinking: null,
+      streamingMessage: null,
+      abortCtrl: null,
+    });
+  },
+
+  deleteConversation: async (convId: number) => {
+    try {
+      const r = await fetch(`/api/modules/ai/conversations/${convId}`, { method: 'DELETE' });
+      if (!r.ok) return;
+      set((s) => {
+        const remaining = s.conversations.filter((c) => c.id !== convId);
+        const restMessages = { ...s.messagesByTask };
+        delete restMessages[convId];
+        if (s.chatConversationId === convId) {
+          return {
+            conversations: remaining,
+            messagesByTask: restMessages,
+            chatConversationId: null,
+            messages: [],
+            pendingFiles: [],
+            pendingFileNames: [],
+            stepLogs: [],
+            phase: 'idle',
+            phaseMessage: '',
+            selectedStrategy: null,
+            streamingThinking: null,
+            streamingMessage: null,
+            abortCtrl: null,
+          };
+        }
+        return { conversations: remaining, messagesByTask: restMessages };
+      });
+    } catch {
+      // 静默
+    }
+  },
+
+  loadAllHistory: async () => {
+    await Promise.allSettled([get().loadTasks(), get().loadConversations()]);
+  },
 
   setWorkMode: (mode: WorkMode) => {
     localStorage.setItem('ai_work_mode', mode);
@@ -447,6 +544,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
       set((s) => {
         const tid = s.currentTask?.id;
+        const convId = s.chatConversationId;
         const newMsgs: AgentMessage[] = [
           ...s.messages,
           {
@@ -458,6 +556,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             citations: streamCitations.length > 0 ? streamCitations : undefined,
           },
         ];
+        const updatedMessagesByTask = { ...s.messagesByTask };
+        if (tid) updatedMessagesByTask[tid] = newMsgs;
+        if (convId) updatedMessagesByTask[convId] = newMsgs;
         return {
           phase: 'idle' as const,
           phaseMessage: '',
@@ -465,9 +566,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           streamingMessage: null,
           abortCtrl: null,
           messages: newMsgs,
-          messagesByTask: tid ? { ...s.messagesByTask, [tid]: newMsgs } : s.messagesByTask,
+          messagesByTask: updatedMessagesByTask,
         };
       });
+      get().loadConversations();
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') {
         set((s) => {
@@ -602,10 +704,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
                 currentTask: task,
                 phase: 'idle' as const, phaseMessage: '', streamingThinking: null, streamingMessage: null, abortCtrl: null,
                 messages: newMsgs,
-                messagesByTask: hasStrategies && tid ? { ...s.messagesByTask, [tid]: newMsgs } : s.messagesByTask,
+                messagesByTask: tid ? { ...s.messagesByTask, [tid]: newMsgs } : s.messagesByTask,
               };
             });
-            get().loadTasks();
+            get().loadAllHistory();
           }
 
           if (type === 'error') {
@@ -622,7 +724,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
               };
             });
             // 后端已删除失败任务 -> 刷新列表让 currentTask 失效，避免切换 tab 后出现重复会话
-            get().loadTasks();
+            get().loadAllHistory();
           }
         }
       }
@@ -708,7 +810,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         };
       });
     }
-    get().loadTasks();
+    get().loadAllHistory();
   },
 
   // 加载历史 Task 到工作台：_rebuildMessages 构建结构性卡片 + DB消息补充chat历史
@@ -734,6 +836,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     const finishedStatuses = ['done', 'failed', 'cancelled'];
     set({
       currentTask: task,
+      chatConversationId: null,
       messages: msgs,
       messagesByTask: { ...messagesByTask, [id]: msgs },
       stepLogs: [],
@@ -1061,7 +1164,6 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   resetConversation: () => {
     get().abortCtrl?.abort();
     set({
-      messagesByTask: {},
       messages: [], currentTask: null, pendingFiles: [], pendingFileNames: [],
       stepLogs: [], phase: 'idle', phaseMessage: '', selectedStrategy: null,
       streamingThinking: null, streamingMessage: null, abortCtrl: null,

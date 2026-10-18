@@ -615,6 +615,7 @@ async def create_task_stream(
                 asyncio.run_coroutine_threadsafe(
                     queue.put(("guidance", "guidance", {"text": guidance})), loop
                 ).result()
+                # 无论是否生成策略，都向前端推送完成任务，确保侧边栏自动留存历史记录
                 asyncio.run_coroutine_threadsafe(queue.put(SENTINEL), loop).result()
                 return
 
@@ -739,6 +740,7 @@ class AgentChatRequest(BaseModel):
 @router.post("/chat")
 async def agent_chat(
     body: AgentChatRequest,
+    current_user: User | None = Depends(get_current_user_optional),
     llm=Depends(get_llm),
     config=Depends(get_config),
     db: AIDatabase = Depends(get_db),
@@ -759,6 +761,8 @@ async def agent_chat(
     if thinking_level not in ("off", "low", "medium", "high"):
         thinking_level = "off"
 
+    uid = current_user.id if current_user else None
+
     # task_id 非 None 或 conversation_id 非 None：加载历史 + 持久化 user/assistant 消息
     conv_id: int | None = body.conversation_id
     history_msgs: list[dict] = []
@@ -776,6 +780,7 @@ async def agent_chat(
                 conv_id = db.create_conversation(
                     title=task.intent[:20] if task.intent else "任务对话",
                     project_id=task.project_id or body.project_id,
+                    user_id=uid,
                 )
                 with session_scope(db.db_path) as s:
                     t = s.get(Task, body.task_id)
@@ -862,12 +867,14 @@ async def agent_chat(
             conv_id = db.create_conversation(
                 title=body.message[:25] if body.message else "AI 对话",
                 project_id=body.project_id,
+                user_id=uid,
             )
             db.add_message(conv_id, Role.USER, body.message)
     else:
         conv_id = db.create_conversation(
             title=body.message[:25] if body.message else "AI 对话",
             project_id=body.project_id,
+            user_id=uid,
         )
         db.add_message(conv_id, Role.USER, body.message)
 

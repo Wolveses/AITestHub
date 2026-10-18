@@ -629,7 +629,7 @@ export default {
       ragOnHint: 'Knowledge-base retrieval (click to turn off, switch to plain chat)',
       ragOffHint: 'Plain chat (click to enable knowledge-base retrieval)',
       ragLabel: 'RAG',
-      pureChat: 'Plain',
+      pureChat: 'Chat',
       taskFlowHint: 'Plan → Confirm → Execute\nAuto-generate test cases',
       noIntent: '(no intent)',
       taskStepCount: '{{current}}/{{total}} steps',

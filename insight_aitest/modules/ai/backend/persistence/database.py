@@ -405,6 +405,7 @@ class AIDatabase:
         version_id: int | None = None,
         use_kb: bool = False,
         conversation_id: int | None = None,
+        user_id: int | None = None,
     ) -> int:
         """创建 task。plan 为空时走新流程（understand→strategize）。
 
