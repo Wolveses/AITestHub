@@ -66,6 +66,24 @@ class LoginResponse(BaseModel):
     user: UserOut
 
 
+class AuditLogOut(BaseModel):
+    id: int
+    user_id: int | None = None
+    username: str
+    action: str
+    target_type: str
+    target_id: str
+    detail: str
+    client_ip: str
+    status_code: int
+    created_at: str
+
+
+class AuditLogListResponse(BaseModel):
+    items: List[AuditLogOut]
+    total: int
+
+
 # ===== 路由接口 =====
 
 @router.post("/register", response_model=LoginResponse)
@@ -182,4 +200,42 @@ async def admin_toggle_active(
     db.toggle_user_active(user_id, active)
     action_text = "启用" if active else "停用"
     return {"message": f"用户 {target.username} 已成功{action_text}"}
+
+
+@router.get("/audit-logs", response_model=AuditLogListResponse)
+async def list_audit_logs(
+    limit: int = 50,
+    offset: int = 0,
+    username: str | None = None,
+    action: str | None = None,
+    target_type: str | None = None,
+    admin: User = Depends(require_admin),
+    db: UserDatabase = Depends(get_user_db),
+):
+    """管理员查看用户操作审计日志。"""
+    logs, total = db.list_audit_logs(
+        limit=limit,
+        offset=offset,
+        username=username,
+        action=action,
+        target_type=target_type,
+    )
+    return AuditLogListResponse(
+        items=[
+            AuditLogOut(
+                id=log.id,
+                user_id=log.user_id,
+                username=log.username,
+                action=log.action,
+                target_type=log.target_type,
+                target_id=log.target_id,
+                detail=log.detail,
+                client_ip=log.client_ip,
+                status_code=log.status_code,
+                created_at=log.created_at.strftime("%Y-%m-%d %H:%M:%S") if log.created_at else "",
+            )
+            for log in logs
+        ],
+        total=total,
+    )
 

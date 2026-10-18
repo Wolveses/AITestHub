@@ -106,6 +106,10 @@ def build_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    from insight_aitest.platform.auth.middleware import AuditLogMiddleware
+
+    app.add_middleware(AuditLogMiddleware)
+
     # 4. 平台级路由
     app.include_router(build_platform_router(), prefix="/api/platform")
 

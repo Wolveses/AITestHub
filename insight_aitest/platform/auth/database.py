@@ -14,7 +14,7 @@ from typing import Optional
 from sqlalchemy import select
 
 from insight_aitest.platform.persistence import Base, get_engine, session_scope
-from insight_aitest.platform.auth.models import User, UserRole
+from insight_aitest.platform.auth.models import User, UserRole, AuditLog
 from insight_aitest.platform.auth.security import hash_password
 
 DEFAULT_ADMIN_USERNAME = "admin"
@@ -32,7 +32,7 @@ class UserDatabase:
         # 初始化建表
         Base.metadata.create_all(
             get_engine(db_path),
-            tables=[User.__table__],
+            tables=[User.__table__, AuditLog.__table__],
         )
         # 确保内置管理员存在
         self._ensure_default_admin()
@@ -140,3 +140,65 @@ class UserDatabase:
             user.display_name = display_name
             user.updated_at = datetime.now()
             return True
+
+    # ===== 审计日志操作 =====
+
+    def log_action(
+        self,
+        action: str,
+        user_id: int | None = None,
+        username: str = "anonymous",
+        target_type: str = "",
+        target_id: str = "",
+        detail: str = "",
+        client_ip: str = "",
+        status_code: int = 200,
+    ) -> AuditLog:
+        """记录一条操作日志。"""
+        with session_scope(self.db_path) as s:
+            log = AuditLog(
+                user_id=user_id,
+                username=username,
+                action=action,
+                target_type=target_type,
+                target_id=str(target_id),
+                detail=detail,
+                client_ip=client_ip,
+                status_code=status_code,
+            )
+            s.add(log)
+            s.flush()
+            log_id = log.id
+
+        with session_scope(self.db_path) as s:
+            return s.get(AuditLog, log_id)
+
+    def list_audit_logs(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        username: str | None = None,
+        action: str | None = None,
+        target_type: str | None = None,
+    ) -> tuple[list[AuditLog], int]:
+        """查询审计日志列表，支持分页和多重筛选，返回 (logs, total)。"""
+        from sqlalchemy import func
+
+        with session_scope(self.db_path) as s:
+            stmt = select(AuditLog)
+            count_stmt = select(func.count(AuditLog.id))
+
+            if username:
+                stmt = stmt.where(AuditLog.username.like(f"%{username}%"))
+                count_stmt = count_stmt.where(AuditLog.username.like(f"%{username}%"))
+            if action:
+                stmt = stmt.where(AuditLog.action == action)
+                count_stmt = count_stmt.where(AuditLog.action == action)
+            if target_type:
+                stmt = stmt.where(AuditLog.target_type == target_type)
+                count_stmt = count_stmt.where(AuditLog.target_type == target_type)
+
+            total = s.scalar(count_stmt) or 0
+            stmt = stmt.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).offset(offset).limit(limit)
+            logs = list(s.scalars(stmt))
+            return logs, total

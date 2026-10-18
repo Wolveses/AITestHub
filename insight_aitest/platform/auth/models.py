@@ -40,3 +40,20 @@ class User(MappedAsDataclass, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+
+
+class AuditLog(MappedAsDataclass, Base):
+    """用户操作审计日志表。"""
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, init=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)  # CREATE / UPDATE / DELETE / LOGIN 等
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    username: Mapped[str] = mapped_column(Text, default="anonymous")
+    target_type: Mapped[str] = mapped_column(Text, default="")  # user / conversation / task / project / kb 等
+    target_id: Mapped[str] = mapped_column(Text, default="")  # 操作对象ID
+    detail: Mapped[str] = mapped_column(Text, default="")  # 操作描述或参数详情
+    client_ip: Mapped[str] = mapped_column(Text, default="")  # 客户端IP
+    status_code: Mapped[int] = mapped_column(Integer, default=200)  # HTTP响应状态或结果状态
+    created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
