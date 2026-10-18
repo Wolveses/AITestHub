@@ -8,5 +8,9 @@
   "chunk_overlap": 80,
   "top_k": 4,
   "min_score": 0.3,
-  "history_turns": 6
+  "history_turns": 6,
+  "feishu": {
+    "app_id": "cli_your_app_id_here",
+    "app_secret": "your_app_secret_here"
+  }
 }

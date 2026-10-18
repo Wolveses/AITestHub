@@ -141,6 +141,43 @@ export function DocumentRow({
               </span>
             )
           )}
+          {/* 来源标识（本地 / 飞书） */}
+          {doc.source_type === 'feishu' ? (
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 2,
+                background: 'rgba(59, 130, 246, 0.1)',
+                color: '#2563eb',
+                padding: '1px 5px',
+                borderRadius: 4,
+                fontSize: 10,
+                fontWeight: 600,
+                border: '1px solid rgba(59, 130, 246, 0.25)',
+              }}
+              title="飞书知识库同步文档"
+            >
+              飞书
+            </span>
+          ) : (
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 2,
+                background: 'rgba(107, 114, 128, 0.1)',
+                color: 'var(--text-secondary, #6b7280)',
+                padding: '1px 5px',
+                borderRadius: 4,
+                fontSize: 10,
+                border: '1px solid rgba(107, 114, 128, 0.2)',
+              }}
+              title="本地上传文档"
+            >
+              本地
+            </span>
+          )}
           {doc.status === 'ready' && <span>{t('kb.chunkCharCount', { chunks: doc.chunk_count, chars: doc.char_count })}</span>}
           {typeLabel && <span style={{ background: 'var(--bg-card)', padding: '0 5px', borderRadius: 3 }}>{typeLabel}</span>}
           {doc.tags?.length > 0 && (

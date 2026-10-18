@@ -33,6 +33,10 @@ export const moduleMap: Record<string, ComponentType> = {
 // 子路由映射。key = moduleId（与 manifest m.id 一致），value = { subPath: lazy 组件 }。
 // 与 moduleMap 同模式 lazy 解析，子视图与根 App 同 chunk（同 barrel 导出）。
 export const childrenMap: Record<string, Record<string, ComponentType>> = {
+  kb: {
+    local: lazy(() => import('./modules/kb').then((m) => ({ default: m.LocalKnowledgeBaseApp }))),
+    feishu: lazy(() => import('./modules/kb').then((m) => ({ default: m.FeishuKnowledgeBaseApp }))),
+  },
   ai: {
     agent: lazy(() => import('./modules/ai').then((m) => ({ default: m.AgentWorkbench }))),
   },

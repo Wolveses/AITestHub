@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Upload, Folder, ChevronRight, Home, UploadCloud } from 'lucide-react';
+import { AlertTriangle, Upload, Folder, ChevronRight, Home, UploadCloud, RefreshCw, Globe } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useKnowledgeStore, type Document, type FolderNode } from '../store/knowledgeStore';
 import { useProjectStore } from '../../../shared/store/projectStore';
@@ -17,7 +17,9 @@ export function KnowledgeBase() {
     documents,
     folders,
     currentFolderId,
+    activeTab,
     uploading,
+    syncingFeishu,
     loadDocuments,
     loadFolders,
     setCurrentFolderId,
@@ -25,6 +27,8 @@ export function KnowledgeBase() {
     deleteDocument,
     stopPolling,
     exportZipUrl,
+    listFeishuSpaces,
+    syncFeishuSpace,
   } = useKnowledgeStore();
   const { currentProjectId } = useProjectStore();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -38,12 +42,16 @@ export function KnowledgeBase() {
   const [moveDoc, setMoveDoc] = useState<Document | null>(null);
   const [moveOpen, setMoveOpen] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [feishuModalOpen, setFeishuModalOpen] = useState(false);
+  const [feishuSpaces, setFeishuSpaces] = useState<{ space_id: string; name: string }[]>([]);
+  const [loadingSpaces, setLoadingSpaces] = useState(false);
+  const [syncSpaceIdInput, setSyncSpaceIdInput] = useState('');
 
   useEffect(() => {
     loadFolders();
     loadDocuments();
     return () => stopPolling();
-  }, [currentProjectId]); // 项目切换时重新加载
+  }, [currentProjectId, activeTab]); // 项目切换或标签切换时重新加载
 
   // 根据当前 currentFolderId 查找面包屑路径
   const findFolderPath = (nodes: FolderNode[], targetId: number | null): FolderNode[] => {
@@ -152,59 +160,96 @@ export function KnowledgeBase() {
 
       {/* 右侧主工作区 */}
       <div style={{ flex: 1, overflow: 'auto', padding: 16, display: 'flex', flexDirection: 'column' }}>
-        {/* 面包屑导航与当前目录指示 */}
+        {/* 面包屑导航与飞书同步按钮 */}
         <div
           style={{
             display: 'flex',
             alignItems: 'center',
-            gap: 6,
+            justifyContent: 'space-between',
             fontSize: 13,
             color: 'var(--text-muted, #666)',
             marginBottom: 12,
-            padding: '4px 0',
+            padding: '2px 0',
           }}
         >
-          <span
-            onClick={() => setCurrentFolderId(null)}
-            style={{
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 4,
-              color: currentFolderId === null ? 'var(--text-primary, #111)' : 'inherit',
-              fontWeight: currentFolderId === null ? 600 : 400,
-            }}
-          >
-            <Home size={14} /> {t('kb.allDocuments', '全部文档')}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span
+              onClick={() => setCurrentFolderId(null)}
+              style={{
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                color: currentFolderId === null ? 'var(--text-primary, #111)' : 'inherit',
+                fontWeight: currentFolderId === null ? 600 : 400,
+              }}
+            >
+              <Home size={14} /> {activeTab === 'feishu' ? '飞书知识库' : t('kb.allDocuments', '全部文档')}
+            </span>
 
-          {breadcrumbs.map((b) => (
-            <React.Fragment key={b.id}>
-              <ChevronRight size={13} style={{ opacity: 0.5 }} />
-              <span
-                onClick={() => setCurrentFolderId(b.id)}
-                style={{
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 4,
-                  color: currentFolderId === b.id ? 'var(--primary, #3b82f6)' : 'inherit',
-                  fontWeight: currentFolderId === b.id ? 600 : 400,
-                }}
-              >
-                <Folder size={14} /> {b.name}
-              </span>
-            </React.Fragment>
-          ))}
+            {breadcrumbs.map((b) => (
+              <React.Fragment key={b.id}>
+                <ChevronRight size={13} style={{ opacity: 0.5 }} />
+                <span
+                  onClick={() => setCurrentFolderId(b.id)}
+                  style={{
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    color: currentFolderId === b.id ? 'var(--primary, #3b82f6)' : 'inherit',
+                    fontWeight: currentFolderId === b.id ? 600 : 400,
+                  }}
+                >
+                  <Folder size={14} /> {b.name}
+                </span>
+              </React.Fragment>
+            ))}
+          </div>
+
+          {/* 飞书文档标签下：展示飞书空间同步操作按钮 */}
+          {activeTab === 'feishu' && (
+            <button
+              onClick={async () => {
+                setFeishuModalOpen(true);
+                setLoadingSpaces(true);
+                try {
+                  const spaces = await listFeishuSpaces();
+                  setFeishuSpaces(spaces);
+                } finally {
+                  setLoadingSpaces(false);
+                }
+              }}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+                background: 'rgba(59, 130, 246, 0.08)',
+                color: '#2563eb',
+                border: '1px solid rgba(59, 130, 246, 0.25)',
+                borderRadius: 6,
+                padding: '4px 12px',
+                fontSize: 12,
+                fontWeight: 500,
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}
+              title="配置并同步飞书知识库空间"
+            >
+              <RefreshCw size={13} className={syncingFeishu ? 'animate-spin' : ''} />
+              {syncingFeishu ? '正在同步飞书...' : '同步飞书知识库'}
+            </button>
+          )}
         </div>
 
-        {/* 上传区：紧凑尺寸、明确边界、拖拽高亮 */}
-        <div
-          onDrop={onDrop}
-          onDragOver={onDragOver}
-          onDragLeave={onDragLeave}
-          onClick={() => inputRef.current?.click()}
-          style={{
+        {/* 本地文档模式下展示上传区：紧凑尺寸、明确边界、拖拽高亮 */}
+        {activeTab === 'local' && (
+          <div
+            onDrop={onDrop}
+            onDragOver={onDragOver}
+            onDragLeave={onDragLeave}
+            onClick={() => inputRef.current?.click()}
+            style={{
             border: isDragging
               ? '2px dashed var(--primary, #3b82f6)'
               : '1.5px dashed var(--border-color, #cbd5e1)',
@@ -263,11 +308,14 @@ export function KnowledgeBase() {
             hidden
           />
         </div>
+        )}
 
-        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, display: 'flex', alignItems: 'flex-start', gap: 4 }}>
-          <AlertTriangle size={12} strokeWidth={1.5} style={{ flexShrink: 0, marginTop: 1 }} />
-          <span>{t('kb.docStorageHint')}</span>
-        </p>
+        {activeTab === 'local' && (
+          <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+            <AlertTriangle size={12} strokeWidth={1.5} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span>{t('kb.docStorageHint')}</span>
+          </p>
+        )}
 
         {/* 工具栏：搜索 + 导出全部 */}
         {documents.length > 0 && (
@@ -348,6 +396,169 @@ export function KnowledgeBase() {
 
         {/* 移动到目录弹窗 */}
         <MoveDocModal doc={moveDoc} open={moveOpen} onOpenChange={setMoveOpen} />
+
+        {/* 飞书知识库空间同步弹窗 */}
+        {feishuModalOpen && (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0,0,0,0.5)',
+              zIndex: 3000,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            onClick={() => setFeishuModalOpen(false)}
+          >
+            <div
+              style={{
+                width: 480,
+                background: 'var(--bg-base, #fff)',
+                borderRadius: 8,
+                padding: 20,
+                boxShadow: '0 8px 30px rgba(0,0,0,0.2)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 16,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 15, fontWeight: 600 }}>
+                  <Globe size={18} style={{ color: '#2563eb' }} />
+                  同步飞书知识库空间 (Wiki)
+                </div>
+                <button
+                  onClick={() => setFeishuModalOpen(false)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#999' }}
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div style={{ fontSize: 12, color: 'var(--text-muted, #64748b)', lineHeight: 1.5 }}>
+                系统将递归拉取飞书知识库目录树并在本地建立镜像目录，自动将 Doc/Docx 转为 Markdown，Sheet 转为 Excel，PDF 下载源格式（PPT 自动忽略）。
+              </div>
+
+              {loadingSpaces ? (
+                <div style={{ textAlign: 'center', padding: '24px 0', fontSize: 13, color: '#666' }}>
+                  正在连接飞书开放平台获取知识库列表...
+                </div>
+              ) : feishuSpaces.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 220, overflowY: 'auto' }}>
+                  <div style={{ fontSize: 12, fontWeight: 500 }}>选择已授权的知识库空间：</div>
+                  {feishuSpaces.map((s) => (
+                    <div
+                      key={s.space_id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '10px 12px',
+                        borderRadius: 6,
+                        border: '1px solid var(--border-color, #e2e8f0)',
+                        background: 'var(--bg-secondary, #f8fafc)',
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 500 }}>{s.name}</div>
+                        <div style={{ fontSize: 11, color: '#94a3b8' }}>ID: {s.space_id}</div>
+                      </div>
+                      <button
+                        disabled={syncingFeishu}
+                        onClick={async () => {
+                          try {
+                            const res = await syncFeishuSpace(s.space_id);
+                            alert(`同步成功！已拉取 ${res.result?.synced_count || 0} 个文档`);
+                            setFeishuModalOpen(false);
+                          } catch (err: any) {
+                            alert(`同步失败: ${err.message}`);
+                          }
+                        }}
+                        style={{
+                          background: '#2563eb',
+                          color: '#fff',
+                          border: 'none',
+                          borderRadius: 4,
+                          padding: '5px 12px',
+                          fontSize: 12,
+                          cursor: 'pointer',
+                          fontWeight: 500,
+                        }}
+                      >
+                        {syncingFeishu ? '同步中...' : '开始同步'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary, #475569)' }}>
+                    暂未自动列出空间（飞书机器人可能未直接加入空间成员）。您可以直接输入飞书知识库 Space ID：
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input
+                      type="text"
+                      placeholder="例如: 7123456789012345678"
+                      value={syncSpaceIdInput}
+                      onChange={(e) => setSyncSpaceIdInput(e.target.value)}
+                      style={{
+                        flex: 1,
+                        padding: '6px 10px',
+                        fontSize: 13,
+                        borderRadius: 4,
+                        border: '1px solid var(--border-color, #cbd5e1)',
+                        outline: 'none',
+                      }}
+                    />
+                    <button
+                      disabled={!syncSpaceIdInput.trim() || syncingFeishu}
+                      onClick={async () => {
+                        try {
+                          const res = await syncFeishuSpace(syncSpaceIdInput.trim());
+                          alert(`同步成功！已拉取 ${res.result?.synced_count || 0} 个文档`);
+                          setFeishuModalOpen(false);
+                          setSyncSpaceIdInput('');
+                        } catch (err: any) {
+                          alert(`同步失败: ${err.message}`);
+                        }
+                      }}
+                      style={{
+                        background: syncSpaceIdInput.trim() ? '#2563eb' : '#94a3b8',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: 4,
+                        padding: '6px 14px',
+                        fontSize: 13,
+                        cursor: syncSpaceIdInput.trim() ? 'pointer' : 'not-allowed',
+                        fontWeight: 500,
+                      }}
+                    >
+                      {syncingFeishu ? '同步中...' : '立即同步'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+                <button
+                  onClick={() => setFeishuModalOpen(false)}
+                  style={{
+                    background: 'var(--bg-elevated, #f1f5f9)',
+                    border: '1px solid var(--border-color, #cbd5e1)',
+                    borderRadius: 4,
+                    padding: '6px 14px',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                  }}
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

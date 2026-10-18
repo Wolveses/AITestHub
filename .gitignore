@@ -47,6 +47,9 @@ frontend_dev.log
 vite.log
 crash_log.txt
 
+# ==================== Config ====================
+config/ai.json
+
 # ==================== OS ====================
 .DS_Store
 Thumbs.db

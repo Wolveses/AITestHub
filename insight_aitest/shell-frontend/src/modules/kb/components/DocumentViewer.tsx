@@ -124,6 +124,25 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
             <button onClick={() => setShowVersions(!showVersions)} title={t('kb.versionHistory')} style={toolBtnStyle(showVersions)}>
               <History size={16} />
             </button>
+            {doc.source_url && (
+              <a
+                href={doc.source_url}
+                target="_blank"
+                rel="noreferrer"
+                title="在飞书中打开"
+                style={{
+                  ...toolBtnStyle(false),
+                  textDecoration: 'none',
+                  display: 'inline-flex',
+                  color: '#2563eb',
+                  fontWeight: 500,
+                  fontSize: 12,
+                  gap: 3,
+                }}
+              >
+                飞书原链
+              </a>
+            )}
             <a href={rawUrl(doc.id)} download title={t('kb.download')} style={{ ...toolBtnStyle(false), textDecoration: 'none', display: 'inline-flex' }}>
               <Download size={16} />
             </a>

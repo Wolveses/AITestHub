@@ -65,7 +65,59 @@ def _ensure_document_meta_columns(db_path: str) -> None:
             conn.execute("ALTER TABLE documents ADD COLUMN description TEXT DEFAULT ''")
         if "folder_id" not in cols:
             conn.execute("ALTER TABLE documents ADD COLUMN folder_id INTEGER")
+        if "source_type" not in cols:
+            conn.execute("ALTER TABLE documents ADD COLUMN source_type TEXT DEFAULT 'local'")
+        if "source_url" not in cols:
+            conn.execute("ALTER TABLE documents ADD COLUMN source_url TEXT DEFAULT ''")
+        if "external_id" not in cols:
+            conn.execute("ALTER TABLE documents ADD COLUMN external_id TEXT DEFAULT ''")
+        
+        # kb_folders 表补 source_type 与 external_id
+        folder_cols = {row[1] for row in conn.execute("PRAGMA table_info(kb_folders)")}
+        if "source_type" not in folder_cols:
+            conn.execute("ALTER TABLE kb_folders ADD COLUMN source_type TEXT DEFAULT 'local'")
+        if "external_id" not in folder_cols:
+            conn.execute("ALTER TABLE kb_folders ADD COLUMN external_id TEXT DEFAULT ''")
         conn.commit()
+
+
+def _ensure_storage_paths_aligned(db_path: str) -> None:
+    """自动比对当前用户的 ai_docs 路径与库内 storage_path 前缀。
+
+    当跨服务器/跨用户迁移（如 Mac -> Linux，或 /Users/a -> /home/b）时，
+    检测到路径失效则自动平滑替换前缀，无需手动执行 SQL 迁移。
+    """
+    import sqlite3
+    from pathlib import Path
+
+    current_docs_dir = Path.home() / ".insight_eye" / "ai_docs"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        sample = conn.execute(
+            "SELECT storage_path FROM documents WHERE storage_path IS NOT NULL AND storage_path != '' LIMIT 1"
+        ).fetchone()
+        if not sample:
+            return
+
+        old_path_str = sample["storage_path"]
+        # 如果历史路径存在，说明在同机器同用户下，无需变更
+        if Path(old_path_str).exists():
+            return
+
+        # 尝试从历史路径中提取 ai_docs 前缀
+        if "/.insight_eye/ai_docs" in old_path_str:
+            old_base = old_path_str.split("/.insight_eye/ai_docs")[0] + "/.insight_eye/ai_docs"
+            new_base = str(current_docs_dir)
+            if old_base != new_base:
+                conn.execute(
+                    "UPDATE documents SET storage_path = REPLACE(storage_path, ?, ?) WHERE storage_path LIKE ? || '%'",
+                    (old_base, new_base, old_base),
+                )
+                conn.execute(
+                    "UPDATE document_versions SET storage_path = REPLACE(storage_path, ?, ?) WHERE storage_path LIKE ? || '%'",
+                    (old_base, new_base, old_base),
+                )
+                conn.commit()
 
 
 class KBDatabase:
@@ -84,6 +136,8 @@ class KBDatabase:
         _ensure_project_columns(db_path)
         # 增量迁移：documents 表补 tags/doc_type/description/folder_id 列（KB 升级，幂等）
         _ensure_document_meta_columns(db_path)
+        # 跨服务器环境自愈迁移：自动校准 storage_path 物理路径
+        _ensure_storage_paths_aligned(db_path)
         # vec0 扩展加载：仅扩展加载/建表失败时降级（缺可选依赖）。
         # 维度不一致（ValueError）是数据完整性错误，必须抛出。
         # vector_enabled=False 时跳过 vec0 初始化——不读也不校验旧表，
@@ -171,6 +225,9 @@ class KBDatabase:
         project_id: int | None = None,
         version_id: int | None = None,
         folder_id: int | None = None,
+        source_type: str = "local",
+        source_url: str = "",
+        external_id: str = "",
     ) -> int:
         with session_scope(self.db_path) as s:
             d = Document(
@@ -181,6 +238,9 @@ class KBDatabase:
                 project_id=project_id,
                 version_id=version_id,
                 folder_id=folder_id,
+                source_type=source_type,
+                source_url=source_url,
+                external_id=external_id,
             )
             s.add(d)
             s.flush()
@@ -196,6 +256,7 @@ class KBDatabase:
         project_id: int | None = None,
         version_id: int | None = None,
         folder_id: int | None = None,
+        source_type: str | None = None,
     ) -> list[Document]:
         stmt = select(Document)
         if status_filter:
@@ -204,6 +265,8 @@ class KBDatabase:
             stmt = stmt.where(Document.project_id == project_id)
         if version_id is not None:
             stmt = stmt.where(Document.version_id == version_id)
+        if source_type is not None:
+            stmt = stmt.where(Document.source_type == source_type)
         if folder_id is not None:
             if folder_id == 0:  # 0 表示未分类/根目录
                 stmt = stmt.where(Document.folder_id.is_(None))
@@ -231,12 +294,16 @@ class KBDatabase:
         name: str,
         parent_id: int | None = None,
         project_id: int | None = None,
+        source_type: str = "local",
+        external_id: str = "",
     ) -> Folder:
         with session_scope(self.db_path) as s:
             f = Folder(
                 name=name.strip(),
                 parent_id=parent_id if parent_id and parent_id > 0 else None,
                 project_id=project_id,
+                source_type=source_type,
+                external_id=external_id,
             )
             s.add(f)
             s.flush()
@@ -245,14 +312,41 @@ class KBDatabase:
                 name=f.name,
                 parent_id=f.parent_id,
                 project_id=f.project_id,
+                source_type=f.source_type,
+                external_id=f.external_id,
                 created_at=f.created_at,
                 updated_at=f.updated_at,
             )
 
-    def list_folders(self, project_id: int | None = None) -> list[Folder]:
+    def find_folder_by_external_id(self, external_id: str) -> Folder | None:
+        if not external_id:
+            return None
+        stmt = select(Folder).where(Folder.external_id == external_id)
+        with session_scope(self.db_path) as s:
+            f = s.scalars(stmt).first()
+            if not f:
+                return None
+            return Folder(
+                id=f.id,
+                name=f.name,
+                parent_id=f.parent_id,
+                project_id=f.project_id,
+                source_type=f.source_type,
+                external_id=f.external_id,
+                created_at=f.created_at,
+                updated_at=f.updated_at,
+            )
+
+    def list_folders(
+        self,
+        project_id: int | None = None,
+        source_type: str | None = None,
+    ) -> list[Folder]:
         stmt = select(Folder)
         if project_id is not None:
             stmt = stmt.where(Folder.project_id == project_id)
+        if source_type is not None:
+            stmt = stmt.where(Folder.source_type == source_type)
         stmt = stmt.order_by(Folder.name.asc())
         with session_scope(self.db_path) as s:
             return [
@@ -261,6 +355,8 @@ class KBDatabase:
                     name=f.name,
                     parent_id=f.parent_id,
                     project_id=f.project_id,
+                    source_type=getattr(f, "source_type", "local"),
+                    external_id=getattr(f, "external_id", ""),
                     created_at=f.created_at,
                     updated_at=f.updated_at,
                 )
@@ -346,6 +442,11 @@ class KBDatabase:
 
     def find_by_content_hash(self, content_hash: str) -> Document | None:
         stmt = select(Document).where(Document.content_hash == content_hash)
+        with session_scope(self.db_path) as s:
+            return s.scalars(stmt).first()
+
+    def find_by_external_id(self, external_id: str) -> Document | None:
+        stmt = select(Document).where(Document.external_id == external_id)
         with session_scope(self.db_path) as s:
             return s.scalars(stmt).first()
 

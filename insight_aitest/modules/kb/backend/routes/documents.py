@@ -49,6 +49,9 @@ class DocumentOut(BaseModel):
     tags: list[str] = []
     doc_type: str = ""
     description: str = ""
+    source_type: str = "local"
+    source_url: str = ""
+    external_id: str = ""
     created_at: str
 
     @classmethod
@@ -73,12 +76,35 @@ class DocumentOut(BaseModel):
             tags=[str(t) for t in tags],
             doc_type=getattr(doc, "doc_type", "") or "",
             description=getattr(doc, "description", "") or "",
+            source_type=getattr(doc, "source_type", "local") or "local",
+            source_url=getattr(doc, "source_url", "") or "",
+            external_id=getattr(doc, "external_id", "") or "",
             created_at=doc.created_at.isoformat(),
         )
 
 
 def _doc_to_out(doc) -> DocumentOut:
     return DocumentOut.from_doc(doc)
+
+
+def resolve_storage_path(storage_path_str: str) -> Path:
+    """解析文档物理文件路径，支持跨机器迁移环境自动回退。"""
+    p = Path(storage_path_str)
+    if p.exists():
+        return p
+
+    # 回退尝试 1：当前用户的 ~/.insight_eye/ai_docs/ 下
+    base_docs_dir = Path.home() / ".insight_eye" / "ai_docs"
+    fallback = base_docs_dir / p.name
+    if fallback.exists():
+        return fallback
+
+    # 回退尝试 2：飞书同步子目录 ~/.insight_eye/ai_docs/feishu/ 下
+    feishu_fallback = base_docs_dir / "feishu" / p.name
+    if feishu_fallback.exists():
+        return feishu_fallback
+
+    return p
 
 
 class MoveDocumentIn(BaseModel):
@@ -90,11 +116,17 @@ async def list_documents(
     project_id: int | None = None,
     version_id: int | None = None,
     folder_id: int | None = None,
+    source_type: str | None = None,
     db: KBDatabase = Depends(get_kb_db),
 ) -> list[DocumentOut]:
     return [
         _doc_to_out(d)
-        for d in db.list_documents(project_id=project_id, version_id=version_id, folder_id=folder_id)
+        for d in db.list_documents(
+            project_id=project_id,
+            version_id=version_id,
+            folder_id=folder_id,
+            source_type=source_type,
+        )
     ]
 
 
@@ -267,7 +299,7 @@ async def download_document_raw(doc_id: int, db: KBDatabase = Depends(get_kb_db)
     doc = db.get_document(doc_id)
     if not doc:
         raise HTTPException(404, "文档不存在")
-    path = Path(doc.storage_path)
+    path = resolve_storage_path(doc.storage_path)
     if not path.exists():
         raise HTTPException(404, "原始文件不存在（可能已被删除）")
     return FileResponse(
@@ -290,7 +322,7 @@ async def export_documents_zip(
         buf = BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for doc in docs:
-                p = Path(doc.storage_path)
+                p = resolve_storage_path(doc.storage_path)
                 if p.exists():
                     # 文件名去重：同名文件加 id 前缀
                     arcname = f"{doc.id}_{doc.filename}"

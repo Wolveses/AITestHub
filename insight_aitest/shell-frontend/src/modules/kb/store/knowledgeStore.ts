@@ -14,6 +14,9 @@ export interface Document {
   tags: string[];
   doc_type: string;
   description: string;
+  source_type?: string;
+  source_url?: string;
+  external_id?: string;
   created_at: string;
 }
 
@@ -22,6 +25,8 @@ export interface FolderNode {
   name: string;
   parent_id: number | null;
   project_id: number | null;
+  source_type?: string;
+  external_id?: string;
   children: FolderNode[];
   doc_count: number;
 }
@@ -42,14 +47,23 @@ export interface TagCount {
   count: number;
 }
 
+export interface FeishuSpace {
+  space_id: string;
+  name: string;
+  description?: string;
+}
+
 interface KnowledgeState {
   documents: Document[];
   folders: FolderNode[];
-  currentFolderId: number | null; // null 表示全部，0 表示根目录未分类
+  currentFolderId: number | null; // null 表示当前根目录（本地文档/飞书文档根目录），0 表示未分类
+  activeTab: 'local' | 'feishu';
   uploading: boolean;
   saving: boolean;
+  syncingFeishu: boolean;
   pollTimer: number | null;
   tags: TagCount[];
+  setActiveTab: (tab: 'local' | 'feishu') => void;
   loadDocuments: () => Promise<void>;
   loadFolders: () => Promise<void>;
   setCurrentFolderId: (folderId: number | null) => void;
@@ -61,6 +75,9 @@ interface KnowledgeState {
   deleteDocument: (id: number) => void;
   startPolling: () => void;
   stopPolling: () => void;
+  // 飞书主动同步
+  listFeishuSpaces: () => Promise<FeishuSpace[]>;
+  syncFeishuSpace: (spaceId: string) => Promise<{ ok: boolean; result: any }>;
   // KB 升级新增
   fetchContent: (id: number) => Promise<{ text: string; filename: string; mime_type: string | null }>;
   saveContent: (id: number, text: string, note?: string) => Promise<void>;
@@ -99,15 +116,23 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   documents: [],
   folders: [],
   currentFolderId: null,
+  activeTab: 'local',
   uploading: false,
   saving: false,
+  syncingFeishu: false,
   pollTimer: null,
   tags: [],
 
+  setActiveTab: (tab: 'local' | 'feishu') => {
+    set({ activeTab: tab, currentFolderId: null });
+    get().loadFolders();
+    get().loadDocuments();
+  },
+
   loadDocuments: async () => {
     try {
-      const { currentFolderId } = get();
-      const extra: Record<string, any> = {};
+      const { currentFolderId, activeTab } = get();
+      const extra: Record<string, any> = { source_type: activeTab };
       if (currentFolderId !== null) {
         extra.folder_id = currentFolderId;
       }
@@ -128,7 +153,8 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
 
   loadFolders: async () => {
     try {
-      const qs = projectQs();
+      const { activeTab } = get();
+      const qs = projectQs({ source_type: activeTab });
       const r = await fetch(`${FOLDERS_BASE}${qs}`);
       if (r.ok) {
         const folders = await r.json();
@@ -316,4 +342,43 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   rawUrl: (id: number) => `${BASE}/${id}/raw`,
 
   exportZipUrl: () => `${BASE}/export/zip${projectQs()}`,
+
+  // ===== 飞书主动同步 =====
+
+  listFeishuSpaces: async () => {
+    try {
+      const r = await fetch('/api/modules/kb/feishu/spaces');
+      if (!r.ok) return [];
+      const data = await r.json();
+      return (data || []).map((s: any) => ({
+        space_id: s.space_id || s.id,
+        name: s.name || s.space_name || s.space_id,
+        description: s.description || '',
+      }));
+    } catch {
+      return [];
+    }
+  },
+
+  syncFeishuSpace: async (spaceId: string) => {
+    set({ syncingFeishu: true });
+    try {
+      const { currentProjectId } = useProjectStore.getState();
+      const r = await fetch('/api/modules/kb/feishu/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ space_id: spaceId, project_id: currentProjectId }),
+      });
+      if (!r.ok) {
+        const err = await r.text();
+        throw new Error(err);
+      }
+      const data = await r.json();
+      await get().loadFolders();
+      await get().loadDocuments();
+      return data;
+    } finally {
+      set({ syncingFeishu: false });
+    }
+  },
 }));

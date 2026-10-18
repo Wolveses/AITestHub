@@ -10,6 +10,7 @@ import {
   Trash2,
   Plus,
   Files,
+  RefreshCw,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useKnowledgeStore, type FolderNode } from '../store/knowledgeStore';
@@ -235,6 +236,35 @@ export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps)
                 >
                   <Plus size={13} /> {t('kb.newSubFolder', '新建子目录')}
                 </div>
+                {node.source_type === 'feishu' && node.external_id?.startsWith('space_') && (
+                  <div
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      setActiveMenuId(null);
+                      const spaceId = node.external_id?.replace('space_', '');
+                      if (spaceId) {
+                        try {
+                          await useKnowledgeStore.getState().syncFeishuSpace(spaceId);
+                        } catch (err: any) {
+                          alert(`同步失败: ${err.message}`);
+                        }
+                      }
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      padding: '6px 12px',
+                      fontSize: 12,
+                      cursor: 'pointer',
+                      color: 'var(--primary, #3b82f6)',
+                      fontWeight: 500,
+                    }}
+                    className="hover-bg"
+                  >
+                    <RefreshCw size={13} /> {t('kb.syncNow', '立即同步飞书')}
+                  </div>
+                )}
                 <div
                   onClick={(e) => handleStartRename(node, e)}
                   style={{
@@ -346,7 +376,7 @@ export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps)
 
       {/* 树主体区域 */}
       <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {/* 全部文档项 */}
+        {/* 根目录项（本地文档 / 飞书文档） */}
         <div
           onClick={() => onSelectFolder(null)}
           style={{
@@ -365,27 +395,29 @@ export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps)
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Files size={16} style={{ opacity: 0.8 }} />
-            <span>{t('kb.allDocuments', '全部文档')}</span>
+            <span>{useKnowledgeStore.getState().activeTab === 'feishu' ? '飞书知识库' : t('kb.allDocuments', '全部文档')}</span>
           </div>
 
-          {/* 新建子目录按钮移至全部文档后方 */}
-          <button
-            onClick={(e) => handleStartCreate(null, e)}
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              padding: 2,
-              borderRadius: 4,
-              display: 'inline-flex',
-              alignItems: 'center',
-              color: 'var(--text-muted, #666)',
-            }}
-            title={t('kb.newSubFolder', '新建子目录')}
-            className="hover-bg"
-          >
-            <FolderPlus size={15} />
-          </button>
+          {/* 仅本地文档支持手动新建根目录；飞书目录结构由飞书空间决定 */}
+          {useKnowledgeStore.getState().activeTab === 'local' && (
+            <button
+              onClick={(e) => handleStartCreate(null, e)}
+              style={{
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                padding: 2,
+                borderRadius: 4,
+                display: 'inline-flex',
+                alignItems: 'center',
+                color: 'var(--text-muted, #666)',
+              }}
+              title={t('kb.newSubFolder', '新建子目录')}
+              className="hover-bg"
+            >
+              <FolderPlus size={15} />
+            </button>
+          )}
         </div>
 
         {/* 根目录新建输入框 */}

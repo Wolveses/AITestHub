@@ -488,6 +488,8 @@ export default {
       // 模块名（与 manifest 一致）
       ai: '测试 Agent',
       kb: '知识库',
+      kbLocal: '本地文档',
+      kbFeishu: '飞书文档',
       testcase: '用例管理',
       api: 'API 自动化',
       performance: '性能监控',

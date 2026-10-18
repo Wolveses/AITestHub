@@ -25,6 +25,8 @@ class FolderNode(BaseModel):
     name: str
     parent_id: int | None = None
     project_id: int | None = None
+    source_type: str = "local"
+    external_id: str = ""
     children: list[FolderNode] = []
     doc_count: int = 0
 
@@ -43,11 +45,12 @@ class FolderUpdateIn(BaseModel):
 @router.get("", response_model=list[FolderNode])
 async def list_folders_tree(
     project_id: int | None = None,
+    source_type: str | None = None,
     db: KBDatabase = Depends(get_kb_db),
 ) -> list[FolderNode]:
     """获取指定项目（或全局）的文件夹目录树。"""
-    folders = db.list_folders(project_id=project_id)
-    documents = db.list_documents(project_id=project_id)
+    folders = db.list_folders(project_id=project_id, source_type=source_type)
+    documents = db.list_documents(project_id=project_id, source_type=source_type)
 
     # 统计每个文件夹直接持有的文档数
     counts: dict[int, int] = {}
@@ -63,6 +66,8 @@ async def list_folders_tree(
             name=f.name,
             parent_id=f.parent_id,
             project_id=f.project_id,
+            source_type=getattr(f, "source_type", "local") or "local",
+            external_id=getattr(f, "external_id", "") or "",
             children=[],
             doc_count=counts.get(f.id, 0),
         )

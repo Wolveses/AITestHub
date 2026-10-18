@@ -1,4 +1,6 @@
-import { NavLink } from 'react-router-dom';
+import { useState } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
+import { ChevronDown, ChevronRight, FileText, Globe } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { moduleIcons, platformIcons } from './icons';
 import type { ModuleManifest } from './types';
@@ -16,6 +18,9 @@ const CATEGORY_ORDER = ['agent', 'assets', 'testing', 'ai', 'infra'];
 
 export function SideNav({ modules, collapsed, isMobile, onNavigate }: SideNavProps) {
   const { t, i18n } = useTranslation();
+  const location = useLocation();
+  const [kbExpanded, setKbExpanded] = useState(true);
+
   // 分组标题。agent 组无标题（直接放顶部），其余组显示标题。
   const CATEGORY_LABELS: Record<string, string> = {
     agent: '',
@@ -114,6 +119,58 @@ export function SideNav({ modules, collapsed, isMobile, onNavigate }: SideNavPro
                   .sort((a, b) => a.order - b.order)
                   .map((m) => {
                     const Icon = moduleIcons[m.icon];
+
+                    // 针对知识库模块：渲染可展开/收起的二级子菜单（本地文档、飞书文档）
+                    if (m.id === 'kb') {
+                      const isKbActive = location.pathname.startsWith('/kb');
+                      return (
+                        <div key={m.id}>
+                          <div
+                            onClick={() => setKbExpanded((prev) => !prev)}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: isMobile ? '14px 20px' : '8px 16px',
+                              color: isKbActive ? 'var(--accent)' : 'var(--text-secondary)',
+                              cursor: 'pointer',
+                              fontSize: 14,
+                              background: isKbActive ? 'color-mix(in srgb, var(--accent) 5%, transparent)' : 'transparent',
+                              userSelect: 'none',
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                              {Icon ? <Icon size={16} /> : null}
+                              <span>{moduleName(m)}</span>
+                            </div>
+                            <span style={{ opacity: 0.6 }}>
+                              {kbExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            </span>
+                          </div>
+
+                          {/* 知识库子菜单：本地文档 & 飞书文档 */}
+                          {kbExpanded && (
+                            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                              <SubNavItem
+                                to="/kb/local"
+                                icon={FileText}
+                                label={t('nav.kbLocal', '本地文档')}
+                                isMobile={isMobile}
+                                onNavigate={onNavigate}
+                              />
+                              <SubNavItem
+                                to="/kb/feishu"
+                                icon={Globe}
+                                label={t('nav.kbFeishu', '飞书文档')}
+                                isMobile={isMobile}
+                                onNavigate={onNavigate}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+
                     return (
                       <NavItem
                         key={m.id}
@@ -136,6 +193,43 @@ export function SideNav({ modules, collapsed, isMobile, onNavigate }: SideNavPro
         </>
       )}
     </nav>
+  );
+}
+
+function SubNavItem({
+  to,
+  icon: Icon,
+  label,
+  isMobile,
+  onNavigate,
+}: {
+  to: string;
+  icon?: ComponentType<{ size?: number }>;
+  label: string;
+  isMobile?: boolean;
+  onNavigate?: () => void;
+}) {
+  return (
+    <NavLink
+      to={to}
+      onClick={onNavigate}
+      style={({ isActive }) => ({
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: isMobile ? '10px 20px 10px 42px' : '6px 16px 6px 36px',
+        color: isActive ? 'var(--accent)' : 'var(--text-secondary)',
+        textDecoration: 'none',
+        fontSize: 13,
+        fontWeight: isActive ? 500 : 400,
+        background: isActive ? 'color-mix(in srgb, var(--accent) 10%, transparent)' : 'transparent',
+        borderLeft: isActive ? '2px solid var(--accent)' : '2px solid transparent',
+        transition: 'all 0.15s ease',
+      })}
+    >
+      {Icon ? <Icon size={14} /> : null}
+      {label}
+    </NavLink>
   );
 }
 

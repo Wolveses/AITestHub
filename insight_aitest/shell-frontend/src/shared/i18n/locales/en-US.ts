@@ -488,6 +488,8 @@ export default {
       // Module names (aligned with manifest)
       ai: 'Test Agent',
       kb: 'Knowledge Base',
+      kbLocal: 'Local Docs',
+      kbFeishu: 'Feishu Docs',
       testcase: 'Test Case Management',
       api: 'API Automation',
       performance: 'Performance',

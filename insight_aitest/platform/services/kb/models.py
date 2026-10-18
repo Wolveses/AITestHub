@@ -94,6 +94,10 @@ class Document(MappedAsDataclass, Base):
     tags: Mapped[str] = mapped_column(Text, default="")  # JSON 数组字符串
     doc_type: Mapped[str] = mapped_column(Text, default="")
     description: Mapped[str] = mapped_column(Text, default="")
+    # 飞书等外部数据源支持
+    source_type: Mapped[str] = mapped_column(Text, default="local")  # local | feishu
+    source_url: Mapped[str] = mapped_column(Text, default="")
+    external_id: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
 
@@ -117,6 +121,8 @@ class Folder(MappedAsDataclass, Base):
     name: Mapped[str] = mapped_column(Text, default="")
     parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    source_type: Mapped[str] = mapped_column(Text, default="local")  # local | feishu
+    external_id: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
 
