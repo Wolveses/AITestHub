@@ -71,6 +71,7 @@ class VectorStore:
         top_k: int,
         document_ids: list[int] | None = None,
         project_id: int | None = None,
+        exclude_document_ids: list[int] | None = None,
     ) -> list[ScoredChunk]:
         if not self.db._vec_available:
             return []
@@ -88,24 +89,36 @@ class VectorStore:
             "JOIN chunks c ON c.id = ce.chunk_id "
             "JOIN documents d ON d.id = c.document_id"
         )
-        # 动态拼 WHERE：project_id 过滤（KB 升级，隔离检索范围）+ document_ids 过滤
+        # 动态拼 WHERE：project_id 过滤（KB 升级，隔离检索范围）+ document_ids 过滤 + exclude_document_ids 排除
         where_clauses = []
         params: list = []
         if document_ids:
             placeholders = ",".join("?" * len(document_ids))
             where_clauses.append(f"c.document_id IN ({placeholders})")
             params.extend(document_ids)
+        if exclude_document_ids:
+            placeholders = ",".join("?" * len(exclude_document_ids))
+            where_clauses.append(f"c.document_id NOT IN ({placeholders})")
+            params.extend(exclude_document_ids)
         if project_id is not None:
-            where_clauses.append("d.project_id = ?")
+            # 允许属于该项目或全局文档（project_id IS NULL）被检索，避免全局通用文档被隔离漏召
+            where_clauses.append("(d.project_id = ? OR d.project_id IS NULL)")
             params.append(project_id)
         where_sql = (
             ("WHERE " + " AND ".join(where_clauses) + " AND ") if where_clauses else "WHERE "
         )
+        # sqlite-vec 中，MATCH ... k = N 会首先在 chunk_embeddings 虚拟表中取全局前 N 个最近邻，
+        # 如果带有 document_ids 或 project_id 等外部表过滤条件，在小 k 下极易把目标文档的 chunk 筛光。
+        # 因此有外部过滤条件时，增大 MATCH 的 k 值（至少 1000 或全局总量），保证召回足够候选后再过滤。
+        match_k = top_k
+        if where_clauses:
+            match_k = max(top_k * 50, 1000)
+
         rows = conn.execute(
             f"SELECT {select_cols} {joins} "
             f"{where_sql}ce.embedding MATCH ? AND k = ? "
-            f"ORDER BY ce.distance",
-            [*params, vec_str, top_k],
+            f"ORDER BY ce.distance LIMIT ?",
+            [*params, vec_str, match_k, top_k],
         ).fetchall()
 
         from insight_aitest.platform.services.kb.database import _parse_dt

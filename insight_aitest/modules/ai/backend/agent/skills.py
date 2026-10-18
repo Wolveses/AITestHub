@@ -111,7 +111,13 @@ def _write_case(params: dict, ctx: SkillContext, case_type: str) -> dict:
         suggested_design=TestType(design),
         rationale="Agent 自动生成",
     )
-    case = ctx.generator.generate(point, document_ids=document_ids, project_id=ctx.project_id)
+    documents_text = params.get("documents_text", "")
+    case = ctx.generator.generate(
+        point,
+        document_ids=document_ids,
+        project_id=ctx.project_id,
+        documents_text=documents_text,
+    )
 
     # 落库 + 关联 project
     case.project_id = ctx.project_id
@@ -890,12 +896,35 @@ def _extract_test_points(params: dict, ctx: SkillContext) -> dict:
     消除此前分叉的 ``_EXTRACT_POINTS_PROMPT``。
     """
     query = params.get("query", "")
-    document_ids = params.get("document_ids")
+    document_ids = params["rag_doc_ids"] if "rag_doc_ids" in params else params.get("document_ids")
+    documents_text = params.get("documents_text", "")
+    uploaded_doc_ids = params.get("document_ids") or []
+
+    # 若未直接传入 documents_text，尝试从 task context 读取
+    if ctx.task_id and ctx.task_db:
+        try:
+            task = ctx.task_db.get_task(ctx.task_id)
+            if task and task.context_json:
+                if not documents_text:
+                    documents_text = task.context_json.get("documents_text", "")
+                if not uploaded_doc_ids:
+                    uploaded_doc_ids = task.context_json.get("document_ids", [])
+        except Exception:
+            pass
 
     from insight_aitest.modules.testcase.backend.deps import get_analyzer
 
     analyzer = get_analyzer()
-    points = analyzer.analyze(query, document_ids=document_ids)
+    analyze_kwargs = {"document_ids": document_ids}
+    if params.get("project_id") is not None:
+        analyze_kwargs["project_id"] = params.get("project_id")
+    if documents_text:
+        analyze_kwargs["documents_text"] = documents_text
+    # 当前上传文档已有全文注入，RAG 检索中将其过滤掉，仅引用知识库中其他文档
+    if uploaded_doc_ids and documents_text:
+        analyze_kwargs["exclude_document_ids"] = uploaded_doc_ids
+
+    points = analyzer.analyze(query, **analyze_kwargs)
 
     serialized = [
         {
@@ -923,7 +952,26 @@ def _write_cases_batch(params: dict, ctx: SkillContext) -> dict:
 
     test_points = params.get("test_points") or []
     task_id = params.get("task_id")
-    document_ids = params.get("document_ids")  # 需求文档 ID 列表，传给 generator 限定 RAG 检索范围
+    # 如果指定了 rag_doc_ids（手动模式），或者未限定（自动模式为 None），传给 generator
+    document_ids = params["rag_doc_ids"] if "rag_doc_ids" in params else params.get("document_ids")
+    documents_text = params.get("documents_text", "")
+    uploaded_doc_ids = params.get("document_ids") or []
+
+    # 若未直接传入 documents_text，尝试从 task context 读取
+    if (task_id or ctx.task_id) and ctx.task_db:
+        try:
+            tid = task_id or ctx.task_id
+            task = ctx.task_db.get_task(tid)
+            if task and task.context_json:
+                if not documents_text:
+                    documents_text = task.context_json.get("documents_text", "")
+                if not uploaded_doc_ids:
+                    uploaded_doc_ids = task.context_json.get("document_ids", [])
+        except Exception:
+            pass
+
+    exclude_doc_ids = uploaded_doc_ids if (uploaded_doc_ids and documents_text) else None
+
     batch_id = (
         f"batch-{task_id}-{int(time.time())}"
         if task_id is not None
@@ -987,6 +1035,8 @@ def _write_cases_batch(params: dict, ctx: SkillContext) -> dict:
                 point,
                 document_ids=document_ids,
                 project_id=ctx.project_id,
+                documents_text=documents_text,
+                exclude_document_ids=exclude_doc_ids,
             )
             case.project_id = ctx.project_id
             case.version_id = ctx.version_id

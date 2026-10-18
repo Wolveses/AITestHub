@@ -97,6 +97,8 @@ class TaskCreateRequest(BaseModel):
     thinking_level: str | None = None  # off/low/medium/high（None → 读全局默认 off）
     use_kb: bool = False  # 是否启用知识库检索（默认关——不是所有需求文档都需要 RAG 召回）
     document_ids: list[int] | None = None  # 需求文档的知识库 ID
+    kb_mode: str = "auto"  # auto（全局/项目范围自主检索）| manual（仅限定用户选择的文档）
+    manual_doc_ids: list[int] | None = None  # 手动模式下选中的知识库文档 ID
     conversation_id: int | None = None  # 关联已有会话（后续任务继承同一会话，修复拆分问题）
 
 
@@ -457,6 +459,15 @@ async def create_task(
         context = planner.understand(body.intent, uploaded_files)
         context["document_ids"] = body.document_ids or []
         context["project_id"] = body.project_id
+        context["kb_mode"] = body.kb_mode or "auto"
+        context["manual_doc_ids"] = body.manual_doc_ids or []
+        # 保存上传文档的全文，供后续 extract_test_points 和 write_cases_batch 完整注入提示词
+        doc_full_texts = [
+            f"--- {f['filename']} ---\n{f['content']}"
+            for f in uploaded_files
+            if f.get("content")
+        ]
+        context["documents_text"] = "\n\n".join(doc_full_texts)
 
         if not context.get("is_actionable", True):
             guidance = (
@@ -602,6 +613,15 @@ async def create_task_stream(
                     return
             context["document_ids"] = body.document_ids or []
             context["project_id"] = body.project_id
+            context["kb_mode"] = body.kb_mode or "auto"
+            context["manual_doc_ids"] = body.manual_doc_ids or []
+            # 保存上传文档的全文，供后续 extract_test_points 和 write_cases_batch 完整注入提示词
+            doc_full_texts = [
+                f"--- {f['filename']} ---\n{f['content']}"
+                for f in uploaded_files
+                if f.get("content")
+            ]
+            context["documents_text"] = "\n\n".join(doc_full_texts)
 
             # 意图分析：若用户输入仅为问候/寒暄或严重缺乏被测内容，友好引导，不进入策略生成
             if not context.get("is_actionable", True):
@@ -790,9 +810,27 @@ async def agent_chat(
                 conv_id = task.conversation_id
 
             # 加载历史消息（按 task_id，最近 history_turns*2 条，时间正序）
+            # 清洗历史中先前轮次注入的参考资料片段或大段附件，防止多轮对话重复引用膨胀
+            def _clean_history_content(text: str) -> str:
+                if not text:
+                    return ""
+                # 剔除历史用户消息里的【参考附件文档】/【当前上传文档全文】冗余
+                if "【当前上传文档全文】" in text:
+                    text = text.split("【当前上传文档全文】")[0].strip()
+                elif "【参考附件文档】" in text:
+                    text = text.split("【参考附件文档】")[0].strip()
+                # 剔除历史助手回复末尾追加的参考资料来源清单（因当前轮会有统一最新的知识库参考资料）
+                if "\n**参考资料：**" in text:
+                    text = text.split("\n**参考资料：**")[0].strip()
+                elif "\n--- \n**参考资料：**" in text:
+                    text = text.split("\n--- \n**参考资料：**")[0].strip()
+                return text
+
             history = db.list_messages_by_task(body.task_id, limit=body.history_turns * 2)
             for m in history:
-                history_msgs.append({"role": m.role.value, "content": m.content})
+                cleaned = _clean_history_content(m.content)
+                if cleaned:
+                    history_msgs.append({"role": m.role.value, "content": cleaned})
 
             # 若历史为空（旧 task 无持久化消息）→ 从 task 字段合成上下文
             if not history_msgs:
@@ -885,11 +923,21 @@ async def agent_chat(
             from insight_aitest.modules.ai.backend.deps import get_retriever
 
             retriever = get_retriever()
+            # 过滤掉当前任务上传的文档（提示词/上下文已包含全文或关联，参考资料中仅引用其他背景知识库）
+            uploaded_task_doc_ids = doc_ids if has_task_context else []
+            exclude_ids = uploaded_task_doc_ids or None
+            # 若用户在前端手动勾选了文档，body.document_ids 优先级高于全部知识库
+            search_doc_ids = body.document_ids if body.document_ids else None
+            # 若手动勾选与排除文档完全重合，则不排除
+            if search_doc_ids and exclude_ids and set(search_doc_ids).issubset(set(exclude_ids)):
+                exclude_ids = None
+
             scored = retriever.retrieve(
                 body.message,
-                document_ids=body.document_ids,
+                document_ids=search_doc_ids,
                 project_id=body.project_id,
                 fallback=False,
+                exclude_document_ids=exclude_ids,
             )
             if scored:
                 chunks = [(s.document.filename, s.chunk.text) for s in scored[:5]]
@@ -1022,19 +1070,27 @@ async def select_strategy(
         raise HTTPException(400, f"策略 {body.strategy_id} 不存在")
 
     plan = selected.get("plan", [])
-    # 从 task context 注入 document_ids（LLM 可能生成了空 []，始终用真实值覆盖）
-    doc_ids = (task.context_json or {}).get("document_ids", [])
-    if doc_ids:
-        for step in plan:
-            if step.get("skill") in {
-                "extract_test_points",
-                "write_cases_batch",
-                "write_functional_case",
-                "write_api_case",
-                "write_ui_case_from_image",
-                "generate_data_driven_api_case",
-            }:
-                step["params"]["document_ids"] = doc_ids
+    ctx_data = task.context_json or {}
+    docs_text = ctx_data.get("documents_text", "")
+    kb_mode = ctx_data.get("kb_mode", "auto")
+    manual_doc_ids = ctx_data.get("manual_doc_ids", [])
+    doc_ids = ctx_data.get("document_ids", [])
+    # RAG 检索的 rag_doc_ids：手动模式下限定用户选中的文档；自动模式下为 None（支持全局及相关背景文档召回）
+    rag_doc_ids = manual_doc_ids if (kb_mode == "manual" and manual_doc_ids) else None
+
+    for step in plan:
+        if step.get("skill") in {
+            "extract_test_points",
+            "write_cases_batch",
+            "write_functional_case",
+            "write_api_case",
+            "write_ui_case_from_image",
+            "generate_data_driven_api_case",
+        }:
+            params = step.setdefault("params", {})
+            params["documents_text"] = docs_text
+            params["document_ids"] = doc_ids
+            params["rag_doc_ids"] = rag_doc_ids
     db.select_task_strategy(task_id, body.strategy_id, plan)
     logger.info(
         "[AI Task] 用户选择策略执行 (task_id=%s): strategy=%s (%s), 规划执行步骤数=%d",
@@ -1194,7 +1250,14 @@ async def generate_batch(
         raise HTTPException(400, "test_points 不能为空")
 
     # 构造单步 plan：write_cases_batch 接收确认后的测试点
-    document_ids = (task.context_json or {}).get("document_ids", [])
+    ctx_data = task.context_json or {}
+    docs_text = ctx_data.get("documents_text", "")
+    kb_mode = ctx_data.get("kb_mode", "auto")
+    manual_doc_ids = ctx_data.get("manual_doc_ids", [])
+    rag_doc_ids = manual_doc_ids if (kb_mode == "manual" and manual_doc_ids) else None
+
+    document_ids = ctx_data.get("document_ids", [])
+
     plan = [
         {
             "skill": "write_cases_batch",
@@ -1203,6 +1266,8 @@ async def generate_batch(
                 "test_points": body.test_points,
                 "task_id": task_id,
                 "document_ids": document_ids,
+                "rag_doc_ids": rag_doc_ids,
+                "documents_text": docs_text,
             },
         }
     ]

@@ -141,7 +141,7 @@ interface TaskState {
   setSelectedDocIds: (ids: number[]) => void;
   sendIntent: (text: string) => Promise<void>;
   _sendChat: (text: string, uploadedFiles: { filename: string; content: string }[], projectId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[]) => Promise<void>;  // 对话模式管道
-  _sendTask: (text: string, uploadedFiles: { filename: string; content: string }[], projectId: number | null, versionId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[], conversationId?: number) => Promise<void>;  // 任务模式管道
+  _sendTask: (text: string, uploadedFiles: { filename: string; content: string }[], projectId: number | null, versionId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[], conversationId?: number, kbMode?: string, manualDocIds?: number[]) => Promise<void>;  // 任务模式管道
 
   _sendIntentSync: (intent: string, uploadedFiles: { filename: string; content: string }[], projectId: number | null, versionId: number | null, documentIds?: number[], conversationId?: number) => Promise<void>;
   stopStreaming: () => void;           // 中断流式
@@ -432,16 +432,17 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
 
     const finalDocIds = hasFiles ? docIds : [...(docIds.length ? docIds : inheritedDocIds)];
-    // 手动档：合并用户选择的文档ID
-    const allDocIds = effectiveDocIds
-      ? [...new Set([...finalDocIds, ...effectiveDocIds])]
-      : finalDocIds;
+    // 手动档：由用户明确选定的知识库文档ID；自动档：传 undefined（让 RAG 自主在全知识库/当前项目检索）
+    const ragDocIds = kbMode === 'manual'
+      ? (effectiveDocIds && effectiveDocIds.length > 0 ? effectiveDocIds : undefined)
+      : undefined;
 
     if (workMode === 'chat') {
-      await get()._sendChat(text, uploadedFiles, currentProjectId, thinkingLevel, useKb, allDocIds);
+      await get()._sendChat(text, uploadedFiles, currentProjectId, thinkingLevel, useKb, ragDocIds);
     } else {
       const convId = currentTask?.conversation_id ?? undefined;
-      await get()._sendTask(text, uploadedFiles, currentProjectId, currentVersionId, thinkingLevel, useKb, allDocIds, convId);
+      // 任务模式下：finalDocIds 为本次上传/关联的需求文档ID，ragDocIds 为手动指定的额外检索范围
+      await get()._sendTask(text, uploadedFiles, currentProjectId, currentVersionId, thinkingLevel, useKb, finalDocIds, convId, kbMode, ragDocIds);
     }
   },
 
@@ -454,8 +455,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
       let prompt = text;
       if (uploadedFiles && uploadedFiles.length > 0) {
-        const fileContentStr = uploadedFiles.map(f => `--- ${f.filename} ---\n${f.content.slice(0, 3000)}`).join('\n\n');
-        prompt = `${prompt}\n\n【参考附件文档】\n${fileContentStr}`.trim();
+        const fileContentStr = uploadedFiles.map(f => `--- ${f.filename} ---\n${f.content}`).join('\n\n');
+        prompt = `${prompt}\n\n【当前上传文档全文】\n${fileContentStr}`.trim();
       }
 
       const { currentTask, chatConversationId } = get();
@@ -591,7 +592,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
 
   // 统一任务管道：所有消息走 understand → strategize → execute（LLM 做意图识别）
-  _sendTask: async (text: string, uploadedFiles: { filename: string; content: string }[], currentProjectId: number | null, currentVersionId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[], conversationId?: number) => {
+  _sendTask: async (text: string, uploadedFiles: { filename: string; content: string }[], currentProjectId: number | null, currentVersionId: number | null, thinkingLevel: string, useKb: boolean, documentIds?: number[], conversationId?: number, kbMode?: string, manualDocIds?: number[]) => {
     try {
       // understand + strategize（流式 SSE）
       set({ phase: 'understanding', phaseMessage: PHASE_MESSAGES.understanding, streamingThinking: null, streamingMessage: null });
@@ -609,6 +610,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           thinking_level: thinkingLevel,
           use_kb: useKb,
           document_ids: documentIds ?? [],  // 贯穿全链路的文档ID
+          kb_mode: kbMode || 'auto',
+          manual_doc_ids: manualDocIds ?? [],
           conversation_id: conversationId ?? undefined,  // 关联已有会话（修复拆分问题）
         }),
         signal: abortCtrl.signal,

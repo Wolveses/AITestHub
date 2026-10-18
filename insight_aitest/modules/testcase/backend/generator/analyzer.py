@@ -58,9 +58,20 @@ class Analyzer:
         self.llm = llm
         self.config = config
 
-    def _retrieve(self, query: str, document_ids, project_id: int | None = None):
+    def _retrieve(
+        self,
+        query: str,
+        document_ids,
+        project_id: int | None = None,
+        exclude_document_ids: list[int] | None = None,
+    ):
         try:
-            return self.retriever.retrieve(query, document_ids=document_ids, project_id=project_id)
+            return self.retriever.retrieve(
+                query,
+                document_ids=document_ids,
+                project_id=project_id,
+                exclude_document_ids=exclude_document_ids,
+            )
         except Exception:
             return []
 
@@ -69,16 +80,25 @@ class Analyzer:
         query: str,
         document_ids: list[int] | None = None,
         project_id: int | None = None,
+        documents_text: str = "",
+        exclude_document_ids: list[int] | None = None,
     ) -> list[TestPoint]:
         """检索 → LLM 分析 → 可测点清单。
 
         project_id 非 None 时按项目隔离 RAG 检索（KB 升级，杜绝跨项目污染）。
+        documents_text: 当前上传文档的全文（避免仅靠检索分块丢失全局上下文）。
+        exclude_document_ids: 检索时排除的文档 ID（例如上传文档本身已有全文注入，检索中排除以仅引用其他知识库）。
         """
         from insight_aitest.modules.testcase.backend.persistence.models import CaseType, TestType
 
-        scored = self._retrieve(query, document_ids, project_id=project_id)
+        scored = self._retrieve(
+            query,
+            document_ids,
+            project_id=project_id,
+            exclude_document_ids=exclude_document_ids,
+        )
         chunks = [(s.document.filename, s.chunk.text) for s in scored]
-        prompt = build_analyze_prompt(query, chunks)
+        prompt = build_analyze_prompt(query, chunks, documents_text=documents_text)
         raw = self.llm.chat([{"role": "user", "content": prompt}])
         data = _extract_json(raw)
         if not data or not isinstance(data, list):

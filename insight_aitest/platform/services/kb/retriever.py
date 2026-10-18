@@ -48,6 +48,7 @@ class Retriever:
         document_ids: list[int] | None = None,
         project_id: int | None = None,
         fallback: bool = True,
+        exclude_document_ids: list[int] | None = None,
     ) -> list["ScoredChunk"]:
         """三级降级检索：向量 → 关键词 → 原文。
         如果查询包含明确的 IP 地址等实体标识符，优先执行精确关键词匹配，确保专用实体不被泛化语义掩盖。
@@ -57,23 +58,23 @@ class Retriever:
         # 检查是否包含明确的 IP 地址等高精度关键词标识
         has_ip = bool(re.search(r"\b\d{1,3}(?:\.\d{1,3}){2,3}\b", query))
         if has_ip:
-            kw_results = self._keyword_retrieve(query, k, document_ids, project_id)
+            kw_results = self._keyword_retrieve(query, k, document_ids, project_id, exclude_document_ids)
             if kw_results:
                 return kw_results
 
         # L1: 向量语义搜索
-        results = self._vector_retrieve(query, k, document_ids, project_id)
+        results = self._vector_retrieve(query, k, document_ids, project_id, exclude_document_ids)
         if results:
             return results
 
         # L2: SQL 关键词回退
-        results = self._keyword_retrieve(query, k, document_ids, project_id)
+        results = self._keyword_retrieve(query, k, document_ids, project_id, exclude_document_ids)
         if results:
             return results
 
         # L3: 文档原文兜底（仅在允许 fallback 时触发，如用例生成器；常规对话不兜底无关文档）
         if fallback:
-            return self._fulltext_fallback(query, k, document_ids, project_id)
+            return self._fulltext_fallback(query, k, document_ids, project_id, exclude_document_ids=exclude_document_ids)
         return []
 
     def keyword_search(
@@ -82,9 +83,10 @@ class Retriever:
         top_k: int = 4,
         document_ids: list[int] | None = None,
         project_id: int | None = None,
+        exclude_document_ids: list[int] | None = None,
     ) -> list["ScoredChunk"]:
         """直接关键词搜索（手动档专用，跳过向量）。"""
-        return self._keyword_retrieve(query, top_k, document_ids, project_id)
+        return self._keyword_retrieve(query, top_k, document_ids, project_id, exclude_document_ids)
 
     def document_content(
         self,
@@ -143,6 +145,7 @@ class Retriever:
         k: int,
         document_ids: list[int] | None,
         project_id: int | None,
+        exclude_document_ids: list[int] | None = None,
     ) -> list["ScoredChunk"]:
         if not getattr(self.config, "vector_enabled", False):
             return []
@@ -156,12 +159,39 @@ class Retriever:
             fetch_k = max(self.config.rerank_fetch_k, k)
 
         results = self.vector_store.search(
-            query_vec, top_k=fetch_k, document_ids=document_ids, project_id=project_id
+            query_vec,
+            top_k=fetch_k,
+            document_ids=document_ids,
+            project_id=project_id,
+            exclude_document_ids=exclude_document_ids,
         )
         results = [r for r in results if r.score >= self.config.min_score]
 
         if self.config.rerank_enabled and len(results) > k:
             results = self._rerank(query, results, k)
+
+        # 文档多样性控制：当检索未限定单个文档且结果中包含多个不同文档时，
+        # 单篇文档最多占据 2 个 chunk，避免某一文档的相似 chunk 霸占全部 top-k 槽位
+        distinct_docs = {r.document.filename for r in results}
+        if not (document_ids and len(document_ids) == 1) and len(distinct_docs) > 1 and len(results) > k:
+            doc_counts: dict[str, int] = {}
+            diversified: list["ScoredChunk"] = []
+            max_per_doc = 2
+            for r in results:
+                doc_name = r.document.filename
+                cnt = doc_counts.get(doc_name, 0)
+                if cnt < max_per_doc:
+                    diversified.append(r)
+                    doc_counts[doc_name] = cnt + 1
+            # 若多样性筛选后不足 k 条，用剩余高分 chunk 补齐
+            if len(diversified) < k:
+                seen_chunk_ids = {r.chunk.id for r in diversified}
+                for r in results:
+                    if r.chunk.id not in seen_chunk_ids:
+                        diversified.append(r)
+                        if len(diversified) >= k:
+                            break
+            results = diversified
 
         return results[:k]
 
@@ -173,6 +203,7 @@ class Retriever:
         k: int,
         document_ids: list[int] | None,
         project_id: int | None,
+        exclude_document_ids: list[int] | None = None,
     ) -> list["ScoredChunk"]:
         """SQL LIKE 关键词匹配。提取关键词逐个 LIKE 搜索并按加权命中排序。"""
         if not query or not query.strip():
@@ -196,8 +227,10 @@ class Retriever:
             stmt = s.query(Chunk, Document).join(Document, Chunk.document_id == Document.id)
             if document_ids:
                 stmt = stmt.filter(Chunk.document_id.in_(document_ids))
+            if exclude_document_ids:
+                stmt = stmt.filter(Chunk.document_id.notin_(exclude_document_ids))
             if project_id is not None:
-                stmt = stmt.filter(Document.project_id == project_id)
+                stmt = stmt.filter(or_(Document.project_id == project_id, Document.project_id.is_(None)))
 
             # 如果存在精确 IP 关键词，直接优先按 IP 精确过滤召回
             if ips:
@@ -272,14 +305,18 @@ class Retriever:
         document_ids: list[int] | None,
         project_id: int | None,
         max_chars: int = 5000,
+        exclude_document_ids: list[int] | None = None,
     ) -> list["ScoredChunk"]:
         """直接拼接文档 chunk 原文（不依赖向量也不依赖关键词匹配）。"""
         if self.kb_db is None:
             return []
-        docs_content = self.kb_db.get_chunks_text(document_ids, project_id, max_chars)
+        docs_content = self.kb_db.get_chunks_text(
+            document_ids, project_id, max_chars, exclude_document_ids=exclude_document_ids
+        )
         if not docs_content:
             # 最终兜底：从文件直接读取
-            docs_content = self._read_raw_files(document_ids, max_chars)
+            read_ids = [d for d in (document_ids or []) if not (exclude_document_ids and d in exclude_document_ids)]
+            docs_content = self._read_raw_files(read_ids, max_chars)
 
         if not docs_content:
             return []

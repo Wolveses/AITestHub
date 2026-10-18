@@ -17,32 +17,41 @@ def _format_refs(chunks: list[tuple[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
-def build_analyze_prompt(query: str, chunks: list[tuple[str, str]]) -> str:
-    """分析提示词：要求 LLM 从参考资料提取可测点，输出 JSON 数组。
+def build_analyze_prompt(
+    query: str,
+    chunks: list[tuple[str, str]],
+    documents_text: str = "",
+) -> str:
+    """分析提示词：要求 LLM 从当前上传文档全文和知识库参考资料中提取可测点，输出 JSON 数组。
 
-    当 chunks 为空时（未开启知识库检索或未命中），以 query 本身作为分析材料——
-    此时 query 通常已包含从需求文档理解到的详细测试范围描述。
+    支持双重注入：
+    1. documents_text: 当前上传文档的全文（完整需求）
+    2. chunks: 知识库 RAG 检索召回的相关文档片段（跨文档背景、规范、配置等）
     """
+    materials = []
+    if documents_text and documents_text.strip():
+        materials.append(f"【当前上传的需求文档原文】\n{documents_text.strip()}")
+
     if chunks:
         refs_text = _format_refs(chunks)
-        source_hint = "下面参考资料是从知识库检索到的相关文档片段"
-    else:
-        refs_text = query
-        source_hint = "下面分析主题是用户需求的理解摘要，请据此提取可测点"
+        materials.append(f"【知识库参考资料】\n{refs_text}")
 
-    return f"""你是一名资深测试工程师。请根据下面的信息提取「可测点」（值得测试的功能/接口/场景）。
+    if not materials:
+        materials.append(f"【分析主题】\n{query}")
 
-{source_hint}。
+    combined_info = "\n\n".join(materials)
+
+    return f"""你是一名资深测试工程师。请根据下面的需求材料提取「可测点」（值得测试的功能/接口/场景）。
 
 要求：
-1. 从给定信息中提取可测点，覆盖所有明确提到的功能模块和场景。
-2. 每个可测点给出：id（如 tp-1）、summary（一句话描述）、suggested_type（functional/api/performance/ui 之一）、suggested_design（positive/negative/boundary/edge 之一）、rationale（依据信息中哪一条）。
+1. 优先覆盖【当前上传的需求文档原文】中所有明确提到的功能模块、参数范围和场景；同时结合【知识库参考资料】补充关联系统特性、边界与异常场景。
+2. 每个可测点给出：id（如 tp-1）、summary（一句话描述）、suggested_type（functional/api/performance/ui 之一）、suggested_design（positive/negative/boundary/edge 之一）、rationale（依据材料中的具体内容说明）。
 3. 输出严格的 JSON 数组，格式：
 [{{"id":"tp-1","summary":"...","suggested_type":"functional","suggested_design":"positive","rationale":"..."}}]
 4. 不要输出 JSON 以外的内容。
 
-信息：
-{refs_text}"""
+材料：
+{combined_info}"""
 
 
 _DESIGN_HINTS = {
@@ -87,13 +96,31 @@ _TYPE_INSTRUCTION = {
 
 
 def build_generate_prompt(
-    case_type: str, test_design: str, point_summary: str, chunks: list[tuple[str, str]]
+    case_type: str,
+    test_design: str,
+    point_summary: str,
+    chunks: list[tuple[str, str]],
+    documents_text: str = "",
 ) -> str:
-    """生成提示词：为单个可测点生成一条用例，按类型/设计方法约束。"""
+    """生成提示词：为单个可测点生成一条用例，按类型/设计方法约束。
+
+    支持双重注入：当前上传文档全文 + 知识库参考资料。
+    """
     schema_hint = _TYPE_SCHEMA.get(case_type, _TYPE_SCHEMA["functional"])
     design_hint = _DESIGN_HINTS.get(test_design, _DESIGN_HINTS["positive"])
     type_hint = _TYPE_INSTRUCTION.get(case_type, _TYPE_INSTRUCTION["functional"])
-    return f"""你是一名资深测试工程师。请根据可测点和参考资料，生成一条测试用例。
+
+    materials = []
+    if documents_text and documents_text.strip():
+        materials.append(f"【当前上传的需求文档原文】\n{documents_text.strip()}")
+
+    if chunks:
+        refs_text = _format_refs(chunks)
+        materials.append(f"【知识库参考资料】\n{refs_text}")
+
+    combined_materials = ("\n\n" + "\n\n".join(materials)) if materials else "\n（无额外参考材料）"
+
+    return f"""你是一名资深测试工程师。请根据可测点和参考材料，生成一条测试用例。
 
 测试设计方法：{test_design} —— {design_hint}
 用例类型约束：{type_hint}
@@ -102,11 +129,9 @@ def build_generate_prompt(
 1. 输出严格的 JSON，格式：{{"title":"用例标题","description":"目的","preconditions":"前置条件","content":{schema_hint}}}
 2. description 必须非空，至少一句话说明本条用例的测试目的和验证点。preconditions 不能为空串（无前置条件时写"无"）。
 3. 步骤必须具体可执行，预期结果必须可验证（不能写"系统正常"这类不可验证的预期）。
-4. 基于参考资料生成；资料中不足的部分，用【待确认】标注，不要编造。
+4. 基于上传需求原文和知识库参考资料生成；资料中不足的部分，用【待确认】标注，不要编造。
 5. 不要输出 JSON 以外的内容。
-
-参考资料：
-{_format_refs(chunks)}
+{combined_materials}
 
 可测点：{point_summary}"""
 

@@ -541,6 +541,7 @@ class KBDatabase:
         document_ids: list[int] | None = None,
         project_id: int | None = None,
         max_chars: int = 5000,
+        exclude_document_ids: list[int] | None = None,
     ) -> list[tuple[str, str, int]]:
         """拼接文档 chunk 原文（HybridRetriever L3 兜底 + 手动档文档选择）。
 
@@ -558,6 +559,8 @@ class KBDatabase:
         )
         if document_ids:
             stmt = stmt.where(Chunk.document_id.in_(document_ids))
+        if exclude_document_ids:
+            stmt = stmt.where(Chunk.document_id.notin_(exclude_document_ids))
         if project_id is not None:
             stmt = stmt.where(Document.project_id == project_id)
 
