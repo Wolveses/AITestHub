@@ -41,14 +41,22 @@ def build_analyze_prompt(
 
     combined_info = "\n\n".join(materials)
 
-    return f"""你是一名资深测试工程师。请根据下面的需求材料提取「可测点」（值得测试的功能/接口/场景）。
+    return f"""你是一名资深测试工程师。请根据下面的需求材料全面分析并提取「可测点」（值得测试的功能、接口、交互与异常场景）。
 
-要求：
-1. 优先覆盖【当前上传的需求文档原文】中所有明确提到的功能模块、参数范围和场景；同时结合【知识库参考资料】补充关联系统特性、边界与异常场景。
-2. 每个可测点给出：id（如 tp-1）、summary（一句话描述）、suggested_type（functional/api/performance/ui 之一）、suggested_design（positive/negative/boundary/edge 之一）、rationale（依据材料中的具体内容说明）。
-3. 输出严格的 JSON 数组，格式：
-[{{"id":"tp-1","summary":"...","suggested_type":"functional","suggested_design":"positive","rationale":"..."}}]
-4. 不要输出 JSON 以外的内容。
+【核心提取要求】：
+1. 综合参考：必须同时深度结合【当前上传的需求文档原文】与【知识库参考资料】！
+   - 以【当前上传的需求文档原文】作为核心被测对象，全面覆盖其中所有明确提到的功能模块、参数范围、交互入口与业务规则；
+   - 充分吸收【知识库参考资料】中的信息、重视与系统其他功能的交互场景，严禁忽视参考资料。
+2. 规范输出：输出严格的 JSON 数组，格式：
+[{{"id":"tp-1","summary":"测试点简述","suggested_type":"functional","suggested_design":"positive","rationale":"提取依据与设计思路"}}]
+3. 字段说明：
+   - id：形如 tp-1, tp-2；
+   - summary：一句话清晰定义被测功能与验证场景，尽量指出关键参数或前置状态；
+   - suggested_type：必须是 functional / api / performance / ui 之一；
+   - suggested_design：必须是 positive（正向）/ negative（反向异常）/ boundary（边界值）/ edge（极端/容错）之一；
+   - rationale：必须具体指出本条测试点是源自当前上传文档的哪项功能，以及如何结合了知识库参考资料中的系统背景/规格推导而来。
+4. 真实严谨：基于材料内容提取与推导，严禁空想完全脱离材料的内容。
+5. 不要输出 JSON 以外的任何文本或解释说明。
 
 材料：
 {combined_info}"""
@@ -120,17 +128,20 @@ def build_generate_prompt(
 
     combined_materials = ("\n\n" + "\n\n".join(materials)) if materials else "\n（无额外参考材料）"
 
-    return f"""你是一名资深测试工程师。请根据可测点和参考材料，生成一条测试用例。
+    return f"""你是一名资深测试工程师。请根据可测点和给出的需求与参考材料，生成一条高质量的测试用例。
 
 测试设计方法：{test_design} —— {design_hint}
 用例类型约束：{type_hint}
 
-要求：
-1. 输出严格的 JSON，格式：{{"title":"用例标题","description":"目的","preconditions":"前置条件","content":{schema_hint}}}
-2. description 必须非空，至少一句话说明本条用例的测试目的和验证点。preconditions 不能为空串（无前置条件时写"无"）。
-3. 步骤必须具体可执行，预期结果必须可验证（不能写"系统正常"这类不可验证的预期）。
-4. 基于上传需求原文和知识库参考资料生成；资料中不足的部分，用【待确认】标注，不要编造。
-5. 不要输出 JSON 以外的内容。
+【核心生成要求】：
+1. 综合参考：必须同时结合【当前上传的需求文档原文】与【知识库参考资料】！
+   - 以【当前上传的需求文档原文】作为本次测试的核心功能与参数依据；
+   - 充分吸收【知识库参考资料】中信息，将它们深度融入到该用例的「preconditions（前置条件）」、「steps（测试操作与测试数据）」以及「expected（校验断言）」中，严禁忽视参考资料。
+2. 规范输出：输出严格的 JSON，格式：{{"title":"用例标题","description":"目的","preconditions":"前置条件","content":{schema_hint}}}
+3. 严禁空洞：description 必须明确说明本条用例的测试目的与核心验证点。preconditions 明确环境依赖与配置（无前置条件时写"无"）。
+4. 可执行与可验证：步骤必须包含具体的测试参数或操作路径，预期结果必须清晰、明确、可验证（严禁出现"系统正常"、"功能符合预期"等空泛描述）。
+5. 真实严谨：基于材料内容进行推导与设计；若参考材料中仍有缺失的关键细节，用【待确认】明确标注，切勿凭空编造。
+6. 不要输出 JSON 以外的任何文本或解释说明。
 {combined_materials}
 
 可测点：{point_summary}"""
