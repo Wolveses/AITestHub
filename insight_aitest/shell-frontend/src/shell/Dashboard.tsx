@@ -43,8 +43,11 @@ export function Dashboard({ modules }: DashboardProps) {
       .catch(() => setBackendHealthy(false));
   }, []);
 
+  // 临时屏蔽 API 自动化、性能监控、UI 自动化模块入口
+  const HIDDEN_MODULE_IDS = new Set(['api', 'performance', 'ui']);
+
   const dashboardModules = modules
-    .filter((m) => m.frontend?.nav.show_in_dashboard)
+    .filter((m) => !HIDDEN_MODULE_IDS.has(m.id) && m.frontend?.nav.show_in_dashboard)
     .sort((a, b) => a.order - b.order);
 
   const cardStyle: React.CSSProperties = {

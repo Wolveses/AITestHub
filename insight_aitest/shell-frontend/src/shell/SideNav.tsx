@@ -42,10 +42,15 @@ export function SideNav({ modules, collapsed, isMobile, onNavigate }: SideNavPro
   // 移动端：覆盖式抽屉（fixed，280 宽，避 TopBar 60px）；桌面：原 200↔0 in-flow
   const width = isMobile ? 280 : collapsed ? 0 : 200;
 
-  const grouped = modules.reduce<Record<string, ModuleManifest[]>>((acc, m) => {
-    (acc[m.category] ??= []).push(m);
-    return acc;
-  }, {});
+  // 临时屏蔽 API 自动化、性能监控、UI 自动化菜单
+  const HIDDEN_MODULE_IDS = new Set(['api', 'performance', 'ui']);
+
+  const grouped = modules
+    .filter((m) => !HIDDEN_MODULE_IDS.has(m.id))
+    .reduce<Record<string, ModuleManifest[]>>((acc, m) => {
+      (acc[m.category] ??= []).push(m);
+      return acc;
+    }, {});
 
   // 移动端与桌面：collapsed=true 时不渲染内容
   const hidden = collapsed;
