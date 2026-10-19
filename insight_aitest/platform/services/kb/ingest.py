@@ -100,9 +100,9 @@ def process_document(
     db.update_document_status(document_id, DocumentStatus.EMBEDDING, chunk_count=len(raw_chunks))
 
     # 3. 向量化（VectorStore 内部从 DB 读 chunks 拿 id）
-    #    向量检索关闭时跳过向量化：文档仍可分块存储/查阅，仅不做向量召回
+    #    向量检索关闭时跳过向量化：状态置 NOT_VECTORIZED（可重新向量化入口触发）
     if not getattr(config, "vector_enabled", False):
-        db.update_document_status(document_id, DocumentStatus.READY)
+        db.update_document_status(document_id, DocumentStatus.NOT_VECTORIZED)
         return
 
     try:

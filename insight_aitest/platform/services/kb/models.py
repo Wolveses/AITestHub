@@ -32,6 +32,7 @@ class DocumentStatus(str, Enum):
     CHUNKING = "chunking"
     EMBEDDING = "embedding"
     READY = "ready"
+    NOT_VECTORIZED = "not_vectorized"
     PARSE_FAILED = "parse_failed"
     EMBED_FAILED = "embed_failed"
     EMBED_PARTIAL = "embed_partial"
@@ -40,6 +41,7 @@ class DocumentStatus(str, Enum):
     def is_terminal(self) -> bool:
         return self in (
             DocumentStatus.READY,
+            DocumentStatus.NOT_VECTORIZED,
             DocumentStatus.PARSE_FAILED,
             DocumentStatus.EMBED_FAILED,
             DocumentStatus.EMBED_PARTIAL,

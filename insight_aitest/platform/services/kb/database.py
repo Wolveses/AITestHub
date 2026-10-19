@@ -86,6 +86,26 @@ def _ensure_document_meta_columns(db_path: str) -> None:
             conn.execute("ALTER TABLE kb_folders ADD COLUMN source_type TEXT DEFAULT 'local'")
         if "external_id" not in folder_cols:
             conn.execute("ALTER TABLE kb_folders ADD COLUMN external_id TEXT DEFAULT ''")
+
+        # 存量迁移：上传时 vector_enabled=False 的文档 status=ready 但 chunks 全 pending
+        #   → 改 status='not_vectorized'（新语义更准确，前端显示"未向量化"而非"已入库"）
+        try:
+            has_chunks = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'"
+            ).fetchone()
+            if has_chunks:
+                conn.execute(
+                    """UPDATE documents
+                       SET status = 'not_vectorized'
+                       WHERE status = 'ready'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM chunks c
+                             WHERE c.document_id = documents.id
+                               AND c.embed_status = 'ok'
+                         )"""
+                )
+        except Exception:
+            pass  # 迁移不阻塞启动
         conn.commit()
 
 
