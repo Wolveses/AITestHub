@@ -33,7 +33,7 @@ function PaginationBar({
     pages.push(totalPages);
   }
 
-  const btn = (disabled: boolean, label: string, onClick?: () => void) => ({
+  const btn = (disabled: boolean) => ({
     padding: '2px 8px',
     fontSize: 12,
     border: '1px solid var(--bg-elevated)',
@@ -51,8 +51,8 @@ function PaginationBar({
     }}>
       <span>共 {total} 条，第 {p}/{totalPages} 页</span>
       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-        <button style={btn(p === 1, '«')} disabled={p === 1} onClick={() => onChange(1, pageSize)}>«</button>
-        <button style={btn(p === 1, '‹')} disabled={p === 1} onClick={() => onChange(p - 1, pageSize)}>‹</button>
+        <button style={btn(p === 1)} disabled={p === 1} onClick={() => onChange(1, pageSize)}>«</button>
+        <button style={btn(p === 1)} disabled={p === 1} onClick={() => onChange(p - 1, pageSize)}>‹</button>
         {pages.map((x, i) =>
           x === '...' ? (
             <span key={`e${i}`} style={{ padding: '0 4px' }}>…</span>
@@ -72,8 +72,8 @@ function PaginationBar({
             >{x}</button>
           )
         )}
-        <button style={btn(p === totalPages, '›')} disabled={p === totalPages} onClick={() => onChange(p + 1, pageSize)}>›</button>
-        <button style={btn(p === totalPages, '»')} disabled={p === totalPages} onClick={() => onChange(totalPages, pageSize)}>»</button>
+        <button style={btn(p === totalPages)} disabled={p === totalPages} onClick={() => onChange(p + 1, pageSize)}>›</button>
+        <button style={btn(p === totalPages)} disabled={p === totalPages} onClick={() => onChange(totalPages, pageSize)}>»</button>
         <select
           value={pageSize}
           onChange={(e) => onChange(1, Number(e.target.value))}

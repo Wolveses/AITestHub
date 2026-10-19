@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Folder,
   FolderPlus,
@@ -20,6 +20,11 @@ interface FolderTreeProps {
   onSelectFolder: (id: number | null) => void;
 }
 
+const STORAGE_KEY = 'insight_kb_folder_tree_width';
+const DEFAULT_WIDTH = 220;
+const MIN_WIDTH = 160;
+const MAX_WIDTH = 500;
+
 export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps) {
   const { t } = useTranslation();
   const { folders, createFolder, updateFolder, deleteFolder } = useKnowledgeStore();
@@ -29,6 +34,58 @@ export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps)
   const [creatingParentId, setCreatingParentId] = useState<number | null | undefined>(undefined);
   const [newFolderName, setNewFolderName] = useState('');
   const [activeMenuId, setActiveMenuId] = useState<number | null>(null);
+
+  // 左右拖动调整宽度
+  const [width, setWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const val = parseInt(saved, 10);
+        if (!isNaN(val) && val >= MIN_WIDTH && val <= MAX_WIDTH) {
+          return val;
+        }
+      }
+    } catch {}
+    return DEFAULT_WIDTH;
+  });
+  const [isDragging, setIsDragging] = useState(false);
+  const treeRef = useRef<HTMLDivElement>(null);
+  const startDragInfo = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+    startDragInfo.current = { startX: e.clientX, startWidth: width };
+  }, [width]);
+
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!startDragInfo.current) return;
+      const delta = e.clientX - startDragInfo.current.startX;
+      const nextWidth = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, startDragInfo.current.startWidth + delta));
+      setWidth(nextWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+      startDragInfo.current = null;
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, width.toString());
+    } catch {}
+  }, [width]);
 
   const toggleExpand = (id: number, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -343,21 +400,52 @@ export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps)
 
   return (
     <div
+      ref={treeRef}
       onClick={() => setActiveMenuId(null)}
       style={{
-        width: 220,
-        minWidth: 180,
-        maxWidth: 280,
+        width,
+        minWidth: MIN_WIDTH,
+        maxWidth: MAX_WIDTH,
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        borderRight: '1px solid var(--border-color, #e5e7eb)',
         backgroundColor: 'var(--bg-secondary, #fafafa)',
         padding: '12px 8px',
         boxSizing: 'border-box',
         overflow: 'hidden',
+        position: 'relative',
+        flexShrink: 0,
+        userSelect: isDragging ? 'none' : 'auto',
       }}
     >
+      {/* 左右拖动调整宽度手柄 */}
+      <div
+        onMouseDown={handleMouseDown}
+        style={{
+          position: 'absolute',
+          top: 0,
+          right: 0,
+          width: 5,
+          height: '100%',
+          cursor: 'col-resize',
+          zIndex: 10,
+          backgroundColor: isDragging ? 'var(--accent, #3b82f6)' : 'transparent',
+          borderRight: `1px solid ${isDragging ? 'var(--accent, #3b82f6)' : 'var(--border-color, #e5e7eb)'}`,
+          transition: isDragging ? 'none' : 'background-color 0.15s ease',
+        }}
+        onMouseEnter={(e) => {
+          if (!isDragging) {
+            e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.3)';
+          }
+        }}
+        onMouseLeave={(e) => {
+          if (!isDragging) {
+            e.currentTarget.style.backgroundColor = 'transparent';
+          }
+        }}
+        title="拖动调整宽度"
+      />
+
       {/* 头部标题 */}
       <div
         style={{
