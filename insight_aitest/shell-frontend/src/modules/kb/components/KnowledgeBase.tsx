@@ -246,6 +246,47 @@ export function KnowledgeBase() {
     setMoveOpen(true);
   };
 
+  const handleReindex = async (docId: number) => {
+    try {
+      const r = await fetch(`/api/modules/kb/documents/${docId}/reindex`, { method: 'POST' });
+      if (!r.ok) {
+        const err = await r.text();
+        alert(err || `重新向量化失败 (HTTP ${r.status})`);
+        return;
+      }
+      setTimeout(() => loadDocuments(), 1000);
+    } catch (e: any) {
+      alert(`重新向量化失败: ${e?.message || e}`);
+    }
+  };
+
+  const handleReindexAll = async () => {
+    // 先调 stats 拿需要 reindex 的数量
+    try {
+      const stats = await fetch('/api/modules/ai/tasks/kb/stats').then(r => r.ok ? r.json() : null);
+      const notVectorized = stats?.total_docs ? stats.total_docs - (stats.vectorized_docs || 0) : 0;
+      const cnt = notVectorized > 0 ? notVectorized : '全部';
+      if (!confirm(`将对 ${cnt} 个未向量化/向量化失败的文档重新向量化，需要调用 embedding API，确定？`)) return;
+      // 复用批量 reindex：后端支持传 all=true 让它自动找所有需要 reindex 的文档
+      const r = await fetch('/api/modules/ai/tasks/kb/reindex', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ all: true, document_ids: [] }),
+      });
+      if (!r.ok) {
+        const err = await r.text();
+        alert(err || `批量重新向量化失败 (HTTP ${r.status})`);
+        return;
+      }
+      setTimeout(() => loadDocuments(), 1500);
+    } catch (e: any) {
+      alert(`批量重新向量化失败: ${e?.message || e}`);
+    }
+  };
+
+  // 统计当前列表里需要 reindex 的文档数（复用已解构的 documents）
+  const needReindexCount = documents.filter(d => d.status === 'not_vectorized' || d.status === 'embed_failed' || d.status === 'embed_partial').length;
+
   return (
     <div style={{ flex: 1, display: 'flex', height: '100%', overflow: 'hidden' }}>
       {/* 左侧目录树 */}
@@ -337,6 +378,27 @@ export function KnowledgeBase() {
               {syncingFeishu ? '正在同步飞书...' : '同步飞书知识库'}
             </button>
           )}
+          <button
+            onClick={handleReindexAll}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+              background: 'var(--bg-card, rgba(148,163,184,0.08))',
+              color: 'var(--text-secondary)',
+              border: '1px solid var(--border-color, rgba(148,163,184,0.25))',
+              borderRadius: 6,
+              padding: '4px 12px',
+              fontSize: 12,
+              fontWeight: 500,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+            title="对所有未向量化/向量化失败的文档重新执行向量化"
+          >
+            <RefreshCw size={13} />
+            {needReindexCount > 0 ? `全部重新向量化 (${needReindexCount})` : '全部重新向量化'}
+          </button>
         </div>
 
         {/* 本地文档模式下展示上传区：紧凑尺寸、明确边界、拖拽高亮 */}
@@ -481,6 +543,7 @@ export function KnowledgeBase() {
                   onEditMeta={handleEditMeta}
                   onShowVersions={handleShowVersions}
                   onMove={handleMove}
+                  onReindex={handleReindex}
                 />
               ))}
             </div>

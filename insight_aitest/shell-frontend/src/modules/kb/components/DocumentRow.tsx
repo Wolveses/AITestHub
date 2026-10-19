@@ -1,4 +1,4 @@
-import { FileText, Eye, Download, Tag as TagIcon, History, FolderInput, CheckCircle2 } from 'lucide-react';
+import { FileText, Eye, Download, Tag as TagIcon, History, FolderInput, CheckCircle2, CircleDashed, AlertCircle, XCircle, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Document } from '../store/knowledgeStore';
 import { useConfirmStore } from '../../../shared/store/confirmStore';
@@ -9,6 +9,7 @@ const STATUS_KEY: Record<string, string> = {
   chunking: 'kb.statusChunking',
   embedding: 'kb.statusEmbedding',
   ready: 'kb.statusReady',
+  not_vectorized: 'kb.statusNotVectorized',
   parse_failed: 'kb.statusParseFailed',
   embed_failed: 'kb.statusEmbedFailed',
   embed_partial: 'kb.statusEmbedPartial',
@@ -20,6 +21,7 @@ const STATUS_COLOR: Record<string, string> = {
   chunking: "var(--accent)",
   embedding: "var(--accent)",
   ready: 'var(--success, #10b981)',
+  not_vectorized: 'var(--text-muted, #64748b)',
   parse_failed: 'var(--error)',
   embed_failed: 'var(--error)',
   embed_partial: 'var(--chart-3)',
@@ -43,6 +45,7 @@ interface DocumentRowProps {
   onShowVersions: (doc: Document) => void;
   onMove?: (doc: Document) => void;
   onSelectFolder?: (folderId: number | null) => void;
+  onReindex?: (id: number) => void;
 }
 
 export function DocumentRow({
@@ -55,6 +58,7 @@ export function DocumentRow({
   onShowVersions,
   onMove,
   onSelectFolder,
+  onReindex,
 }: DocumentRowProps) {
   const { t } = useTranslation();
   const statusKey = STATUS_KEY[doc.status];
@@ -178,7 +182,7 @@ export function DocumentRow({
               本地
             </span>
           )}
-          {doc.status === 'ready' && <span>{t('kb.chunkCharCount', { chunks: doc.chunk_count, chars: doc.char_count })}</span>}
+          {(doc.status === 'ready' || doc.status === 'not_vectorized') && <span>{t('kb.chunkCharCount', { chunks: doc.chunk_count, chars: doc.char_count })}</span>}
           {typeLabel && <span style={{ background: 'var(--bg-card)', padding: '0 5px', borderRadius: 3 }}>{typeLabel}</span>}
           {doc.tags?.length > 0 && (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
@@ -197,10 +201,13 @@ export function DocumentRow({
           display: 'inline-flex',
           alignItems: 'center',
           gap: 4,
-          fontWeight: doc.status === 'ready' ? 500 : 400,
+          fontWeight: (doc.status === 'ready' || doc.status === 'not_vectorized') ? 500 : 400,
         }}
       >
         {doc.status === 'ready' && <CheckCircle2 size={13} style={{ color: 'var(--success, #10b981)' }} />}
+        {doc.status === 'not_vectorized' && <CircleDashed size={13} />}
+        {doc.status === 'embed_partial' && <AlertCircle size={13} />}
+        {doc.status === 'embed_failed' && <XCircle size={13} />}
         {st.text}
       </span>
 
@@ -221,6 +228,19 @@ export function DocumentRow({
         {onMove && (
           <button onClick={() => onMove(doc)} title={t('kb.moveToFolder', '移动到目录')} style={iconBtnStyle}>
             <FolderInput size={14} />
+          </button>
+        )}
+        {onReindex && (doc.status === 'not_vectorized' || doc.status === 'embed_failed' || doc.status === 'embed_partial') && (
+          <button
+            onClick={() => confirm({
+              title: t('kb.confirmReindexTitle', '重新向量化'),
+              message: t('kb.confirmReindexMsg', { name: doc.filename }),
+              onConfirm: () => onReindex(doc.id),
+            })}
+            title={t('kb.reindexHint', '重新向量化（复用 reindex 接口）')}
+            style={iconBtnStyle}
+          >
+            <RefreshCw size={14} />
           </button>
         )}
         <button
