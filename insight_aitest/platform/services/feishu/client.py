@@ -19,6 +19,58 @@ logger = logging.getLogger(__name__)
 FEISHU_API_BASE = "https://open.feishu.cn/open-apis"
 
 
+def _safe_sheet_name(name: str) -> str:
+    """清洗为 Excel 工作表可用的名称（去除非法字符并截断至 31 字符）。"""
+    for ch in "[]:*?/\\":
+        name = name.replace(ch, "_")
+    return (name or "未命名")[:31]
+
+
+def _bitable_cell(value: Any) -> Any:
+    """将多维表格字段值扁平化为单元格可写入的标量。"""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (int, float, str)):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for it in value:
+            if isinstance(it, dict):
+                parts.append(str(it.get("name") or it.get("text") or it.get("file_token") or it))
+            else:
+                parts.append(str(it))
+        return ", ".join(parts)
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("name") or json.dumps(value, ensure_ascii=False))
+    return str(value)
+
+
+def _sheet_cell(value: Any) -> Any:
+    """将 sheets/v2 values 返回的单元格值归一化为 openpyxl 可写入的标量。
+
+    sheets/v2 的 FormattedValue 会把富文本（带超链接、不同字体的单元格）
+    展开成 list[dict{text,type,link,...}]，openpyxl 不认这种结构，
+    需要先扁平化成字符串。其他异常类型（时间戳、布尔、None）也一并兜底。
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (int, float, str)):
+        return value
+    if isinstance(value, list):
+        # 富文本 run 数组：取每段 text 拼起来
+        if value and isinstance(value[0], dict) and any("text" in it for it in value if isinstance(it, dict)):
+            return "".join(it.get("text", "") if isinstance(it, dict) else str(it) for it in value)
+        # 其他 list（可能是多值）
+        return ", ".join(str(it) for it in value)
+    if isinstance(value, dict):
+        return str(value.get("text") or json.dumps(value, ensure_ascii=False))
+    return str(value)
+
+
 class FeishuClient:
     """飞书 API Client。"""
 
@@ -92,6 +144,30 @@ class FeishuClient:
             "Content-Type": "application/json; charset=utf-8",
         }
 
+    def _raise_feishu(self, res: httpx.Response, action: str) -> dict[str, Any]:
+        """校验 HTTP 状态与飞书业务 code，失败时抛出携带 code/msg 的异常。
+
+        飞书在 HTTP 400/403/404 等场景下仍会返回含业务 code 与 msg 的 JSON，
+        直接用 raise_for_status 会丢掉这些排查关键信息（如权限缺失的 99991672）。
+        """
+        if res.status_code >= 400:
+            code: Any = -1
+            msg = res.text[:500]
+            try:
+                body = res.json()
+                code = body.get("code", code)
+                msg = body.get("msg") or (body.get("error") or {}).get("msg") or msg
+            except Exception:
+                pass
+            raise RuntimeError(f"{action} 失败: HTTP {res.status_code} code={code} msg={msg}")
+        try:
+            data = res.json()
+        except Exception as e:
+            raise RuntimeError(f"{action} 失败: 响应非 JSON ({e}): {res.text[:200]}")
+        if data.get("code") != 0:
+            raise RuntimeError(f"{action} 失败: code={data.get('code')} msg={data.get('msg')}")
+        return data
+
     # ===== 知识库空间与节点 =====
 
     def list_spaces(self) -> list[dict[str, Any]]:
@@ -122,11 +198,41 @@ class FeishuClient:
         """获取单个空间详情。"""
         url = f"{FEISHU_API_BASE}/wiki/v2/spaces/{space_id}"
         res = httpx.get(url, headers=self._headers(), timeout=15)
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("code") == 0:
-                return data.get("data", {}).get("space")
-        return None
+        data = self._raise_feishu(res, f"获取空间详情({space_id})")
+        return data.get("data", {}).get("space")
+
+    def batch_query_metas(
+        self,
+        tokens_and_types: list[tuple[str, str]],
+        batch_size: int = 200,
+    ) -> dict[str, dict[str, Any]]:
+        """批量查询云文档元数据（latest_modify_time 等），用于增量前置过滤。
+
+        drive/v1/metas/batch_query 单次上限 200 条（实测 300 会 field validation failed）。
+        超过则自动分批。返回值 key 是 obj_token，value 是完整 meta 字典，
+        至少包含 latest_modify_time（Unix 秒，str 或 int）、create_time、title、owner_id。
+
+        入参格式：[(obj_token, obj_type), ...]
+        obj_type ∈ {doc, docx, sheet, bitable, file, slides}。
+        """
+        result: dict[str, dict[str, Any]] = {}
+        if not tokens_and_types:
+            return result
+
+        for i in range(0, len(tokens_and_types), batch_size):
+            chunk = tokens_and_types[i : i + batch_size]
+            body = {
+                "request_docs": [
+                    {"doc_token": tok, "doc_type": t} for tok, t in chunk
+                ],
+                "with_url": False,
+            }
+            url = f"{FEISHU_API_BASE}/drive/v1/metas/batch_query"
+            res = httpx.post(url, headers=self._headers(), json=body, timeout=30)
+            data = self._raise_feishu(res, f"批量查询文档元数据({i}-{i + len(chunk)})")
+            for meta in data.get("data", {}).get("metas", []):
+                result[meta["doc_token"]] = meta
+        return result
 
     def list_space_nodes(self, space_id: str, parent_node_token: str | None = None) -> list[dict[str, Any]]:
         """获取知识库空间下的节点列表（支持按 parent_node_token 查询子节点）。"""
@@ -181,10 +287,18 @@ class FeishuClient:
         """获取 Docx 文档纯文本/原始内容。"""
         url = f"{FEISHU_API_BASE}/docx/v1/documents/{document_id}/raw_content"
         res = httpx.get(url, headers=self._headers(), timeout=30)
-        res.raise_for_status()
-        data = res.json()
-        if data.get("code") != 0:
-            raise RuntimeError(f"获取 docx 失败: {data.get('msg')}")
+        data = self._raise_feishu(res, f"获取 docx 原始内容({document_id})")
+        return data.get("data", {}).get("content", "")
+
+    def get_doc_raw_content(self, document_id: str) -> str:
+        """获取旧版 Doc（obj_type=doc）纯文本内容。
+
+        旧版文档 token 无法通过 docx/v1 接口读取（返回 404 code=1770002），
+        须走 doc/v2 raw_content；该接口不需要额外的导出权限。
+        """
+        url = f"{FEISHU_API_BASE}/doc/v2/{document_id}/raw_content"
+        res = httpx.get(url, headers=self._headers(), timeout=30)
+        data = self._raise_feishu(res, f"获取旧版 doc 原始内容({document_id})")
         return data.get("data", {}).get("content", "")
 
     def get_docx_blocks(self, document_id: str) -> list[dict[str, Any]]:
@@ -197,10 +311,7 @@ class FeishuClient:
             if page_token:
                 params["page_token"] = page_token
             res = httpx.get(url, headers=self._headers(), params=params, timeout=30)
-            res.raise_for_status()
-            data = res.json()
-            if data.get("code") != 0:
-                break
+            data = self._raise_feishu(res, f"获取 docx 块({document_id})")
             items = data.get("data", {}).get("items", [])
             blocks.extend(items)
             if not data.get("data", {}).get("has_more"):
@@ -212,8 +323,51 @@ class FeishuClient:
         """下载云文档中的文件（如 PDF）。"""
         url = f"{FEISHU_API_BASE}/drive/v1/files/{file_token}/download"
         res = httpx.get(url, headers=self._headers(), timeout=60)
-        res.raise_for_status()
+        if res.status_code >= 400:
+            self._raise_feishu(res, f"下载文件({file_token})")
         return res.content
+
+    def get_sheet_as_xlsx(self, spreadsheet_token: str) -> bytes:
+        """走 sheets/v3 原生读取接口将电子表格导出为 xlsx 字节流（每张工作表一个工作表）。
+
+        不依赖 drive:export:readonly / docs:document:export 导出权限，
+        仅需 sheets:spreadsheet / sheets:spreadsheet:readonly 读取权限——
+        该权限随 wiki 空间成员自动继承，不会出现 Drive 导出的 1069902 文档级 ACL 问题。
+        """
+        from io import BytesIO
+
+        from openpyxl import Workbook
+
+        # 1. 列出所有工作表
+        query_url = f"{FEISHU_API_BASE}/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
+        q_res = httpx.get(query_url, headers=self._headers(), timeout=30)
+        sheets_data = self._raise_feishu(q_res, f"列出电子表格工作表({spreadsheet_token})")
+        sheets = sheets_data.get("data", {}).get("sheets", [])
+        if not sheets:
+            raise RuntimeError(f"电子表格无可读取工作表: {spreadsheet_token}")
+
+        wb = Workbook()
+        wb.remove(wb.active)
+        for sheet in sheets:
+            sid = sheet["sheet_id"]
+            # 2. 读取单元格值（默认 FormattedValue 即显示给用户的格式）
+            val_url = f"{FEISHU_API_BASE}/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sid}"
+            try:
+                v_res = httpx.get(val_url, headers=self._headers(),
+                                  params={"valueRenderOption": "FormattedValue"}, timeout=30)
+                v_data = self._raise_feishu(v_res, f"读取工作表 {sid} 的值")
+            except RuntimeError as e:
+                # 单张工作表读取失败（如 90215 not found sheetId）不该让整个 spreadsheet 挂
+                logger.warning("工作表 %s(%s) 读取失败，跳过: %s", sheet.get("title", sid), sid, e)
+                continue
+            values = v_data.get("data", {}).get("valueRange", {}).get("values", [])
+
+            ws = wb.create_sheet(title=_safe_sheet_name(sheet.get("title") or "未命名"))
+            for row in values:
+                ws.append([_sheet_cell(c) for c in row])
+        buf = BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
 
     def export_sheet_to_xlsx(self, spreadsheet_token: str) -> bytes:
         """调用飞书导出任务将 Sheet / 电子表格导出为 xlsx 字节流。"""
@@ -225,10 +379,7 @@ class FeishuClient:
             "type": "sheet",
         }
         res = httpx.post(create_url, headers=self._headers(), json=body, timeout=20)
-        res.raise_for_status()
-        data = res.json()
-        if data.get("code") != 0:
-            raise RuntimeError(f"创建导出任务失败: {data.get('msg')}")
+        data = self._raise_feishu(res, f"创建表格导出任务({spreadsheet_token})")
         ticket = data.get("data", {}).get("ticket")
 
         # 2. 轮询任务状态
@@ -237,8 +388,7 @@ class FeishuClient:
         for _ in range(30):
             time.sleep(1)
             q_res = httpx.get(query_url, headers=self._headers(), timeout=15)
-            q_res.raise_for_status()
-            q_data = q_res.json()
+            q_data = self._raise_feishu(q_res, "查询表格导出任务状态")
             job_status = q_data.get("data", {}).get("result", {}).get("job_status")
             if job_status == 0:  # 成功
                 file_token = q_data.get("data", {}).get("result", {}).get("file_token")
@@ -252,6 +402,75 @@ class FeishuClient:
         # 3. 下载导出生成的 xlsx 文件
         dl_url = f"{FEISHU_API_BASE}/drive/v1/export_tasks/file/{file_token}/download"
         dl_res = httpx.get(dl_url, headers=self._headers(), timeout=60)
-        dl_res.raise_for_status()
+        if dl_res.status_code >= 400:
+            self._raise_feishu(dl_res, "下载导出文件")
         return dl_res.content
+
+    # ===== 多维表格（bitable）=====
+
+    def list_bitable_tables(self, app_token: str) -> list[dict[str, Any]]:
+        """列出多维表格中的所有数据表。"""
+        url = f"{FEISHU_API_BASE}/bitable/v1/apps/{app_token}/tables"
+        tables: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            params: dict[str, Any] = {"page_size": 100}
+            if page_token:
+                params["page_token"] = page_token
+            res = httpx.get(url, headers=self._headers(), params=params, timeout=30)
+            data = self._raise_feishu(res, f"列出多维表格数据表({app_token})")
+            d = data.get("data", {})
+            tables.extend(d.get("items", []))
+            if not d.get("has_more"):
+                break
+            page_token = d.get("page_token", "")
+        return tables
+
+    def get_bitable_records(self, app_token: str, table_id: str) -> list[dict[str, Any]]:
+        """分页拉取多维表格某数据表的全部记录。"""
+        url = f"{FEISHU_API_BASE}/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+        records: list[dict[str, Any]] = []
+        page_token = ""
+        while True:
+            params: dict[str, Any] = {"page_size": 500}
+            if page_token:
+                params["page_token"] = page_token
+            res = httpx.get(url, headers=self._headers(), params=params, timeout=30)
+            data = self._raise_feishu(res, f"拉取多维表格记录({table_id})")
+            d = data.get("data", {})
+            records.extend(d.get("items", []))
+            if not d.get("has_more"):
+                break
+            page_token = d.get("page_token", "")
+        return records
+
+    def get_bitable_as_xlsx(self, app_token: str) -> bytes:
+        """将多维表格所有数据表导出为 xlsx 字节流（每张表一个工作表）。
+
+        不依赖 drive:export:readonly 导出权限，仅需多维表格读取权限。
+        """
+        from io import BytesIO
+
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        wb.remove(wb.active)
+        for table in self.list_bitable_tables(app_token):
+            records = self.get_bitable_records(app_token, table["table_id"])
+            ws = wb.create_sheet(title=_safe_sheet_name(table.get("name") or "未命名"))
+            headers: list[str] = []
+            for rec in records:
+                for key in rec.get("fields") or {}:
+                    if key not in headers:
+                        headers.append(key)
+            if headers:
+                ws.append(headers)
+            for rec in records:
+                fields = rec.get("fields") or {}
+                ws.append([_bitable_cell(fields.get(h)) for h in headers])
+        if not wb.sheetnames:
+            raise RuntimeError(f"多维表格无可导出数据表: {app_token}")
+        buf = BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
 

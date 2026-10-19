@@ -98,6 +98,9 @@ class Document(MappedAsDataclass, Base):
     source_type: Mapped[str] = mapped_column(Text, default="local")  # local | feishu
     source_url: Mapped[str] = mapped_column(Text, default="")
     external_id: Mapped[str] = mapped_column(Text, default="")
+    # 外部源修改时间戳（Unix 秒）：飞书 latest_modify_time 等值，用于元数据前置增量判断
+    # 为空则回退到 content_hash 全量比对
+    source_modified_at: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
 

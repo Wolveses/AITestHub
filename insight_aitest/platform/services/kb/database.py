@@ -18,6 +18,7 @@ import re
 import sqlite3
 import threading
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
@@ -30,6 +31,11 @@ from insight_aitest.platform.services.kb.models import (
     EmbedStatus,
     Folder,
 )
+
+# 模块级：确保同一 db_path 的 schema 迁移只跑一次（防止并发 KBDatabase() 时
+# 多个线程同时执行 _ensure_document_meta_columns → duplicate column name）
+_schema_ready: set[str] = set()
+_schema_lock = threading.Lock()
 
 
 def _ensure_project_columns(db_path: str) -> None:
@@ -71,6 +77,8 @@ def _ensure_document_meta_columns(db_path: str) -> None:
             conn.execute("ALTER TABLE documents ADD COLUMN source_url TEXT DEFAULT ''")
         if "external_id" not in cols:
             conn.execute("ALTER TABLE documents ADD COLUMN external_id TEXT DEFAULT ''")
+        if "source_modified_at" not in cols:
+            conn.execute("ALTER TABLE documents ADD COLUMN source_modified_at TEXT DEFAULT NULL")
         
         # kb_folders 表补 source_type 与 external_id
         folder_cols = {row[1] for row in conn.execute("PRAGMA table_info(kb_folders)")}
@@ -127,17 +135,21 @@ class KBDatabase:
         self._local = threading.local()  # vec0 原生连接仍用线程本地（ORM 通道另走 session_scope）
         self._vec_available: bool = False
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-        # documents/chunks/document_versions/kb_folders 建 ORM 表（IF NOT EXISTS，存量表不动；只建本模块表）
-        Base.metadata.create_all(
-            get_engine(db_path),
-            tables=[Document.__table__, Chunk.__table__, DocumentVersion.__table__, Folder.__table__],
-        )
-        # 增量迁移：旧 documents 表补 project_id/version_id 列（幂等）
-        _ensure_project_columns(db_path)
-        # 增量迁移：documents 表补 tags/doc_type/description/folder_id 列（KB 升级，幂等）
-        _ensure_document_meta_columns(db_path)
-        # 跨服务器环境自愈迁移：自动校准 storage_path 物理路径
-        _ensure_storage_paths_aligned(db_path)
+        # 建表 + 增量迁移 + 自愈校准，只对同一 db_path 跑一次。
+        # 多线程并发 KBDatabase() 时（deps.py 每次请求都 new），
+        # 多个线程同时执行 ALTER TABLE 会触发 "duplicate column name"。
+        abs_path = os.path.abspath(db_path)
+        if abs_path not in _schema_ready:
+            with _schema_lock:
+                if abs_path not in _schema_ready:  # double-check
+                    Base.metadata.create_all(
+                        get_engine(db_path),
+                        tables=[Document.__table__, Chunk.__table__, DocumentVersion.__table__, Folder.__table__],
+                    )
+                    _ensure_project_columns(db_path)
+                    _ensure_document_meta_columns(db_path)
+                    _ensure_storage_paths_aligned(db_path)
+                    _schema_ready.add(abs_path)
         # vec0 扩展加载：仅扩展加载/建表失败时降级（缺可选依赖）。
         # 维度不一致（ValueError）是数据完整性错误，必须抛出。
         # vector_enabled=False 时跳过 vec0 初始化——不读也不校验旧表，
@@ -228,6 +240,7 @@ class KBDatabase:
         source_type: str = "local",
         source_url: str = "",
         external_id: str = "",
+        source_modified_at: str | None = None,
     ) -> int:
         with session_scope(self.db_path) as s:
             d = Document(
@@ -241,6 +254,7 @@ class KBDatabase:
                 source_type=source_type,
                 source_url=source_url,
                 external_id=external_id,
+                source_modified_at=source_modified_at,
             )
             s.add(d)
             s.flush()

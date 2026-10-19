@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -55,7 +56,12 @@ async def sync_space(body: SyncSpaceIn) -> dict[str, Any]:
 
     sync_service = FeishuSyncService(client)
     try:
-        result = sync_service.sync_space(body.space_id, project_id=body.project_id)
+        # sync_space 内部全是同步阻塞调用（httpx、openpyxl、DB），
+        # 放到线程池里跑，避免占住 uvicorn 单 worker 的 event loop
+        # 导致整个后端对其他请求（健康检查、列表查询等）无响应。
+        result = await asyncio.to_thread(
+            sync_service.sync_space, body.space_id, body.project_id
+        )
         return {"ok": True, "result": result}
     except Exception as e:
         logger.error(f"同步飞书知识库空间失败: {e}", exc_info=True)
