@@ -19,6 +19,14 @@ class DocxLoader(DocumentLoader):
     """
 
     def load(self, path: Path) -> ParsedDocument:
+        from insight_aitest.platform.services.kb.loader.base import DocumentLoadError
+
+        file_size = path.stat().st_size
+        if file_size > 20 * 1024 * 1024:
+            raise DocumentLoadError(
+                f"Word 文件过大 ({file_size // (1024 * 1024)}MB > 20MB)，解析会耗尽内存，请适当精简后导入。"
+            )
+
         from docx import Document as DocxDocument
 
         doc = DocxDocument(str(path))

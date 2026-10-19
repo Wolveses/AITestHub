@@ -207,13 +207,35 @@ class FeishuSyncService:
                     target_ext = ".xlsx"
                     content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 elif obj_type == "file":
-                    # 文件类型，检查是否为 pdf
-                    if title.lower().endswith(".pdf"):
-                        file_bytes = self.client.download_file(obj_token)
-                        target_ext = ".pdf"
-                        content_type = "application/pdf"
+                    # 文件类型（用户上传的文档/表格等附件）
+                    file_ext = Path(title).suffix.lower()
+                    # 优先根据后缀匹配常见支持格式，并自动推导 MIME 类型
+                    mime_map = {
+                        ".pdf": "application/pdf",
+                        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        ".doc": "application/msword",
+                        ".xls": "application/vnd.ms-excel",
+                        ".ppt": "application/vnd.ms-powerpoint",
+                        ".txt": "text/plain",
+                        ".md": "text/markdown",
+                        ".markdown": "text/markdown",
+                    }
+                    # 允许支持的格式或者知识库 loader 支持的格式
+                    from insight_aitest.platform.services.kb.loader import _LOADERS
+
+                    if file_ext in mime_map or file_ext in _LOADERS:
+                        target_ext = file_ext
+                        content_type = mime_map.get(file_ext, "application/octet-stream")
+                        try:
+                            file_bytes = self.client.download_file(obj_token)
+                        except Exception as e:
+                            logger.warning(f"下载飞书文件失败 ({title}, token={obj_token}): {e}")
+                            skipped_count += 1
+                            continue
                     else:
-                        # 其他类型暂时跳过
+                        # 不支持的文件类型（如 .zip, .exe 等）跳过
                         ignored_count += 1
                         continue
                 else:

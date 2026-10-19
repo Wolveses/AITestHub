@@ -320,10 +320,16 @@ class FeishuClient:
         return blocks
 
     def download_file(self, file_token: str) -> bytes:
-        """下载云文档中的文件（如 PDF）。"""
+        """下载云文档中的文件（如 PDF、DOCX、XLSX 等）。"""
         url = f"{FEISHU_API_BASE}/drive/v1/files/{file_token}/download"
         res = httpx.get(url, headers=self._headers(), timeout=60)
         if res.status_code >= 400:
+            if res.status_code == 403:
+                raise RuntimeError(
+                    f"下载文件({file_token}) 权限不足(HTTP 403)。"
+                    "该文件在飞书知识库/云空间中可能开启了「禁止查看者下载/导出」安全设置，"
+                    "请在飞书空间成员设置中将应用机器人角色设为「管理员」或在节点权限中允许下载。"
+                )
             self._raise_feishu(res, f"下载文件({file_token})")
         return res.content
 
