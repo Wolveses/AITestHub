@@ -104,6 +104,8 @@ export function KnowledgeBase() {
     activeTab,
     uploading,
     syncingFeishu,
+    feishuModalOpen,
+    setFeishuModalOpen,
     loadDocuments,
     loadFolders,
     setCurrentFolderId,
@@ -126,7 +128,6 @@ export function KnowledgeBase() {
   const [moveDoc, setMoveDoc] = useState<Document | null>(null);
   const [moveOpen, setMoveOpen] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  const [feishuModalOpen, setFeishuModalOpen] = useState(false);
   const [feishuSpaces, setFeishuSpaces] = useState<{ space_id: string; name: string }[]>([]);
   const [loadingSpaces, setLoadingSpaces] = useState(false);
   const [feishuError, setFeishuError] = useState('');
@@ -261,13 +262,14 @@ export function KnowledgeBase() {
   };
 
   const handleReindexAll = async () => {
-    // 先调 stats 拿需要 reindex 的数量
     try {
       const stats = await fetch('/api/modules/ai/tasks/kb/stats').then(r => r.ok ? r.json() : null);
-      const notVectorized = stats?.total_docs ? stats.total_docs - (stats.vectorized_docs || 0) : 0;
-      const cnt = notVectorized > 0 ? notVectorized : '全部';
+      const cnt = stats?.need_reindex_count ?? 0;
+      if (cnt === 0) {
+        alert('没有需要重新向量化的文档');
+        return;
+      }
       if (!confirm(`将对 ${cnt} 个未向量化/向量化失败的文档重新向量化，需要调用 embedding API，确定？`)) return;
-      // 复用批量 reindex：后端支持传 all=true 让它自动找所有需要 reindex 的文档
       const r = await fetch('/api/modules/ai/tasks/kb/reindex', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -284,8 +286,29 @@ export function KnowledgeBase() {
     }
   };
 
-  // 统计当前列表里需要 reindex 的文档数（复用已解构的 documents）
-  const needReindexCount = documents.filter(d => d.status === 'not_vectorized' || d.status === 'embed_failed' || d.status === 'embed_partial').length;
+  // 顶部按钮数量用全库范围（调 stats 接口），与 handleReindexAll 的 confirm 弹框保持一致
+  const [needReindexCount, setNeedReindexCount] = useState(0);
+  useEffect(() => {
+    fetch('/api/modules/ai/tasks/kb/stats')
+      .then(r => r.ok ? r.json() : null)
+      .then(s => setNeedReindexCount(s?.need_reindex_count ?? 0))
+      .catch(() => {});
+  }, [activeTab, currentFolderId]);
+
+  // feishuModalOpen 由 KnowledgeBaseApp 顶部按钮触发，这里监听并初始化飞书空间列表
+  useEffect(() => {
+    if (feishuModalOpen) {
+      setLoadingSpaces(true);
+      setFeishuError('');
+      listFeishuSpaces()
+        .then(spaces => setFeishuSpaces(spaces))
+        .catch((err: any) => {
+          setFeishuError(err?.message || String(err));
+          setFeishuSpaces([]);
+        })
+        .finally(() => setLoadingSpaces(false));
+    }
+  }, [feishuModalOpen, listFeishuSpaces]);
 
   return (
     <div style={{ flex: 1, display: 'flex', height: '100%', overflow: 'hidden' }}>
@@ -341,43 +364,6 @@ export function KnowledgeBase() {
             ))}
           </div>
 
-          {/* 飞书文档标签下：展示飞书空间同步操作按钮 */}
-          {activeTab === 'feishu' && (
-            <button
-              onClick={async () => {
-                setFeishuModalOpen(true);
-                setLoadingSpaces(true);
-                setFeishuError('');
-                try {
-                  const spaces = await listFeishuSpaces();
-                  setFeishuSpaces(spaces);
-                } catch (err: any) {
-                  setFeishuError(err?.message || String(err));
-                  setFeishuSpaces([]);
-                } finally {
-                  setLoadingSpaces(false);
-                }
-              }}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 5,
-                background: 'rgba(59, 130, 246, 0.08)',
-                color: '#2563eb',
-                border: '1px solid rgba(59, 130, 246, 0.25)',
-                borderRadius: 6,
-                padding: '4px 12px',
-                fontSize: 12,
-                fontWeight: 500,
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-              }}
-              title="配置并同步飞书知识库空间"
-            >
-              <RefreshCw size={13} className={syncingFeishu ? 'animate-spin' : ''} />
-              {syncingFeishu ? '正在同步飞书...' : '同步飞书知识库'}
-            </button>
-          )}
           <button
             onClick={handleReindexAll}
             style={{

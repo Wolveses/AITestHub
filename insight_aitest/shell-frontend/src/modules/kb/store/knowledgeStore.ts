@@ -68,9 +68,11 @@ interface KnowledgeState {
   uploading: boolean;
   saving: boolean;
   syncingFeishu: boolean;
+  feishuModalOpen: boolean;
   pollTimer: number | null;
   tags: TagCount[];
   setActiveTab: (tab: 'local' | 'feishu') => void;
+  setFeishuModalOpen: (v: boolean) => void;
   loadDocuments: (opts?: {
     search?: string;
     doc_type?: string;
@@ -143,6 +145,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   uploading: false,
   saving: false,
   syncingFeishu: false,
+  feishuModalOpen: false,
   pollTimer: null,
   tags: [],
 
@@ -151,6 +154,8 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
     get().loadFolders();
     get().loadDocuments();
   },
+
+  setFeishuModalOpen: (v: boolean) => set({ feishuModalOpen: v }),
 
   loadDocuments: async (opts) => {
     try {

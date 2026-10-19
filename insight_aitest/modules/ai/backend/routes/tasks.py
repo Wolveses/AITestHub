@@ -1613,24 +1613,34 @@ async def kb_stats(
 ) -> dict:
     """KB 检索范围统计（前端可视化：显示文档数/片段数/向量化状态）。"""
     from insight_aitest.platform.persistence import session_scope
-    from insight_aitest.platform.services.kb.models import Document, Chunk
+    from insight_aitest.platform.services.kb.models import Document, Chunk, DocumentStatus
     from sqlalchemy import func
 
+    need_reindex = (
+        DocumentStatus.NOT_VECTORIZED.value,
+        DocumentStatus.EMBED_FAILED.value,
+        DocumentStatus.EMBED_PARTIAL.value,
+    )
+
     with session_scope(kb_db.db_path) as s:
+        pid = project_id if project_id else None
         doc_q = s.query(func.count(Document.id))
         chunk_q = s.query(func.count(Chunk.id))
-        pid = project_id if project_id else None
+        need_q = s.query(func.count(Document.id)).filter(Document.status.in_(need_reindex))
         if pid is not None:
             doc_q = doc_q.filter(Document.project_id == pid)
             chunk_q = chunk_q.filter(
                 Chunk.document_id.in_(s.query(Document.id).filter(Document.project_id == pid))
             )
+            need_q = need_q.filter(Document.project_id == pid)
         total_docs = doc_q.scalar() or 0
         total_chunks = chunk_q.scalar() or 0
+        need_reindex_count = need_q.scalar() or 0
 
     return {
         "total_docs": total_docs,
         "total_chunks": total_chunks,
         "vector_enabled": getattr(config, "vector_enabled", False),
         "embed_model": getattr(config, "embed_model", ""),
+        "need_reindex_count": need_reindex_count,
     }
