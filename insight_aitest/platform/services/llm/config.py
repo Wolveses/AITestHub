@@ -46,8 +46,10 @@ class LLMConfig:
     rerank_enabled: bool = False  # 默认关，避免拖慢现有 RAG；按需开启
     rerank_fetch_k: int = 12  # rerank 前的候选数（应 ≥ top_k）
 
-    # OCR（多模态：用 vision model 读图，扫描件 PDF / 图片文档抽取文字）
-    ocr_enabled: bool = True  # 默认开（需 vision_model 配置；关则扫描件/图片报错引导）
+    # OCR（扫描件 PDF / 图片文档抽取文字）
+    # True  → LLM OCR（走 vision_model，精度高但需联网 + API Key）
+    # False → 离线 OCR（走 rapidocr-onnxruntime，零依赖联网，默认）
+    ocr_enabled: bool = False
 
     # 对话
     history_turns: int = 6

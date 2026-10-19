@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Image Loader：用 vision model（VLM 读图）抽取图片中的文字。
+"""Image Loader：OCR 抽取图片中的文字。
 
-走 OpenAI 兼容多模态协议（LLMClient.chat_with_image），不引入 tesseract/paddle
-（Windows 部署负担）。扫描件截图、纯图片文档、截图凭证等均可处理。
-
-OCR 输出必须是连续纯文本（满足 Chunker 的文本可定位不变量）。
+后端选择由 LLMConfig.ocr_enabled 控制：
+  True  → LLM OCR（vision_model 读图，精度高，需联网 + API Key）
+  False → 离线 OCR（rapidocr-onnxruntime，纯本地，零联网依赖，默认）
 """
 
 from __future__ import annotations
@@ -33,6 +32,53 @@ _IMG_MIME = {
     ".webp": "image/webp",
 }
 
+# rapidocr 模块级实例（惰性初始化，避免 import 时就加载模型到内存）
+_rapidocr = None
+
+
+def _ocr_uses_vlm() -> bool:
+    try:
+        from insight_aitest.platform.services.kb.deps import get_llm_config
+
+        return get_llm_config().ocr_enabled
+    except Exception:
+        return False
+
+
+def _get_rapidocr():
+    global _rapidocr
+    if _rapidocr is not None:
+        return _rapidocr
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+
+        _rapidocr = RapidOCR()
+        return _rapidocr
+    except ImportError:
+        return None
+
+
+def _ocr_vlm(raw: bytes, mime: str) -> str:
+    from insight_aitest.platform.services.kb.deps import get_llm
+
+    llm = get_llm()
+    b64 = base64.b64encode(raw).decode("ascii")
+    return llm.chat_with_image(OCR_PROMPT, b64, mime=mime).strip()
+
+
+def _ocr_rapidocr(raw: bytes) -> str:
+    ocr = _get_rapidocr()
+    if ocr is None:
+        raise DocumentLoadError(
+            "离线 OCR 不可用（rapidocr-onnxruntime 未安装）。"
+            "请执行 `pip install rapidocr-onnxruntime`，或在设置中开启 LLM OCR。"
+        )
+    result, _ = ocr(raw)
+    if not result:
+        return ""
+    lines = [item[1] for item in result if item and len(item) >= 2]
+    return "\n".join(lines).strip()
+
 
 @register_loader(".png")
 @register_loader(".jpg")
@@ -40,19 +86,10 @@ _IMG_MIME = {
 @register_loader(".gif")
 @register_loader(".webp")
 class ImageLoader(DocumentLoader):
-    """图片文档 loader：VLM OCR 抽取文字。"""
+    """图片文档 loader：OCR 抽取文字（LLM 或离线 rapidocr）。"""
 
     def __init__(self, llm: "LLMClient | None" = None) -> None:
-        # 默认从平台单例取 LLM（get_loader() 无参实例化时走此路径）；
-        # 测试可显式注入 mock。
         self._llm = llm
-
-    def _get_llm(self) -> "LLMClient":
-        if self._llm is not None:
-            return self._llm
-        from insight_aitest.platform.services.kb.deps import get_llm
-
-        return get_llm()
 
     def load(self, path: Path) -> ParsedDocument:
         ext = path.suffix.lower()
@@ -65,27 +102,26 @@ class ImageLoader(DocumentLoader):
         except OSError as e:
             raise DocumentLoadError(f"图片读取失败: {e}") from e
 
-        b64 = base64.b64encode(raw).decode("ascii")
-
+        use_vlm = _ocr_uses_vlm()
         try:
-            llm = self._get_llm()
+            content = _ocr_vlm(raw, mime) if use_vlm else _ocr_rapidocr(raw)
+        except DocumentLoadError:
+            raise  # 已经是友好错误信息
         except Exception as e:
-            raise DocumentLoadError(f"OCR 服务不可用: {e}") from e
-
-        try:
-            content = llm.chat_with_image(OCR_PROMPT, b64, mime=mime).strip()
-        except Exception as e:
-            raise DocumentLoadError(f"图片 OCR 失败: {e}") from e
+            backend = "LLM" if use_vlm else "离线"
+            raise DocumentLoadError(f"图片 {backend} OCR 失败: {e}") from e
 
         if not content:
             raise DocumentLoadError("图片未识别到文字内容（可能为纯图形）。")
 
+        backend = "vlm" if use_vlm else "rapidocr"
         return ParsedDocument(
             filename=path.name,
             content=content,
             meta={
                 "mime_type": mime,
                 "ocr": True,
+                "ocr_backend": backend,
                 "byte_count": len(raw),
                 "char_count": len(content),
             },

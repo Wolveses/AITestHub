@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""PDF Loader：优先抽文本层；扫描件（无文本）走 VLM OCR。
+"""PDF Loader：优先抽文本层；扫描件（无文本）走 OCR。
 
 策略（按依赖可用性优雅降级）：
-1) pymupdf（fitz）可用 → 抽文本层；扫描件则逐页 rasterize 成图片 → VLM OCR 拼纯文本。
+1) pymupdf（fitz）可用 → 抽文本层；扫描件则逐页 rasterize 成图片 → OCR 拼纯文本。
 2) pymupdf 不可用 → 回退 pypdf 抽文本层；扫描件报错引导（保持旧行为）。
 
-OCR 开关由 LLMConfig.ocr_enabled 控制（默认开，需 vision_model 配置）。
+OCR 后端由 LLMConfig.ocr_enabled 控制：
+  True  → LLM OCR（vision_model 读图，精度高，需联网 + API Key）
+  False → 离线 OCR（rapidocr-onnxruntime，纯本地，零联网依赖，默认）
 """
 
 from __future__ import annotations
@@ -28,15 +30,18 @@ if TYPE_CHECKING:
 # 扫描件判定：每页平均字符数低于此阈值视为无文本层
 _MIN_CHARS_PER_PAGE = 10
 
+# rapidocr 模块级实例（惰性初始化，避免 import 时就加载模型到内存）
+_rapidocr = None
 
-def _ocr_enabled() -> bool:
-    """从平台配置取 ocr_enabled（测试可 monkeypatch）。"""
+
+def _ocr_uses_vlm() -> bool:
+    """ocr_enabled=True 时走 VLM；False 走离线 rapidocr。"""
     try:
         from insight_aitest.platform.services.kb.deps import get_llm_config
 
         return get_llm_config().ocr_enabled
     except Exception:
-        return True
+        return False  # 保守：默认走离线
 
 
 def _get_llm() -> "LLMClient":
@@ -45,22 +50,74 @@ def _get_llm() -> "LLMClient":
     return get_llm()
 
 
-def _pdf_ocr_with_fitz(doc) -> str:
-    """用 pymupdf 逐页 rasterize → VLM OCR → 拼纯文本。"""
-    llm = _get_llm()
+def _get_rapidocr():
+    """惰性初始化 rapidocr-onnxruntime。
+
+    返回 RapidOCR 实例，或 None（未安装）。
+    """
+    global _rapidocr
+    if _rapidocr is not None:
+        return _rapidocr
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+
+        _rapidocr = RapidOCR()
+        return _rapidocr
+    except ImportError:
+        return None
+
+
+def _pdf_rasterize_pages(doc) -> list[bytes]:
+    """把 pymupdf doc 的每一页 rasterize 成 PNG bytes 列表（150dpi）。"""
     pages = []
     for page in doc:
-        # 渲染成图片（150dpi 兼顾清晰度与 token 成本）
         pix = page.get_pixmap(dpi=150)
-        img_bytes = pix.tobytes("png")
-        b64 = base64.b64encode(img_bytes).decode("ascii")
+        pages.append(pix.tobytes("png"))
+    return pages
+
+
+def _ocr_vlm_image(img_bytes: bytes) -> str:
+    """单张图片 bytes → LLM OCR 纯文本。"""
+    llm = _get_llm()
+    b64 = base64.b64encode(img_bytes).decode("ascii")
+    return llm.chat_with_image(OCR_PROMPT, b64, mime="image/png").strip()
+
+
+def _ocr_rapidocr_image(img_bytes: bytes) -> str:
+    """单张图片 bytes → rapidocr 离线 OCR 纯文本。"""
+    ocr = _get_rapidocr()
+    if ocr is None:
+        raise DocumentLoadError(
+            "离线 OCR 不可用（rapidocr-onnxruntime 未安装）。"
+            "请执行 `pip install rapidocr-onnxruntime`，或在设置中开启 LLM OCR。"
+        )
+    result, _ = ocr(img_bytes)
+    if not result:
+        return ""
+    # result 是 list of [box, text, confidence]，按行拼接
+    lines = [item[1] for item in result if item and len(item) >= 2]
+    return "\n".join(lines).strip()
+
+
+def _ocr_pdf_pages(doc) -> str:
+    """PDF 扫描件 → 逐页 OCR → 拼纯文本。
+
+    后端选择由 ocr_enabled 决定；失败时抛出带页码的 DocumentLoadError。
+    """
+    use_vlm = _ocr_uses_vlm()
+    pages = _pdf_rasterize_pages(doc)
+    texts = []
+    for idx, img_bytes in enumerate(pages, start=1):
         try:
-            text = llm.chat_with_image(OCR_PROMPT, b64, mime="image/png").strip()
+            if use_vlm:
+                text = _ocr_vlm_image(img_bytes)
+            else:
+                text = _ocr_rapidocr_image(img_bytes)
         except Exception as e:
-            raise DocumentLoadError(f"PDF 扫描件 OCR 失败（第 {len(pages) + 1} 页）: {e}") from e
+            raise DocumentLoadError(f"PDF 扫描件 OCR 失败（第 {idx} 页）: {e}") from e
         if text:
-            pages.append(text)
-    return "\n\n".join(pages)
+            texts.append(text)
+    return "\n\n".join(texts)
 
 
 @register_loader(".pdf")
@@ -89,13 +146,8 @@ class PdfLoader(DocumentLoader):
 
             if is_scanned:
                 # 扫描件 → OCR 分支
-                if not _ocr_enabled():
-                    doc.close()
-                    raise DocumentLoadError(
-                        "该 PDF 似为扫描件（无可提取文本），OCR 已禁用。请在设置中开启 OCR 或提供带文本层的 PDF。"
-                    )
                 try:
-                    content = _pdf_ocr_with_fitz(doc)
+                    content = _ocr_pdf_pages(doc)
                 finally:
                     doc.close()
                 if not content.strip():
@@ -108,7 +160,7 @@ class PdfLoader(DocumentLoader):
                         "page_count": page_count,
                         "char_count": len(content),
                         "scanned": True,
-                        "ocr": True,
+                        "ocr_backend": "vlm" if _ocr_uses_vlm() else "rapidocr",
                     },
                 )
 
