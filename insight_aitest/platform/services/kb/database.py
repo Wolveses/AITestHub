@@ -271,24 +271,66 @@ class KBDatabase:
         version_id: int | None = None,
         folder_id: int | None = None,
         source_type: str | None = None,
-    ) -> list[Document]:
+        search: str | None = None,
+        doc_type: str | None = None,
+        tags: list[str] | None = None,
+        page: int | None = None,
+        page_size: int | None = None,
+        return_total: bool = False,
+    ) -> list[Document] | tuple[list[Document], int]:
+        """分页 + 条件筛选。
+
+        默认（不传 page/page_size）返回全量 list[Document]（向后兼容）；
+        传了 page/page_size 时分页；return_total=True 时返回 (list, total)。
+        """
+        from sqlalchemy import func
+
         stmt = select(Document)
+        count_stmt = select(func.count(Document.id))
         if status_filter:
             stmt = stmt.where(Document.status == DocumentStatus(status_filter))
+            count_stmt = count_stmt.where(Document.status == DocumentStatus(status_filter))
         if project_id is not None:
             stmt = stmt.where(Document.project_id == project_id)
+            count_stmt = count_stmt.where(Document.project_id == project_id)
         if version_id is not None:
             stmt = stmt.where(Document.version_id == version_id)
+            count_stmt = count_stmt.where(Document.version_id == version_id)
         if source_type is not None:
             stmt = stmt.where(Document.source_type == source_type)
+            count_stmt = count_stmt.where(Document.source_type == source_type)
         if folder_id is not None:
             if folder_id == 0:  # 0 表示未分类/根目录
                 stmt = stmt.where(Document.folder_id.is_(None))
+                count_stmt = count_stmt.where(Document.folder_id.is_(None))
             else:
                 stmt = stmt.where(Document.folder_id == folder_id)
+                count_stmt = count_stmt.where(Document.folder_id == folder_id)
+        if search:
+            like = f"%{search}%"
+            stmt = stmt.where(Document.filename.ilike(like))
+            count_stmt = count_stmt.where(Document.filename.ilike(like))
+        if doc_type:
+            stmt = stmt.where(Document.doc_type == doc_type)
+            count_stmt = count_stmt.where(Document.doc_type == doc_type)
+        if tags:
+            # tags 列存 JSON 数组字符串 '["a","b"]'，LIKE 匹配最简便
+            for t in tags:
+                tag_like = f'%"{t}"%'
+                stmt = stmt.where(Document.tags.ilike(tag_like))
+                count_stmt = count_stmt.where(Document.tags.ilike(tag_like))
+        # 分页（仅在 page 或 page_size 显式传值时生效）
+        if page is not None or page_size is not None:
+            p = max(1, page or 1)
+            ps = max(1, min(page_size or 500, 500))  # 防滥用
+            stmt = stmt.offset((p - 1) * ps).limit(ps)
         stmt = stmt.order_by(Document.created_at.desc())
         with session_scope(self.db_path) as s:
-            return list(s.scalars(stmt))
+            total = s.scalar(count_stmt) or 0
+            items = list(s.scalars(stmt))
+        if return_total:
+            return items, total
+        return items
 
     def move_document(self, doc_id: int, folder_id: int | None) -> bool:
         """移动文档到指定文件夹（None 或 0 表示移到根目录）。"""

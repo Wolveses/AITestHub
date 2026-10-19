@@ -11,10 +11,94 @@ import { MoveDocModal } from './MoveDocModal';
 import { TagFilter } from './TagFilter';
 import { EmptyState } from '../../../shared/components/EmptyState';
 
+// 分页条组件（无 UI 库，内联实现）
+function PaginationBar({
+  page, pageSize, total, onChange,
+}: {
+  page: number; pageSize: number; total: number;
+  onChange: (page: number, pageSize: number) => void;
+}) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const p = Math.min(Math.max(1, page), totalPages);
+  const pages: (number | '...')[] = [];
+  if (totalPages <= 7) {
+    for (let i = 1; i <= totalPages; i++) pages.push(i);
+  } else {
+    pages.push(1);
+    if (p > 4) pages.push('...');
+    const start = Math.max(2, p - 2);
+    const end = Math.min(totalPages - 1, p + 2);
+    for (let i = start; i <= end; i++) pages.push(i);
+    if (p < totalPages - 3) pages.push('...');
+    pages.push(totalPages);
+  }
+
+  const btn = (disabled: boolean, label: string, onClick?: () => void) => ({
+    padding: '2px 8px',
+    fontSize: 12,
+    border: '1px solid var(--bg-elevated)',
+    borderRadius: 4,
+    background: disabled ? 'var(--bg-secondary, #f8fafc)' : 'var(--bg-card)',
+    color: disabled ? '#94a3b8' : 'var(--text-primary)',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+  });
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '10px 4px', marginTop: 8,
+      fontSize: 12, color: 'var(--text-muted)',
+    }}>
+      <span>共 {total} 条，第 {p}/{totalPages} 页</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <button style={btn(p === 1, '«')} disabled={p === 1} onClick={() => onChange(1, pageSize)}>«</button>
+        <button style={btn(p === 1, '‹')} disabled={p === 1} onClick={() => onChange(p - 1, pageSize)}>‹</button>
+        {pages.map((x, i) =>
+          x === '...' ? (
+            <span key={`e${i}`} style={{ padding: '0 4px' }}>…</span>
+          ) : (
+            <button
+              key={x}
+              onClick={() => onChange(x, pageSize)}
+              style={{
+                padding: '2px 8px', fontSize: 12,
+                border: `1px solid ${x === p ? 'var(--primary, #3b82f6)' : 'var(--bg-elevated)'}`,
+                borderRadius: 4,
+                background: x === p ? 'var(--primary, #3b82f6)' : 'var(--bg-card)',
+                color: x === p ? '#fff' : 'var(--text-primary)',
+                cursor: 'pointer',
+                minWidth: 26,
+              }}
+            >{x}</button>
+          )
+        )}
+        <button style={btn(p === totalPages, '›')} disabled={p === totalPages} onClick={() => onChange(p + 1, pageSize)}>›</button>
+        <button style={btn(p === totalPages, '»')} disabled={p === totalPages} onClick={() => onChange(totalPages, pageSize)}>»</button>
+        <select
+          value={pageSize}
+          onChange={(e) => onChange(1, Number(e.target.value))}
+          style={{
+            marginLeft: 8, padding: '2px 4px', fontSize: 12,
+            border: '1px solid var(--bg-elevated)', borderRadius: 4,
+            background: 'var(--bg-card)', color: 'var(--text-primary)',
+          }}
+        >
+          {[10, 20, 50, 100].map((n) => (
+            <option key={n} value={n}>每页 {n}</option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 export function KnowledgeBase() {
   const { t } = useTranslation();
   const {
     documents,
+    docTotal,
+    page,
+    pageSize,
     folders,
     currentFolderId,
     activeTab,
@@ -32,7 +116,7 @@ export function KnowledgeBase() {
   } = useKnowledgeStore();
   const { currentProjectId } = useProjectStore();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [search, setSearch] = useState('');
+  const [searchInput, setSearchInput] = useState('');  // 输入框本地 state（防抖后同步到后端）
   const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
   const [selectedType, setSelectedType] = useState('');
   const [previewDoc, setPreviewDoc] = useState<Document | null>(null);
@@ -113,24 +197,32 @@ export function KnowledgeBase() {
     if (f) await uploadDocument(f);
   };
 
-  // 过滤：文件名搜索 + 标签筛选 + 类型筛选
-  const filtered = documents.filter((d) => {
-    if (search && !d.filename.toLowerCase().includes(search.toLowerCase())) return false;
-    if (selectedType && d.doc_type !== selectedType) return false;
-    if (selectedTags.size > 0) {
-      const docTags = new Set(d.tags || []);
-      // 选中的标签必须至少有一个在文档标签里（OR 语义）
-      const hasAny = [...selectedTags].some((t) => docTags.has(t));
-      if (!hasAny) return false;
-    }
-    return true;
-  });
+  // 搜索 debounce（300ms）→ 调后端 search filter
+  const searchTimer = useRef<number | null>(null);
+  const onSearchChange = (val: string) => {
+    setSearchInput(val);
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    searchTimer.current = window.setTimeout(() => {
+      loadDocuments({ search: val, resetPage: true });
+    }, 300);
+  };
 
   const toggleTag = (tag: string) => {
     const next = new Set(selectedTags);
     if (next.has(tag)) next.delete(tag);
     else next.add(tag);
     setSelectedTags(next);
+    loadDocuments({ tags: [...next], resetPage: true });
+  };
+
+  const onTypeChange = (type: string) => {
+    setSelectedType(type);
+    loadDocuments({ doc_type: type, resetPage: true });
+  };
+
+  const onClearTags = () => {
+    setSelectedTags(new Set());
+    loadDocuments({ tags: [], resetPage: true });
   };
 
   const handlePreview = (doc: Document) => {
@@ -323,21 +415,21 @@ export function KnowledgeBase() {
         )}
 
         {/* 工具栏：搜索 + 导出全部 */}
-        {documents.length > 0 && (
+        {(docTotal > 0 || searchInput || selectedTags.size > 0 || selectedType) && (
           <>
             <TagFilter
               selectedTags={selectedTags}
               onToggleTag={toggleTag}
-              onClearTags={() => setSelectedTags(new Set())}
+              onClearTags={onClearTags}
               selectedType={selectedType}
-              onSelectType={setSelectedType}
+              onSelectType={onTypeChange}
             />
             <div style={{ marginBottom: 12, display: 'flex', gap: 8 }}>
               <input
                 type="text"
                 placeholder={t('kb.searchFilenamePlaceholder')}
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                value={searchInput}
+                onChange={(e) => onSearchChange(e.target.value)}
                 style={{
                   flex: 1,
                   background: 'var(--bg-card)',
@@ -372,25 +464,33 @@ export function KnowledgeBase() {
           </>
         )}
 
-        {filtered.length === 0 ? (
+        {docTotal === 0 ? (
           <EmptyState message={documents.length === 0 ? t('kb.noDocumentsHint') : t('kb.noMatchingDocuments')} />
         ) : (
-          <div style={{ border: '1px solid var(--bg-card)', borderRadius: 8 }}>
-            {filtered.map((d) => (
-              <DocumentRow
-                key={d.id}
-                doc={d}
-                folderPath={d.folder_id ? folderPathMap.get(d.folder_id) : undefined}
-                showFolderScope={currentFolderId === null}
-                onSelectFolder={setCurrentFolderId}
-                onDelete={deleteDocument}
-                onPreview={handlePreview}
-                onEditMeta={handleEditMeta}
-                onShowVersions={handleShowVersions}
-                onMove={handleMove}
-              />
-            ))}
-          </div>
+          <>
+            <div style={{ border: '1px solid var(--bg-card)', borderRadius: 8 }}>
+              {documents.map((d) => (
+                <DocumentRow
+                  key={d.id}
+                  doc={d}
+                  folderPath={d.folder_id ? folderPathMap.get(d.folder_id) : undefined}
+                  showFolderScope={currentFolderId === null}
+                  onSelectFolder={setCurrentFolderId}
+                  onDelete={deleteDocument}
+                  onPreview={handlePreview}
+                  onEditMeta={handleEditMeta}
+                  onShowVersions={handleShowVersions}
+                  onMove={handleMove}
+                />
+              ))}
+            </div>
+            <PaginationBar
+              page={page}
+              pageSize={pageSize}
+              total={docTotal}
+              onChange={(p, ps) => loadDocuments({ page: p, page_size: ps })}
+            />
+          </>
         )}
 
         {/* 全屏预览/编辑弹窗 */}

@@ -111,23 +111,37 @@ class MoveDocumentIn(BaseModel):
     folder_id: int | None = None
 
 
-@router.get("", response_model=list[DocumentOut])
+@router.get("", response_model=dict)
 async def list_documents(
     project_id: int | None = None,
     version_id: int | None = None,
     folder_id: int | None = None,
     source_type: str | None = None,
+    search: str | None = None,
+    doc_type: str | None = None,
+    tags: list[str] | None = None,
+    page: int = 1,
+    page_size: int = 20,
     db: KBDatabase = Depends(get_kb_db),
-) -> list[DocumentOut]:
-    return [
-        _doc_to_out(d)
-        for d in db.list_documents(
-            project_id=project_id,
-            version_id=version_id,
-            folder_id=folder_id,
-            source_type=source_type,
-        )
-    ]
+) -> dict:
+    items, total = db.list_documents(
+        project_id=project_id,
+        version_id=version_id,
+        folder_id=folder_id,
+        source_type=source_type,
+        search=search,
+        doc_type=doc_type,
+        tags=tags,
+        page=page,
+        page_size=page_size,
+        return_total=True,
+    )
+    return {
+        "items": [_doc_to_out(d) for d in items],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.patch("/{doc_id}/move", response_model=DocumentOut)

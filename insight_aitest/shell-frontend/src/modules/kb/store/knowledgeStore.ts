@@ -55,6 +55,13 @@ export interface FeishuSpace {
 
 interface KnowledgeState {
   documents: Document[];
+  docTotal: number;
+  page: number;
+  pageSize: number;
+  // filter 状态（保存以便 loadDocuments 无参时复用）
+  filterSearch: string;
+  filterDocType: string;
+  filterTags: string[];
   folders: FolderNode[];
   currentFolderId: number | null; // null 表示当前根目录（本地文档/飞书文档根目录），0 表示未分类
   activeTab: 'local' | 'feishu';
@@ -64,7 +71,14 @@ interface KnowledgeState {
   pollTimer: number | null;
   tags: TagCount[];
   setActiveTab: (tab: 'local' | 'feishu') => void;
-  loadDocuments: () => Promise<void>;
+  loadDocuments: (opts?: {
+    search?: string;
+    doc_type?: string;
+    tags?: string[];
+    page?: number;
+    page_size?: number;
+    resetPage?: boolean;
+  }) => Promise<void>;
   loadFolders: () => Promise<void>;
   setCurrentFolderId: (folderId: number | null) => void;
   createFolder: (name: string, parentId?: number | null) => Promise<void>;
@@ -96,14 +110,17 @@ const FOLDERS_BASE = '/api/modules/kb/folders';
 
 const NON_TERMINAL = ['pending', 'parsing', 'chunking', 'embedding'];
 
-function projectQs(extraParams?: Record<string, string | number | null | undefined>): string {
+function projectQs(extraParams?: Record<string, any>): string {
   const { currentProjectId, currentVersionId } = useProjectStore.getState();
   const params = new URLSearchParams();
   if (currentProjectId !== null) params.set('project_id', String(currentProjectId));
   if (currentVersionId !== null) params.set('version_id', String(currentVersionId));
   if (extraParams) {
     for (const [k, v] of Object.entries(extraParams)) {
-      if (v !== undefined && v !== null) {
+      if (v === undefined || v === null || v === '') continue;
+      if (Array.isArray(v)) {
+        for (const item of v) params.append(k, String(item));
+      } else {
         params.set(k, String(v));
       }
     }
@@ -114,6 +131,12 @@ function projectQs(extraParams?: Record<string, string | number | null | undefin
 
 export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   documents: [],
+  docTotal: 0,
+  page: 1,
+  pageSize: 20,
+  filterSearch: '',
+  filterDocType: '',
+  filterTags: [],
   folders: [],
   currentFolderId: null,
   activeTab: 'local',
@@ -124,24 +147,48 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   tags: [],
 
   setActiveTab: (tab: 'local' | 'feishu') => {
-    set({ activeTab: tab, currentFolderId: null });
+    set({ activeTab: tab, currentFolderId: null, page: 1, filterSearch: '', filterDocType: '', filterTags: [] });
     get().loadFolders();
     get().loadDocuments();
   },
 
-  loadDocuments: async () => {
+  loadDocuments: async (opts) => {
     try {
+      const s = get();
+      // 合并 opts 与当前 filter 状态
+      const filterSearch = opts?.search !== undefined ? opts.search : s.filterSearch;
+      const filterDocType = opts?.doc_type !== undefined ? opts.doc_type : s.filterDocType;
+      const filterTags = opts?.tags !== undefined ? opts.tags : s.filterTags;
+      const page = opts?.page ?? (opts?.resetPage ? 1 : s.page);
+      const pageSize = opts?.page_size ?? s.pageSize;
+
       const { currentFolderId, activeTab } = get();
-      const extra: Record<string, any> = { source_type: activeTab };
+      const extra: Record<string, any> = {
+        source_type: activeTab,
+        search: filterSearch || undefined,
+        doc_type: filterDocType || undefined,
+        tags: filterTags.length > 0 ? filterTags : undefined,
+        page,
+        page_size: pageSize,
+      };
       if (currentFolderId !== null) {
         extra.folder_id = currentFolderId;
       }
       const qs = projectQs(extra);
       const r = await fetch(`${BASE}${qs}`);
-      const docs = await r.json();
-      set({ documents: docs });
+      const data = await r.json();
+      const items: Document[] = data.items || [];
+      set({
+        documents: items,
+        docTotal: data.total || 0,
+        page: data.page || page,
+        pageSize: data.page_size || pageSize,
+        filterSearch,
+        filterDocType,
+        filterTags,
+      });
       // 有非终态文档则启动轮询
-      if (docs.some((d: Document) => NON_TERMINAL.includes(d.status))) {
+      if (items.some((d) => NON_TERMINAL.includes(d.status))) {
         get().startPolling();
       } else {
         get().stopPolling();
@@ -166,8 +213,8 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   },
 
   setCurrentFolderId: (folderId: number | null) => {
-    set({ currentFolderId: folderId });
-    get().loadDocuments();
+    set({ currentFolderId: folderId, page: 1 });
+    get().loadDocuments({ page: 1 });
   },
 
   createFolder: async (name: string, parentId?: number | null) => {
