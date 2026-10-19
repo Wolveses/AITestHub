@@ -52,16 +52,23 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
   const kind = doc ? fileKind(doc.filename) : 'unknown';
   const canEdit = TEXT_KINDS.has(kind) || kind === 'docx' || kind === 'xlsx';
 
-  // 对话框打开/切换文档时重置查看状态（渲染期调整模式，替代 effect 内同步 setState）
+  // 对话框打开/切换文档时重置查看状态——统一在 effect 里做，避免渲染期 setState 触发多余 commit
   const viewKey = open && doc ? doc.id : null;
-  const [prevViewKey, setPrevViewKey] = useState<number | null>(viewKey);
-  if (viewKey !== prevViewKey) {
-    setPrevViewKey(viewKey);
+  useEffect(() => {
+    if (viewKey === null) {
+      // 关闭或无文档：先清空大内容让 React 卸载空组件加速，再重置轻量状态
+      setContent('');
+      setLoadingContent(false);
+      setMode('view');
+      setShowVersions(false);
+      return;
+    }
+    // 新文档 / 切换文档：清空内容 + 打开 loading
     setContent('');
-    setLoadingContent(viewKey !== null && TEXT_KINDS.has(kind));
+    setLoadingContent(TEXT_KINDS.has(kind));
     setMode('view');
     setShowVersions(false);
-  }
+  }, [viewKey]);
 
   useEffect(() => {
     if (!(open && doc && TEXT_KINDS.has(kind))) return;

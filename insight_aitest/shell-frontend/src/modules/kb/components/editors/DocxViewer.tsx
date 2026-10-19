@@ -19,15 +19,10 @@ export function DocxViewer({ url }: DocxViewerProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // url 变化时重置加载态（渲染期调整模式）
-  const [prevUrl, setPrevUrl] = useState(url);
-  if (url !== prevUrl) {
-    setPrevUrl(url);
+  // url 变化时重置加载态——在 effect 里做，避免渲染期 setState 触发多余 commit
+  useEffect(() => {
     setLoading(true);
     setError(null);
-  }
-
-  useEffect(() => {
     let cancelled = false;
     fetch(url)
       .then((r) => r.arrayBuffer())

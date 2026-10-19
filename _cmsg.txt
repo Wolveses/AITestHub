@@ -1,0 +1,19 @@
+perf(frontend): 修复文档预览弹窗打开/关闭慢的问题
+
+根因：三个 Viewer 组件都有"渲染期 setState"反模式
+  const [prev, setPrev] = useState(x);
+  if (x !== prev) { setPrev(x); setLoading(true); }
+
+打开时：Dialog 先 commit → 4 个渲染期 setState 触发 re-render →
+        useEffect 再触发 fetch → 第三次 commit 才显内容。
+        旧内容闪 + 弹窗有明显延迟感。
+关闭时：Dialog 正在卸载 Portal 的同时 re-render 抢主线程，
+        且 content 还是大文本 (180k chars)，React unmount 慢。
+
+修复：全部移入 useEffect 一次 commit 搞定。
+关闭时顺便 setContent('') 让 React 卸载的是空组件。
+
+改了 3 个文件：
+- DocumentViewer.tsx  (主弹窗 4 状态合并到 viewKey effect)
+- XlsxViewer.tsx      (prevUrl 反模式并入 url effect)
+- DocxViewer.tsx      (同上)
