@@ -346,18 +346,24 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   // ===== 飞书主动同步 =====
 
   listFeishuSpaces: async () => {
-    try {
-      const r = await fetch('/api/modules/kb/feishu/spaces');
-      if (!r.ok) return [];
-      const data = await r.json();
-      return (data || []).map((s: any) => ({
-        space_id: s.space_id || s.id,
-        name: s.name || s.space_name || s.space_id,
-        description: s.description || '',
-      }));
-    } catch {
-      return [];
+    const r = await fetch('/api/modules/kb/feishu/spaces');
+    if (!r.ok) {
+      // 不再静默返回空数组：把后端原因透传给调用方，避免"列表为空"与"出错"混淆
+      let msg = `HTTP ${r.status}`;
+      try {
+        const body = await r.json();
+        msg = body?.detail || msg;
+      } catch {
+        /* 非 JSON 响应，保留状态码信息 */
+      }
+      throw new Error(msg);
     }
+    const data = await r.json();
+    return (data || []).map((s: any) => ({
+      space_id: s.space_id || s.id,
+      name: s.name || s.space_name || s.space_id,
+      description: s.description || '',
+    }));
   },
 
   syncFeishuSpace: async (spaceId: string) => {

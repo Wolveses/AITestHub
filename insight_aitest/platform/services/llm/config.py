@@ -68,6 +68,12 @@ class LLMConfig:
     # 形如 {"base_url": "", "api_key": "", "model": ""}
     ui_vision_config: dict = field(default_factory=dict)
 
+    # ===== 飞书知识库集成 =====
+    # 飞书自建应用凭证，拆成两个扁平字段，便于单独用环境变量注入（见 _ENV_KEYS）。
+    # 留空则飞书知识库同步不可用；这两项不通过 /ai 配置接口回显，也不支持前端修改。
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
+
     # ===== 多 Provider 管理（Cursor 风格灵活切换）=====
     # providers 是用户保存的所有 Provider 配置列表；active_provider_id 指向当前生效的那一个。
     # 每条 provider 形如：
@@ -118,6 +124,8 @@ _ENV_KEYS = {
     "vector_enabled": "INSIGHT_EYE_AI_VECTOR_ENABLED",
     "embed_base_url": "INSIGHT_EYE_AI_EMBED_BASE_URL",
     "embed_api_key": "INSIGHT_EYE_AI_EMBED_API_KEY",
+    "feishu_app_id": "INSIGHT_EYE_AI_FEISHU_APP_ID",
+    "feishu_app_secret": "INSIGHT_EYE_AI_FEISHU_APP_SECRET",
 }
 
 # 需要转 int 的字段

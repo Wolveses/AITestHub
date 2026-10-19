@@ -45,6 +45,7 @@ export function KnowledgeBase() {
   const [feishuModalOpen, setFeishuModalOpen] = useState(false);
   const [feishuSpaces, setFeishuSpaces] = useState<{ space_id: string; name: string }[]>([]);
   const [loadingSpaces, setLoadingSpaces] = useState(false);
+  const [feishuError, setFeishuError] = useState('');
   const [syncSpaceIdInput, setSyncSpaceIdInput] = useState('');
 
   useEffect(() => {
@@ -213,9 +214,13 @@ export function KnowledgeBase() {
               onClick={async () => {
                 setFeishuModalOpen(true);
                 setLoadingSpaces(true);
+                setFeishuError('');
                 try {
                   const spaces = await listFeishuSpaces();
                   setFeishuSpaces(spaces);
+                } catch (err: any) {
+                  setFeishuError(err?.message || String(err));
+                  setFeishuSpaces([]);
                 } finally {
                   setLoadingSpaces(false);
                 }
@@ -441,6 +446,26 @@ export function KnowledgeBase() {
                 系统将递归拉取飞书知识库目录树并在本地建立镜像目录，自动将 Doc/Docx 转为 Markdown，Sheet 转为 Excel，PDF 下载源格式（PPT 自动忽略）。
               </div>
 
+              {feishuError && (
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: 8,
+                    alignItems: 'flex-start',
+                    background: 'rgba(239, 68, 68, 0.08)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    borderRadius: 6,
+                    padding: '10px 12px',
+                    fontSize: 12,
+                    color: '#dc2626',
+                    lineHeight: 1.5,
+                  }}
+                >
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span>{feishuError}</span>
+                </div>
+              )}
+
               {loadingSpaces ? (
                 <div style={{ textAlign: 'center', padding: '24px 0', fontSize: 13, color: '#666' }}>
                   正在连接飞书开放平台获取知识库列表...
@@ -494,9 +519,11 @@ export function KnowledgeBase() {
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  <div style={{ fontSize: 12, color: 'var(--text-secondary, #475569)' }}>
-                    暂未自动列出空间（飞书机器人可能未直接加入空间成员）。您可以直接输入飞书知识库 Space ID：
-                  </div>
+                  {!feishuError && (
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary, #475569)' }}>
+                      暂未自动列出空间（飞书机器人可能未直接加入空间成员）。您可以直接输入飞书知识库 Space ID：
+                    </div>
+                  )}
                   <div style={{ display: 'flex', gap: 8 }}>
                     <input
                       type="text"

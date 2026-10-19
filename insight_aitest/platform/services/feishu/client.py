@@ -28,11 +28,28 @@ class FeishuClient:
         self._token: str = ""
         self._token_expires_at: float = 0
 
-        # 如果未传入，自动从 config/ai.json 读取
+        # 如果未传入，自动从平台配置读取
         if not self.app_id or not self.app_secret:
             self._load_from_config()
 
     def _load_from_config(self) -> None:
+        """凭证来源优先级：平台配置（llm_config.json + 环境变量）→ 旧版 config/ai.json。
+
+        平台配置由 load_config 统一处理优先级（环境变量 > 配置文件 > 默认值），
+        因此环境变量 INSIGHT_EYE_AI_FEISHU_APP_ID/SECRET 的优先级最高。
+        """
+        try:
+            from insight_aitest.platform.services.kb.deps import get_llm_config
+
+            cfg = get_llm_config()
+            if cfg.feishu_app_id and cfg.feishu_app_secret:
+                self.app_id = cfg.feishu_app_id
+                self.app_secret = cfg.feishu_app_secret
+                return
+        except Exception as e:
+            logger.warning(f"读取平台配置中的飞书凭证失败: {e}")
+
+        # 向后兼容：旧版独立配置文件 config/ai.json（相对进程工作目录）
         cfg_path = os.path.join(os.getcwd(), "config", "ai.json")
         if os.path.exists(cfg_path):
             try:
@@ -90,8 +107,10 @@ class FeishuClient:
             res.raise_for_status()
             data = res.json()
             if data.get("code") != 0:
-                logger.error(f"获取飞书空间失败: {data}")
-                break
+                # 不再静默返回空列表：权限不足/凭证错误等需显式暴露给调用方
+                raise RuntimeError(
+                    f"飞书知识库空间列表接口报错 code={data.get('code')} msg={data.get('msg')}"
+                )
             items = data.get("data", {}).get("items", [])
             spaces.extend(items)
             if not data.get("data", {}).get("has_more"):
