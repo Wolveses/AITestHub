@@ -247,8 +247,10 @@ async def delete_document(
 
 
 @router.post("/{doc_id}/reindex", response_model=DocumentOut)
-async def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOut:
+async def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db), cfg=Depends(get_config)) -> DocumentOut:
     """重新索引（换 embedding 模型后用）。删旧向量与 chunks，后台重新解析向量化。"""
+    if not getattr(cfg, "vector_enabled", False):
+        raise HTTPException(400, "请先在 AI 设置里开启向量检索（RAG）再执行向量化")
     doc = db.get_document(doc_id)
     if not doc:
         raise HTTPException(404, "文档不存在")

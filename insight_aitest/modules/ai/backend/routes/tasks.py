@@ -1536,12 +1536,47 @@ async def list_kb_documents(
 
 @router.post("/kb/reindex")
 async def reindex_documents(
-    document_ids: list[int],
+    body: dict,  # 接收 {all: bool, document_ids: list[int]}
     kb_db=Depends(get_kb_db),
     config=Depends(get_config),
 ) -> dict:
-    """重新向量化指定文档（用于向量开启后批量重建索引）。"""
+    """重新向量化指定文档（用于向量开启后批量重建索引）。
+
+    body 支持两种模式：
+      - document_ids=[1,2,3] : 显式指定文档列表
+      - all=true             : 自动查所有需要 reindex 的文档（not_vectorized / embed_failed / embed_partial）
+    """
     from insight_aitest.platform.services.kb.ingest import process_document
+    from insight_aitest.platform.services.kb.models import DocumentStatus
+    import threading
+
+    if not getattr(config, "vector_enabled", False):
+        raise HTTPException(400, "请先在 AI 设置里开启向量检索（RAG）再执行向量化")
+
+    all_mode = bool(body.get("all", False))
+    document_ids = body.get("document_ids") or []
+
+    if all_mode:
+        # 自动查所有需要 reindex 的文档
+        from insight_aitest.platform.persistence import session_scope
+        from insight_aitest.platform.services.kb.models import Document
+
+        need_reindex = (
+            DocumentStatus.NOT_VECTORIZED.value,
+            DocumentStatus.EMBED_FAILED.value,
+            DocumentStatus.EMBED_PARTIAL.value,
+        )
+        with session_scope(kb_db.db_path) as s:
+            document_ids = [
+                r[0]
+                for r in s.query(Document.id)
+                .filter(Document.status.in_(need_reindex))
+                .all()
+            ]
+        if not document_ids:
+            return {"results": [], "message": "没有需要向量化的文档"}
+    elif not document_ids:
+        raise HTTPException(400, "请提供 document_ids 或 all=true")
 
     results = []
     for doc_id in document_ids:
@@ -1551,7 +1586,6 @@ async def reindex_documents(
                 results.append({"id": doc_id, "status": "not_found"})
                 continue
 
-            # 在后台线程重新处理（需传入全部依赖）
             def _bg(did=doc_id):
                 try:
                     from insight_aitest.platform.services.kb.deps import (
@@ -1561,11 +1595,7 @@ async def reindex_documents(
 
                     process_document(did, kb_db, _get_vs(), _get_llm(), config)
                 except Exception:
-                    from insight_aitest.platform.services.kb.models import DocumentStatus
-
                     kb_db.update_document_status(did, DocumentStatus.EMBED_FAILED)
-
-            import threading
 
             threading.Thread(target=_bg, daemon=True).start()
             results.append({"id": doc_id, "status": "reindexing"})
