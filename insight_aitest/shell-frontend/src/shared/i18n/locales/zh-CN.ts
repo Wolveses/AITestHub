@@ -957,6 +957,8 @@ export default {
       pdfPageInfo: '第 {{current}} / {{total}} 页',
       xlsxLoadFailed: 'xlsx 编辑器加载失败',
       xlsxParseFailed: 'xlsx 解析失败',
+      previewTooLarge: '文件过大，预览失败',
+      openInFeishu: '在飞书中打开',
       parseFile: '解析 {{name}} 中…',
       fileParseFailed: '{{name}} 解析失败：{{error}}',
       emptyFile: '空文件',

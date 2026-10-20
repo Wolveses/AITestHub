@@ -957,6 +957,8 @@ export default {
       pdfPageInfo: 'Page {{current}} / {{total}}',
       xlsxLoadFailed: 'Failed to load xlsx editor',
       xlsxParseFailed: 'Failed to parse xlsx',
+      previewTooLarge: 'File too large to preview',
+      openInFeishu: 'Open in Feishu',
       parseFile: 'Parsing {{name}}…',
       fileParseFailed: '{{name}} parse failed: {{error}}',
       emptyFile: 'Empty file',

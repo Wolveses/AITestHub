@@ -273,7 +273,7 @@ function Viewer({ kind, doc, content, loadingContent }: {
   if (kind === 'xlsx') {
     return (
       <Suspense fallback={<LoadingText />}>
-        <XlsxViewer url={url} filename={doc.filename} />
+        <XlsxViewer url={url} filename={doc.filename} sourceUrl={doc.source_url} />
       </Suspense>
     );
   }
