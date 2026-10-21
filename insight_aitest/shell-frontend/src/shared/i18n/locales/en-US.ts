@@ -979,7 +979,6 @@ export default {
       confirmReindexAllTitle: 'Batch Reindex',
       confirmReindexAllMsg: 'Will re-parse and vectorize {{n}} documents, calling the embedding API. Continue?',
       confirmReindexAllMsgRagOff: 'RAG is disabled. Will re-parse and split {{n}} documents (no vectorization). Continue?',
-      confirmReindexMsg: 'Will re-parse and vectorize document "{{name}}", calling the embedding API. Continue?',
       confirmReindexMsgRagOff: 'RAG is disabled. Will re-parse document "{{name}}" and reset splits (no vectorization). Continue?',
       syncSuccess: 'Synced! Pulled {{n}} documents',
       syncFailed: 'Sync failed: {{msg}}',

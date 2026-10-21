@@ -979,7 +979,6 @@ export default {
       confirmReindexAllTitle: '批量重新向量化',
       confirmReindexAllMsg: '将对 {{n}} 个文档重新解析并向量化，需要调用 embedding API，确定？',
       confirmReindexAllMsgRagOff: '当前 RAG 未开启，将对 {{n}} 个文档重新解析分块（不执行向量化），确定？',
-      confirmReindexMsg: '将重新解析并向量化文档「{{name}}」，需要调用 embedding API，确定？',
       confirmReindexMsgRagOff: '当前 RAG 未开启，将重新解析文档「{{name}}」并重置分块（不执行向量化），确定？',
       syncSuccess: '同步成功！已拉取 {{n}} 个文档',
       syncFailed: '同步失败: {{msg}}',

@@ -157,8 +157,9 @@ export function ChunksViewer({ docId, filename, onOpenChange }: ChunksViewerProp
             )}
             {!loading && !error && items.map((c) => {
               const isOpen = expanded.has(c.chunk_index);
-              const lines = c.text.split('\n');
-              const needFold = lines.length > PREVIEW_LINES;
+              // 计算换行数或字符长度：对于长段落（可能没有换行，但由于 wrap 会折行很多行）也需要折叠判断
+              const lineCount = c.text.split('\n').length;
+              const isLongText = lineCount > PREVIEW_LINES || c.text.length > 300;
               return (
                 <div key={c.chunk_index} style={{ flexShrink: 0, border: '1px solid var(--bg-elevated)', borderRadius: 6, overflow: 'hidden' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--bg-secondary, #f8fafc)', fontSize: 11, color: 'var(--text-muted)' }}>
@@ -168,23 +169,32 @@ export function ChunksViewer({ docId, filename, onOpenChange }: ChunksViewerProp
                     </span>
                     <span>char {c.char_start}-{c.char_end} · {c.text.length} {t('kb.chars', '字符')}</span>
                   </div>
-                  <pre style={{
-                    display: 'block',
-                    margin: 0, padding: '8px 10px', fontSize: 12, lineHeight: 1.6,
-                    color: 'var(--text-primary)', background: 'var(--bg-card)',
-                    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                    fontFamily: 'monospace',
-                    maxHeight: isOpen ? 'none' : `${PREVIEW_LINES * 1.6}em`,
-                    overflow: isOpen ? 'visible' : 'hidden',
-                  }}>
-                    {c.text}
-                  </pre>
-                  {needFold && (
+                  <div style={{ position: 'relative' }}>
+                    <pre style={{
+                      display: 'block',
+                      margin: 0, padding: '8px 10px', fontSize: 12, lineHeight: 1.6,
+                      color: 'var(--text-primary)', background: 'var(--bg-card)',
+                      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                      fontFamily: 'monospace',
+                      maxHeight: isOpen ? 'none' : `${PREVIEW_LINES * 1.6}em`,
+                      overflowY: isOpen ? 'visible' : 'hidden',
+                    }}>
+                      {c.text}
+                    </pre>
+                    {!isOpen && isLongText && (
+                      <div style={{
+                        position: 'absolute', bottom: 0, left: 0, right: 0, height: 32,
+                        background: 'linear-gradient(to bottom, transparent, var(--bg-card))',
+                        pointerEvents: 'none',
+                      }} />
+                    )}
+                  </div>
+                  {isLongText && (
                     <button
                       onClick={() => toggleExpand(c.chunk_index)}
                       style={{
-                        width: '100%', background: 'none', border: 'none', borderTop: '1px solid var(--bg-card)',
-                        padding: '4px 0', fontSize: 11, color: 'var(--accent)', cursor: 'pointer',
+                        width: '100%', background: 'var(--bg-card)', border: 'none', borderTop: '1px solid var(--bg-elevated)',
+                        padding: '6px 0', fontSize: 11, color: 'var(--accent)', cursor: 'pointer',
                         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
                       }}
                     >
