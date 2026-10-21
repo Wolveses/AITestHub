@@ -11,7 +11,12 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from insight_aitest.platform.services.kb.chunker import ChunkConfig, Chunker, SemanticChunker
+from insight_aitest.platform.services.kb.chunker import (
+    ChunkConfig,
+    Chunker,
+    SemanticChunker,
+    TableChunker,
+)
 from insight_aitest.platform.services.kb.loader import get_loader
 from insight_aitest.platform.services.kb.loader.base import (
     DocumentLoadError,
@@ -28,12 +33,22 @@ if TYPE_CHECKING:
     from insight_aitest.platform.services.kb.database import KBDatabase
 
 
-def _make_chunker(config: "LLMConfig", llm: "LLMClient") -> Chunker | SemanticChunker:
-    """根据 config.chunk_strategy 选择分块器。
+def _make_chunker(
+    config: "LLMConfig",
+    llm: "LLMClient",
+    parsed: "ParsedDocument" | None = None,
+) -> Chunker | SemanticChunker | TableChunker:
+    """根据文档类型与 config.chunk_strategy 选择分块器。
 
-    semantic 策略需 embedding 可用（vector_enabled=True 且 llm 存在），否则回退 recursive。
-    回退在工厂层做粗判；SemanticChunker.split 内部对 embed 调用失败再 try/except 细判（双层保护）。
+    表格类文档（xlsx/xls/csv 或 meta['type'] == 'table'）优先使用专用的 TableChunker，
+    保证按整行切割与行级重叠，避免单行被截断破坏。
     """
+    if parsed and (
+        parsed.meta.get("type") == "table"
+        or parsed.meta.get("format") in ("xlsx", "xls", "csv")
+    ):
+        return TableChunker(ChunkConfig(chunk_size=config.chunk_size, chunk_overlap=config.chunk_overlap))
+
     if (
         getattr(config, "chunk_strategy", "recursive") == "semantic"
         and getattr(config, "vector_enabled", False)
@@ -84,7 +99,7 @@ def process_document(
 
     # 2. 分块
     db.update_document_status(document_id, DocumentStatus.CHUNKING, char_count=len(parsed.content))
-    chunker = _make_chunker(config, llm)
+    chunker = _make_chunker(config, llm, parsed=parsed)
     raw_chunks = chunker.split(parsed)
     if len(raw_chunks) > config.max_chunks_per_doc:
         db.update_document_status(

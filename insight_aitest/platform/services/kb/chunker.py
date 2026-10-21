@@ -337,3 +337,150 @@ class SemanticChunker:
                 new_start = s
             result.append((new_start, e))
         return result
+
+
+class TableChunker:
+    """表格感知分块器：针对结构化表格（如 .xlsx/.csv）的语义增强分块（方案 A）。
+
+    设计核心：
+    1. 行级原子边界（Row-as-Atom）：绝不在单行内部截断，切块点只能在完整换行符处。
+    2. 语义增强跨块表头注入（Header Injection）：
+       若 Sheet 包含标准 Markdown 表头（# SheetName, | Col1 | Col2 |, |---|---|），
+       每个数据分块顶部都会强制注入所属工作表标题与完整表头，保证单块对于大模型自解释。
+    3. 行级滑动重叠（Row-Level Overlap）：相邻块回退 1~2 整行，杜绝按字符回退造成的「残缺腰斩行」。
+    4. 物理溯源映射：
+       char_start ~ char_end 记录当前分块数据行在文档中的真实物理偏移跨度，兼顾高亮与溯源定位。
+    """
+
+    def __init__(self, config: ChunkConfig) -> None:
+        self.config = config
+
+    def split(self, document: ParsedDocument) -> list[Chunk]:
+        text = document.content
+        if not text:
+            return []
+
+        # 1. 按 Markdown Sheet 标题（# 开头）拆分成 Sheet 级大段落
+        sheet_segments = self._split_by_sheets(text)
+
+        chunks: list[Chunk] = []
+        chunk_idx = 0
+
+        for seg_start, seg_end in sheet_segments:
+            seg_text = text[seg_start:seg_end]
+            sheet_chunks = self._split_sheet(seg_text, seg_start, chunk_idx)
+            chunks.extend(sheet_chunks)
+            chunk_idx += len(sheet_chunks)
+
+        return chunks
+
+    def _split_by_sheets(self, text: str) -> list[tuple[int, int]]:
+        """按 Sheet 标题行拆分。"""
+        positions = [m.start() for m in _HEADER_RE.finditer(text)]
+        if not positions:
+            return [(0, len(text))]
+        bounds = sorted({0} | set(positions) | {len(text)})
+        return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+
+    def _split_sheet(
+        self, sheet_text: str, offset: int, start_chunk_idx: int
+    ) -> list[Chunk]:
+        """对单个 Sheet 进行行感知与表头注入切块。"""
+        raw_lines = sheet_text.splitlines(keepends=True)
+        lines: list[tuple[int, int]] = []
+        cur = 0
+        for line in raw_lines:
+            line_len = len(line)
+            if line.strip():  # 忽略纯空行
+                lines.append((cur, cur + line_len))
+            cur += line_len
+
+        if not lines:
+            return []
+
+        # 识别 Sheet 标题与表头（前 3 行通常为 # SheetName, | Col1 | Col2 |, |---|---|）
+        header_prefix = ""
+        data_lines_start_idx = 0
+
+        if (
+            len(lines) >= 3
+            and sheet_text[lines[0][0] : lines[0][1]].strip().startswith("#")
+            and "|" in sheet_text[lines[1][0] : lines[1][1]]
+            and "---" in sheet_text[lines[2][0] : lines[2][1]]
+        ):
+            header_prefix = sheet_text[lines[0][0] : lines[2][1]].strip()
+            data_lines_start_idx = 3
+
+        data_lines = lines[data_lines_start_idx:]
+
+        # 若只有表头无数据行，或者整表长度很小，直接作为单块
+        if not data_lines or len(sheet_text) <= self.config.chunk_size:
+            return [
+                Chunk(
+                    id=None,
+                    document_id=0,
+                    chunk_index=start_chunk_idx,
+                    text=sheet_text.strip(),
+                    char_start=offset,
+                    char_end=offset + len(sheet_text),
+                )
+            ]
+
+        # 贪心合并数据行（按整行）
+        blocks: list[tuple[int, int]] = []
+        cur_start = data_lines[0][0]
+        cur_end = data_lines[0][1]
+
+        # 考虑表头占用的字符预算
+        effective_chunk_size = max(200, self.config.chunk_size - len(header_prefix))
+
+        for s, e in data_lines[1:]:
+            if (e - cur_start) > effective_chunk_size and (cur_end - cur_start) > 0:
+                blocks.append((cur_start, cur_end))
+                cur_start = s
+                cur_end = e
+            else:
+                cur_end = e
+        blocks.append((cur_start, cur_end))
+
+        # 行级 Overlap
+        line_starts = [l[0] for l in data_lines]
+        result_blocks: list[tuple[int, int]] = [blocks[0]]
+
+        if len(blocks) > 1 and self.config.chunk_overlap > 0:
+            for b_idx in range(1, len(blocks)):
+                b_start, b_end = blocks[b_idx]
+                target_start = max(0, b_start - self.config.chunk_overlap)
+                chosen_start = b_start
+                candidates = [ls for ls in line_starts if ls >= target_start and ls < b_start]
+                if candidates:
+                    chosen_start = candidates[0]
+
+                prev_start = result_blocks[-1][0]
+                if chosen_start <= prev_start:
+                    chosen_start = b_start
+
+                result_blocks.append((chosen_start, b_end))
+
+        chunks: list[Chunk] = []
+        for i, (b_s, b_e) in enumerate(result_blocks):
+            body_text = sheet_text[b_s:b_e].strip()
+            # 如果存在表头，每个数据块顶部统一注入表头，使之成为完整独立的 Markdown 表格
+            if header_prefix:
+                full_text = f"{header_prefix}\n{body_text}"
+            else:
+                full_text = body_text
+
+            chunks.append(
+                Chunk(
+                    id=None,
+                    document_id=0,
+                    chunk_index=start_chunk_idx + i,
+                    text=full_text,
+                    char_start=offset + b_s,
+                    char_end=offset + b_e,
+                )
+            )
+
+        return chunks
+

@@ -139,8 +139,8 @@ def test_xlsx_loader_extracts_rows(tmp_path):
 
     doc = get_loader("cases.xlsx").load(p)
     assert "登录用例" in doc.content  # sheet 名
-    assert "用例名 | 步骤 | 预期" in doc.content  # 表头行
-    assert "用例名: 正常登录 | 步骤: 输入正确账号 | 预期: 登录成功" in doc.content
+    assert "| 用例名 | 步骤 | 预期 |" in doc.content  # 表头行
+    assert "| 正常登录 | 输入正确账号 | 登录成功 |" in doc.content
     assert "密码错误" in doc.content
     assert doc.meta["format"] == "xlsx"
 
