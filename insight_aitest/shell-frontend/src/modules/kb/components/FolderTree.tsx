@@ -13,6 +13,8 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
+import { useConfirmStore } from '../../../shared/store/confirmStore';
 import { useKnowledgeStore, type FolderNode } from '../store/knowledgeStore';
 
 interface FolderTreeProps {
@@ -27,6 +29,7 @@ const MAX_WIDTH = 500;
 
 export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps) {
   const { t } = useTranslation();
+  const { confirm } = useConfirmStore();
   const { folders, createFolder, updateFolder, deleteFolder } = useKnowledgeStore();
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -132,9 +135,13 @@ export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps)
   const handleDelete = async (id: number, e: React.MouseEvent) => {
     e.stopPropagation();
     setActiveMenuId(null);
-    if (window.confirm(t('kb.confirmDeleteFolder', '确定要删除该文件夹吗？其内部文档将移至未分类。'))) {
-      await deleteFolder(id);
-    }
+    confirm({
+      message: t('kb.confirmDeleteFolder', '确定要删除该文件夹吗？其内部文档将移至未分类。'),
+      variant: 'danger',
+      onConfirm: async () => {
+        await deleteFolder(id);
+      },
+    });
   };
 
   const renderTreeNodes = (nodes: FolderNode[], level = 0) => {
@@ -303,7 +310,7 @@ export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps)
                         try {
                           await useKnowledgeStore.getState().syncFeishuSpace(spaceId);
                         } catch (err: any) {
-                          alert(`同步失败: ${err.message}`);
+                          toast.error(t('kb.syncFailed', '同步失败: {{msg}}', { msg: err.message }));
                         }
                       }
                     }}

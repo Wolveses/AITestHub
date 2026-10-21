@@ -1,8 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Upload, Folder, ChevronRight, Home, UploadCloud, RefreshCw, Globe } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import { useKnowledgeStore, type Document, type FolderNode } from '../store/knowledgeStore';
 import { useProjectStore } from '../../../shared/store/projectStore';
+import { useConfirmStore } from '../../../shared/store/confirmStore';
+import { useConfigStore } from '../../ai/store/configStore';
 import { DocumentRow } from './DocumentRow';
 import { DocumentViewer } from './DocumentViewer';
 import { ChunksViewer } from './ChunksViewer';
@@ -95,6 +98,7 @@ function PaginationBar({
 
 export function KnowledgeBase() {
   const { t } = useTranslation();
+  const { confirm } = useConfirmStore();
   const {
     documents,
     docTotal,
@@ -254,12 +258,13 @@ export function KnowledgeBase() {
       const r = await fetch(`/api/modules/kb/documents/${docId}/reindex`, { method: 'POST' });
       if (!r.ok) {
         const err = await r.text();
-        alert(err || `重新向量化失败 (HTTP ${r.status})`);
+        toast.error(err || `重新向量化失败 (HTTP ${r.status})`);
         return;
       }
+      toast.success(t('kb.reindexStarted', '已触发重新向量化'));
       setTimeout(() => loadDocuments(), 1000);
     } catch (e: any) {
-      alert(`重新向量化失败: ${e?.message || e}`);
+      toast.error(`重新向量化失败: ${e?.message || e}`);
     }
   };
 
@@ -268,34 +273,58 @@ export function KnowledgeBase() {
       const stats = await fetch('/api/modules/ai/tasks/kb/stats').then(r => r.ok ? r.json() : null);
       const cnt = stats?.need_reindex_count ?? 0;
       if (cnt === 0) {
-        alert('没有需要重新向量化的文档');
+        toast.info(t('kb.noNeedReindex', '没有需要重新向量化的文档'));
         return;
       }
-      if (!confirm(`将对 ${cnt} 个未向量化/向量化失败的文档重新向量化，需要调用 embedding API，确定？`)) return;
-      const r = await fetch('/api/modules/ai/tasks/kb/reindex', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ all: true, document_ids: [] }),
+      const ragOn = stats?.vector_enabled;
+      confirm({
+        title: t('kb.confirmReindexAllTitle', '批量重新向量化'),
+        message: ragOn
+          ? t('kb.confirmReindexAllMsg', '将对 {{n}} 个文档重新解析并向量化，需要调用 embedding API，确定？', { n: cnt })
+          : t('kb.confirmReindexAllMsgRagOff', '当前 RAG 未开启，将对 {{n}} 个文档重新解析分块（不执行向量化），确定？', { n: cnt }),
+        onConfirm: async () => {
+          try {
+            const r = await fetch('/api/modules/ai/tasks/kb/reindex', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ all: true, document_ids: [] }),
+            });
+            if (!r.ok) {
+              const err = await r.text();
+              toast.error(err || `批量重新向量化失败 (HTTP ${r.status})`);
+              return;
+            }
+            toast.success(t('kb.reindexAllStarted', '已触发批量重新向量化'));
+            setTimeout(() => loadDocuments(), 1500);
+          } catch (e: any) {
+            toast.error(`批量重新向量化失败: ${e?.message || e}`);
+          }
+        },
       });
-      if (!r.ok) {
-        const err = await r.text();
-        alert(err || `批量重新向量化失败 (HTTP ${r.status})`);
-        return;
-      }
-      setTimeout(() => loadDocuments(), 1500);
     } catch (e: any) {
-      alert(`批量重新向量化失败: ${e?.message || e}`);
+      toast.error(`批量重新向量化失败: ${e?.message || e}`);
     }
   };
 
   // 顶部按钮数量用全库范围（调 stats 接口），与 handleReindexAll 的 confirm 弹框保持一致
   const [needReindexCount, setNeedReindexCount] = useState(0);
+  const [vectorEnabled, setVectorEnabled] = useState(false);
+  // 订阅 configStore 的 vector_enabled，保存 AI 设置后立即生效，无需刷新页面
+  const configVectorEnabled = useConfigStore((s) => !!s.config?.vector_enabled);
   useEffect(() => {
     fetch('/api/modules/ai/tasks/kb/stats')
       .then(r => r.ok ? r.json() : null)
-      .then(s => setNeedReindexCount(s?.need_reindex_count ?? 0))
+      .then(s => {
+        setNeedReindexCount(s?.need_reindex_count ?? 0);
+        setVectorEnabled(!!s?.vector_enabled);
+      })
       .catch(() => {});
-  }, [activeTab, currentFolderId]);
+  }, [activeTab, currentFolderId, configVectorEnabled]);
+  // 同步到本地 state（保存配置后后端 stats 接口需要重新拉才能拿到最新值，
+  // 但 configStore 已经更新了，这里用它当即时源让 UI 立即响应）
+  useEffect(() => {
+    setVectorEnabled(configVectorEnabled);
+  }, [configVectorEnabled]);
 
   // feishuModalOpen 由 KnowledgeBaseApp 顶部按钮触发，这里监听并初始化飞书空间列表
   useEffect(() => {
@@ -523,6 +552,7 @@ export function KnowledgeBase() {
                 <DocumentRow
                   key={d.id}
                   doc={d}
+                  vectorEnabled={vectorEnabled}
                   folderPath={d.folder_id ? folderPathMap.get(d.folder_id) : undefined}
                   showFolderScope={currentFolderId === null}
                   onSelectFolder={setCurrentFolderId}
@@ -652,10 +682,10 @@ export function KnowledgeBase() {
                         onClick={async () => {
                           try {
                             const res = await syncFeishuSpace(s.space_id);
-                            alert(`同步成功！已拉取 ${res.result?.synced_count || 0} 个文档`);
+                            toast.success(t('kb.syncSuccess', '同步成功！已拉取 {{n}} 个文档', { n: res.result?.synced_count || 0 }));
                             setFeishuModalOpen(false);
                           } catch (err: any) {
-                            alert(`同步失败: ${err.message}`);
+                            toast.error(t('kb.syncFailed', '同步失败: {{msg}}', { msg: err.message }));
                           }
                         }}
                         style={{
@@ -701,11 +731,11 @@ export function KnowledgeBase() {
                       onClick={async () => {
                         try {
                           const res = await syncFeishuSpace(syncSpaceIdInput.trim());
-                          alert(`同步成功！已拉取 ${res.result?.synced_count || 0} 个文档`);
+                          toast.success(t('kb.syncSuccess', '同步成功！已拉取 {{n}} 个文档', { n: res.result?.synced_count || 0 }));
                           setFeishuModalOpen(false);
                           setSyncSpaceIdInput('');
                         } catch (err: any) {
-                          alert(`同步失败: ${err.message}`);
+                          toast.error(t('kb.syncFailed', '同步失败: {{msg}}', { msg: err.message }));
                         }
                       }}
                       style={{

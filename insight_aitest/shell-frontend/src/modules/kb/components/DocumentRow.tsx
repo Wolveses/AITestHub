@@ -37,6 +37,7 @@ const DOC_TYPE_KEY: Record<string, string> = {
 
 interface DocumentRowProps {
   doc: Document;
+  vectorEnabled?: boolean;
   folderPath?: { id: number; name: string }[];
   showFolderScope?: boolean;
   onDelete: (id: number) => void;
@@ -51,6 +52,7 @@ interface DocumentRowProps {
 
 export function DocumentRow({
   doc,
+  vectorEnabled,
   folderPath,
   showFolderScope = false,
   onDelete,
@@ -237,11 +239,13 @@ export function DocumentRow({
             <FolderInput size={14} />
           </button>
         )}
-        {onReindex && (doc.status === 'not_vectorized' || doc.status === 'embed_failed' || doc.status === 'embed_partial') && (
+        {onReindex && (doc.status === 'ready' || doc.status === 'parse_failed' || doc.status === 'not_vectorized' || doc.status === 'embed_failed' || doc.status === 'embed_partial') && (
           <button
             onClick={() => confirm({
               title: t('kb.confirmReindexTitle', '重新向量化'),
-              message: t('kb.confirmReindexMsg', { name: doc.filename }),
+              message: vectorEnabled
+                ? t('kb.confirmReindexMsg', '将重新解析并向量化文档「{{name}}」，需要调用 embedding API，确定？', { name: doc.filename })
+                : t('kb.confirmReindexMsgRagOff', '当前 RAG 未开启，将重新解析文档「{{name}}」并重置分块（不执行向量化），确定？', { name: doc.filename }),
               onConfirm: () => onReindex(doc.id),
             })}
             title={t('kb.reindexHint', '重新向量化（复用 reindex 接口）')}
