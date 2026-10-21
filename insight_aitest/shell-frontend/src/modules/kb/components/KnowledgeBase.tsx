@@ -5,6 +5,7 @@ import { useKnowledgeStore, type Document, type FolderNode } from '../store/know
 import { useProjectStore } from '../../../shared/store/projectStore';
 import { DocumentRow } from './DocumentRow';
 import { DocumentViewer } from './DocumentViewer';
+import { ChunksViewer } from './ChunksViewer';
 import { DocumentMetaEditor } from './DocumentMetaEditor';
 import { FolderTree } from './FolderTree';
 import { MoveDocModal } from './MoveDocModal';
@@ -127,6 +128,7 @@ export function KnowledgeBase() {
   const [metaOpen, setMetaOpen] = useState(false);
   const [moveDoc, setMoveDoc] = useState<Document | null>(null);
   const [moveOpen, setMoveOpen] = useState(false);
+  const [chunksDoc, setChunksDoc] = useState<Document | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [feishuSpaces, setFeishuSpaces] = useState<{ space_id: string; name: string }[]>([]);
   const [loadingSpaces, setLoadingSpaces] = useState(false);
@@ -530,6 +532,7 @@ export function KnowledgeBase() {
                   onShowVersions={handleShowVersions}
                   onMove={handleMove}
                   onReindex={handleReindex}
+                  onPreviewChunks={setChunksDoc}
                 />
               ))}
             </div>
@@ -550,6 +553,11 @@ export function KnowledgeBase() {
 
         {/* 移动到目录弹窗 */}
         <MoveDocModal doc={moveDoc} open={moveOpen} onOpenChange={setMoveOpen} />
+
+        {/* 分块预览弹窗 */}
+        {chunksDoc && (
+          <ChunksViewer docId={chunksDoc.id} filename={chunksDoc.filename} onOpenChange={(open) => !open && setChunksDoc(null)} />
+        )}
 
         {/* 飞书知识库空间同步弹窗 */}
         {feishuModalOpen && (

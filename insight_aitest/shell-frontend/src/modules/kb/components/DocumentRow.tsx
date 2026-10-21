@@ -1,4 +1,4 @@
-import { FileText, Eye, Download, Tag as TagIcon, History, FolderInput, CheckCircle2, CircleDashed, AlertCircle, XCircle, RefreshCw } from 'lucide-react';
+import { FileText, Eye, Download, Tag as TagIcon, History, FolderInput, CheckCircle2, CircleDashed, AlertCircle, XCircle, RefreshCw, Scissors } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Document } from '../store/knowledgeStore';
 import { useConfirmStore } from '../../../shared/store/confirmStore';
@@ -46,6 +46,7 @@ interface DocumentRowProps {
   onMove?: (doc: Document) => void;
   onSelectFolder?: (folderId: number | null) => void;
   onReindex?: (id: number) => void;
+  onPreviewChunks?: (doc: Document) => void;
 }
 
 export function DocumentRow({
@@ -59,6 +60,7 @@ export function DocumentRow({
   onMove,
   onSelectFolder,
   onReindex,
+  onPreviewChunks,
 }: DocumentRowProps) {
   const { t } = useTranslation();
   const statusKey = STATUS_KEY[doc.status];
@@ -216,6 +218,11 @@ export function DocumentRow({
         <button onClick={() => onPreview(doc)} title={t('kb.preview')} style={iconBtnStyle}>
           <Eye size={14} />
         </button>
+        {onPreviewChunks && (doc.status === 'ready' || doc.status === 'not_vectorized' || doc.status === 'embed_failed' || doc.status === 'embed_partial') && (
+          <button onClick={() => onPreviewChunks(doc)} title={t('kb.previewChunks', '预览分块')} style={iconBtnStyle}>
+            <Scissors size={14} />
+          </button>
+        )}
         <a href={`/api/modules/kb/documents/${doc.id}/raw`} download title={t('kb.download')} style={{ ...iconBtnStyle, textDecoration: 'none', display: 'inline-flex' }}>
           <Download size={14} />
         </a>

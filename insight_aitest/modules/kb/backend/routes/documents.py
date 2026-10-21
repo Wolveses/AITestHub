@@ -306,6 +306,30 @@ async def get_document_content(doc_id: int, db: KBDatabase = Depends(get_kb_db))
     }
 
 
+@router.get("/{doc_id}/chunks")
+async def list_document_chunks(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> dict:
+    """返回文档的全部分块列表（只读，供前端诊断分块效果）。"""
+    doc = db.get_document(doc_id)
+    if not doc:
+        raise HTTPException(404, "文档不存在")
+    chunks = db.get_chunks_by_document(doc_id)
+    items = [
+        {
+            "chunk_index": c.chunk_index,
+            "text": c.text,
+            "char_start": c.char_start,
+            "char_end": c.char_end,
+            "embed_status": c.embed_status.value if c.embed_status else None,
+        }
+        for c in chunks
+    ]
+    by_status: dict[str, int] = {}
+    for it in items:
+        key = it["embed_status"] or "pending"
+        by_status[key] = by_status.get(key, 0) + 1
+    return {"document_id": doc_id, "filename": doc.filename, "total": len(items), "by_status": by_status, "items": items}
+
+
 # ----- 导出 -----
 
 
