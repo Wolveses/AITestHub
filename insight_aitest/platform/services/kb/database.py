@@ -191,6 +191,22 @@ class KBDatabase:
                 pass
             self._vec_available = False
 
+    def _ensure_vec_extension(self, conn: sqlite3.Connection) -> bool:
+        """给当前连接临时加载 sqlite-vec 扩展。
+
+        与 ``self._vec_available`` 无关——即使 RAG 整体关着，只要 vec0 虚拟表在磁盘上，
+        清向量/删文档时也需要临时 load 扩展来操作它。返回是否成功加载。
+        """
+        try:
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            return True
+        except Exception:
+            return False
+
     def get_connection(self) -> sqlite3.Connection:
         """vec0 原生连接（vector_store/retriever/documents 路由的原生 SQL 用）。
 
@@ -501,8 +517,7 @@ class KBDatabase:
                 return
             d.status = status
             d.updated_at = datetime.now()
-            if error_message is not None:
-                d.error_message = error_message
+            d.error_message = error_message  # 始终覆盖——None 代表无错误（含重启/重试时清旧错误）
             if char_count is not None:
                 d.char_count = char_count
             if chunk_count is not None:

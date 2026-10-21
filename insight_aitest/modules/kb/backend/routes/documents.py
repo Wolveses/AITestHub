@@ -248,9 +248,11 @@ async def delete_document(
 
 @router.post("/{doc_id}/reindex", response_model=DocumentOut)
 async def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db), cfg=Depends(get_config)) -> DocumentOut:
-    """重新索引（换 embedding 模型后用）。删旧向量与 chunks，后台重新解析向量化。"""
-    if not getattr(cfg, "vector_enabled", False):
-        raise HTTPException(400, "请先在 AI 设置里开启向量检索（RAG）再执行向量化")
+    """重新索引（删旧向量与 chunks，后台重新解析向量化）。
+
+    RAG 关闭时仍执行：清旧分块 → 重新解析分块 → 跳过向量化 → 状态 NOT_VECTORIZED。
+    向量化表是否存在由 _reindex_in_bg 内部查表决定，不依赖 cfg.vector_enabled。
+    """
     doc = db.get_document(doc_id)
     if not doc:
         raise HTTPException(404, "文档不存在")
@@ -275,8 +277,14 @@ def _reindex_in_bg(doc_id: int, db: KBDatabase) -> None:
                 "SELECT id FROM chunks WHERE document_id = ?", (doc_id,)
             ).fetchall()
         ]
-        for cid in chunk_ids:
-            conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (cid,))
+        # 清旧向量：表存在 → 临时 load vec0 扩展 → 清
+        # 不依赖 db._vec_available（RAG 开关），否则关 RAG 期间 reindex 会残留孤儿向量
+        has_vec_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'"
+        ).fetchone()
+        if has_vec_table and db._ensure_vec_extension(conn):
+            for cid in chunk_ids:
+                conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (cid,))
         conn.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
         conn.commit()
         db.update_document_status(doc_id, DocumentStatus.PENDING)

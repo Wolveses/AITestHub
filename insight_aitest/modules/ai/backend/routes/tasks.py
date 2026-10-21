@@ -1544,14 +1544,12 @@ async def reindex_documents(
 
     body 支持两种模式：
       - document_ids=[1,2,3] : 显式指定文档列表
-      - all=true             : 自动查所有需要 reindex 的文档（not_vectorized / embed_failed / embed_partial）
+      - all=true             : 自动查所有需要 reindex 的文档（终态：ready / not_vectorized / embed_failed / embed_partial / parse_failed）
+    不再强制 RAG 开启——关闭时只做重新解析分块（不向量化），与单文档 reindex 入口一致。
     """
     from insight_aitest.platform.services.kb.ingest import process_document
     from insight_aitest.platform.services.kb.models import DocumentStatus
     import threading
-
-    if not getattr(config, "vector_enabled", False):
-        raise HTTPException(400, "请先在 AI 设置里开启向量检索（RAG）再执行向量化")
 
     all_mode = bool(body.get("all", False))
     document_ids = body.get("document_ids") or []
@@ -1562,9 +1560,11 @@ async def reindex_documents(
         from insight_aitest.platform.services.kb.models import Document
 
         need_reindex = (
+            DocumentStatus.READY.value,
             DocumentStatus.NOT_VECTORIZED.value,
             DocumentStatus.EMBED_FAILED.value,
             DocumentStatus.EMBED_PARTIAL.value,
+            DocumentStatus.PARSE_FAILED.value,
         )
         with session_scope(kb_db.db_path) as s:
             document_ids = [
@@ -1617,9 +1617,11 @@ async def kb_stats(
     from sqlalchemy import func
 
     need_reindex = (
+        DocumentStatus.READY.value,
         DocumentStatus.NOT_VECTORIZED.value,
         DocumentStatus.EMBED_FAILED.value,
         DocumentStatus.EMBED_PARTIAL.value,
+        DocumentStatus.PARSE_FAILED.value,
     )
 
     with session_scope(kb_db.db_path) as s:

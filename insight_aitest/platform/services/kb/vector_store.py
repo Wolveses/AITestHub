@@ -164,6 +164,12 @@ class VectorStore:
                 "SELECT id FROM chunks WHERE document_id = ?", (document_id,)
             ).fetchall()
         ]
-        for cid in chunk_ids:
-            conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (cid,))
+        # 清向量：表存在 → 临时 load vec0 扩展 → 清
+        # 不依赖 _vec_available（RAG 开关），否则关 RAG 期间删文档会残留孤儿向量
+        has_vec_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'"
+        ).fetchone()
+        if has_vec_table and self.db._ensure_vec_extension(conn):
+            for cid in chunk_ids:
+                conn.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (cid,))
         conn.commit()
