@@ -1547,8 +1547,7 @@ async def reindex_documents(
       - all=true             : 自动查所有需要 reindex 的文档（终态：ready / not_vectorized / embed_failed / embed_partial / parse_failed）
     不再强制 RAG 开启——关闭时只做重新解析分块（不向量化），与单文档 reindex 入口一致。
     """
-    from insight_aitest.platform.services.kb.ingest import process_document
-    from insight_aitest.platform.services.kb.models import DocumentStatus
+    from insight_aitest.modules.kb.backend.routes.documents import _reindex_in_bg
     import threading
 
     all_mode = bool(body.get("all", False))
@@ -1557,7 +1556,7 @@ async def reindex_documents(
     if all_mode:
         # 自动查所有需要 reindex 的文档
         from insight_aitest.platform.persistence import session_scope
-        from insight_aitest.platform.services.kb.models import Document
+        from insight_aitest.platform.services.kb.models import Document, DocumentStatus
 
         need_reindex = (
             DocumentStatus.READY.value,
@@ -1579,29 +1578,22 @@ async def reindex_documents(
         raise HTTPException(400, "请提供 document_ids 或 all=true")
 
     results = []
+    valid_ids = []
     for doc_id in document_ids:
-        try:
-            doc = kb_db.get_document(doc_id)
-            if doc is None:
-                results.append({"id": doc_id, "status": "not_found"})
-                continue
-
-            def _bg(did=doc_id):
-                try:
-                    from insight_aitest.platform.services.kb.deps import (
-                        get_llm as _get_llm,
-                        get_vector_store as _get_vs,
-                    )
-
-                    process_document(did, kb_db, _get_vs(), _get_llm(), config)
-                except Exception:
-                    kb_db.update_document_status(did, DocumentStatus.EMBED_FAILED)
-
-            threading.Thread(target=_bg, daemon=True).start()
+        if kb_db.get_document(doc_id) is None:
+            results.append({"id": doc_id, "status": "not_found"})
+        else:
+            valid_ids.append(doc_id)
             results.append({"id": doc_id, "status": "reindexing"})
-        except Exception as e:
-            results.append({"id": doc_id, "status": "error", "error": str(e)})
 
+    # 批量 reindex 串行执行：只起一个后台线程逐个处理。
+    # 若每文档起一个线程，并发线程会把 kb.db 的 SQLAlchemy 连接池
+    # （默认 5+10）打爆，30s 等不到连接即抛 QueuePool 超时。
+    def _batch():
+        for doc_id in valid_ids:
+            _reindex_in_bg(doc_id, kb_db)  # 内部异常已自捕获并写入文档状态
+
+    threading.Thread(target=_batch, daemon=True).start()
     return {"results": results}
 
 

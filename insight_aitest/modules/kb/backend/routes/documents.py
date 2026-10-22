@@ -290,8 +290,9 @@ def _reindex_in_bg(doc_id: int, db: KBDatabase) -> None:
         db.update_document_status(doc_id, DocumentStatus.PENDING)
         process_document(doc_id, db, vs, llm, cfg)
     except Exception as e:
+        logger.exception("重新索引失败 doc_id=%s", doc_id)
         db.update_document_status(
-            doc_id, DocumentStatus.PARSE_FAILED, error_message=f"重新索引失败: {e}"
+            doc_id, DocumentStatus.EMBED_FAILED, error_message=f"重新索引失败: {e}"
         )
 
 
