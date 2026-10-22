@@ -54,6 +54,80 @@ def _ensure_project_columns(db_path: str) -> None:
         conn.commit()
 
 
+def tokenize_for_fts(text: str) -> str:
+    """为 FTS5 全文倒排索引构建分词：连续英文/数字/特殊符号保留原形，中文字符切为 2-gram（bigram）。
+
+    无需外部 C/Rust 分词扩展，原生兼容 SQLite FTS5 unicode61 分词器。
+    """
+    if not text:
+        return ""
+    tokens: list[str] = []
+    # 提取连续英文数字标识符（含型号、版本、IP、带下划线/星号/点的标记）与连续中文字符串
+    segments = re.findall(r"[a-zA-Z0-9_\.\*\\:\-]+|[\u4e00-\u9fff]+", text)
+    for seg in segments:
+        if re.match(r"^[a-zA-Z0-9_\.\*\\:\-]+$", seg):
+            tokens.append(seg.lower())
+        else:
+            if len(seg) == 1:
+                tokens.append(seg)
+            else:
+                for i in range(len(seg) - 1):
+                    tokens.append(seg[i : i + 2])
+    return " ".join(tokens)
+
+
+def _ensure_fts5_table(db_path: str) -> None:
+    """增量迁移：创建并同步 SQLite FTS5 全文倒排索引表与级联触发器（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        # 1. 检查或创建 chunks_fts 虚拟表
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                chunk_id UNINDEXED,
+                document_id UNINDEXED,
+                project_id UNINDEXED,
+                indexed_tokens,
+                tokenize='unicode61'
+            )
+            """
+        )
+
+        # 2. 创建触发器：当 chunks 物理行被删除时，自动删除对应 chunks_fts
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_chunks_delete_fts AFTER DELETE ON chunks
+            BEGIN
+                DELETE FROM chunks_fts WHERE chunk_id = OLD.id;
+            END;
+            """
+        )
+
+        # 3. 存量数据检查与补全：若 chunks 有数据但 chunks_fts 为空，执行一次性增量补录
+        has_chunks = conn.execute("SELECT 1 FROM chunks LIMIT 1").fetchone()
+        if has_chunks:
+            fts_count = conn.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+            if fts_count == 0:
+                rows = conn.execute(
+                    """
+                    SELECT c.id, c.document_id, d.project_id, c.text
+                    FROM chunks c
+                    LEFT JOIN documents d ON c.document_id = d.id
+                    """
+                ).fetchall()
+                fts_inserts = [
+                    (r[0], r[1], r[2], tokenize_for_fts(r[3] or ""))
+                    for r in rows
+                ]
+                if fts_inserts:
+                    conn.executemany(
+                        "INSERT INTO chunks_fts (chunk_id, document_id, project_id, indexed_tokens) VALUES (?, ?, ?, ?)",
+                        fts_inserts,
+                    )
+        conn.commit()
+
+
 def _ensure_document_meta_columns(db_path: str) -> None:
     """增量迁移：给 documents 表补 tags/doc_type/description 列（KB 升级，幂等）。
 
@@ -169,6 +243,7 @@ class KBDatabase:
                     _ensure_project_columns(db_path)
                     _ensure_document_meta_columns(db_path)
                     _ensure_storage_paths_aligned(db_path)
+                    _ensure_fts5_table(db_path)
                     _schema_ready.add(abs_path)
         # vec0 扩展加载：仅扩展加载/建表失败时降级（缺可选依赖）。
         # 维度不一致（ValueError）是数据完整性错误，必须抛出。
@@ -624,15 +699,26 @@ class KBDatabase:
         conn = self.get_connection()
         # 删旧 chunks（含向量由路由层 VectorStore 处理，这里只清 chunks 文本行）
         conn.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO chunks (document_id, chunk_index, text, char_start, char_end, embed_status) "
             "VALUES (?, 0, ?, 0, ?, 'pending')",
             (doc_id, new_text, len(new_text)),
         )
+        new_chunk_id = cur.lastrowid
         conn.execute(
             "UPDATE documents SET char_count = ?, chunk_count = 1, updated_at = ? WHERE id = ?",
             (len(new_text), datetime.now().isoformat(), doc_id),
         )
+        # 同步更新 chunks_fts
+        try:
+            doc = self.get_document(doc_id)
+            project_id = doc.project_id if doc else None
+            conn.execute(
+                "INSERT INTO chunks_fts (chunk_id, document_id, project_id, indexed_tokens) VALUES (?, ?, ?, ?)",
+                (new_chunk_id, doc_id, project_id, tokenize_for_fts(new_text)),
+            )
+        except Exception:
+            pass
         conn.commit()
 
     def get_chunks_text(
@@ -784,6 +870,24 @@ class KBDatabase:
                 s.add(c)
                 s.flush()
                 ids.append(c.id)
+
+        # 同步写入 FTS5 倒排索引
+        try:
+            doc = self.get_document(document_id)
+            project_id = doc.project_id if doc else None
+            fts_rows = [
+                (cid, document_id, project_id, tokenize_for_fts(c.text or ""))
+                for cid, c in zip(ids, chunks)
+            ]
+            conn = self.get_connection()
+            conn.executemany(
+                "INSERT INTO chunks_fts (chunk_id, document_id, project_id, indexed_tokens) VALUES (?, ?, ?, ?)",
+                fts_rows,
+            )
+            conn.commit()
+        except Exception:
+            pass  # FTS 同步不阻塞主摄取管线
+
         return ids
 
     def update_chunk_embed_status(self, chunk_id: int, status: EmbedStatus) -> None:

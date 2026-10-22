@@ -50,29 +50,35 @@ class Retriever:
         fallback: bool = True,
         exclude_document_ids: list[int] | None = None,
     ) -> list["ScoredChunk"]:
-        """三级降级检索：向量 → 关键词 → 原文。
-        如果查询包含明确的 IP 地址等实体标识符，优先执行精确关键词匹配，确保专用实体不被泛化语义掩盖。
+        """多路融合检索：向量 (Dense) + FTS5 倒排索引 (Sparse) 并行召回与 RRF 融合。
+        如果双路均无召回且允许 fallback，退回文档原文兜底。
         """
         k = top_k or self.config.top_k
+        fetch_k = max(self.config.rerank_fetch_k, k) if self.config.rerank_enabled else k
 
-        # 检查是否包含明确的 IP 地址等高精度关键词标识
-        has_ip = bool(re.search(r"\b\d{1,3}(?:\.\d{1,3}){2,3}\b", query))
-        if has_ip:
-            kw_results = self._keyword_retrieve(query, k, document_ids, project_id, exclude_document_ids)
-            if kw_results:
-                return kw_results
+        # 1. 向量路 (Dense) 召回
+        dense_results = self._vector_retrieve_raw(query, fetch_k, document_ids, project_id, exclude_document_ids)
 
-        # L1: 向量语义搜索
-        results = self._vector_retrieve(query, k, document_ids, project_id, exclude_document_ids)
-        if results:
-            return results
+        # 2. 倒排全文路 (Sparse FTS5) 召回
+        sparse_results = self._fts_retrieve(query, fetch_k, document_ids, project_id, exclude_document_ids)
 
-        # L2: SQL 关键词回退
-        results = self._keyword_retrieve(query, k, document_ids, project_id, exclude_document_ids)
-        if results:
-            return results
+        # 若 FTS 未配置或未查到，但有关键词提取，降级尝试 SQL LIKE
+        if not sparse_results:
+            sparse_results = self._keyword_retrieve(query, fetch_k, document_ids, project_id, exclude_document_ids)
 
-        # L3: 文档原文兜底（仅在允许 fallback 时触发，如用例生成器；常规对话不兜底无关文档）
+        # 3. RRF 倒排融合
+        fused = self._rrf_merge(dense_results, sparse_results, fetch_k)
+
+        # 若开启 Rerank 且候选数大于 k，执行重排
+        if self.config.rerank_enabled and len(fused) > k:
+            fused = self._rerank(query, fused, k)
+
+        # 4. 文档多样性控制
+        final_results = self._apply_diversity(fused, k, document_ids)
+        if final_results:
+            return final_results
+
+        # 5. 原文兜底
         if fallback:
             return self._fulltext_fallback(query, k, document_ids, project_id, exclude_document_ids=exclude_document_ids)
         return []
@@ -139,24 +145,21 @@ class Retriever:
 
     # ── L1: 向量检索 ──────────────────────────────────
 
-    def _vector_retrieve(
+    def _vector_retrieve_raw(
         self,
         query: str,
-        k: int,
+        fetch_k: int,
         document_ids: list[int] | None,
         project_id: int | None,
         exclude_document_ids: list[int] | None = None,
     ) -> list["ScoredChunk"]:
+        """向量语义搜索原始结果列表。"""
         if not getattr(self.config, "vector_enabled", False):
             return []
         try:
             query_vec = self.llm.embed_query(query)
         except Exception:
             return []
-
-        fetch_k = k
-        if self.config.rerank_enabled:
-            fetch_k = max(self.config.rerank_fetch_k, k)
 
         results = self.vector_store.search(
             query_vec,
@@ -165,13 +168,181 @@ class Retriever:
             project_id=project_id,
             exclude_document_ids=exclude_document_ids,
         )
-        results = [r for r in results if r.score >= self.config.min_score]
+        return [r for r in results if r.score >= self.config.min_score]
 
+    def _vector_retrieve(
+        self,
+        query: str,
+        k: int,
+        document_ids: list[int] | None,
+        project_id: int | None,
+        exclude_document_ids: list[int] | None = None,
+    ) -> list["ScoredChunk"]:
+        fetch_k = max(self.config.rerank_fetch_k, k) if self.config.rerank_enabled else k
+        results = self._vector_retrieve_raw(query, fetch_k, document_ids, project_id, exclude_document_ids)
         if self.config.rerank_enabled and len(results) > k:
             results = self._rerank(query, results, k)
+        return self._apply_diversity(results, k, document_ids)
 
-        # 文档多样性控制：当检索未限定单个文档且结果中包含多个不同文档时，
-        # 单篇文档最多占据 2 个 chunk，避免某一文档的相似 chunk 霸占全部 top-k 槽位
+    # ── L1.5: FTS5 倒排检索 ───────────────────────────
+
+    def _fts_retrieve(
+        self,
+        query: str,
+        k: int,
+        document_ids: list[int] | None,
+        project_id: int | None,
+        exclude_document_ids: list[int] | None = None,
+    ) -> list["ScoredChunk"]:
+        """基于 SQLite FTS5 的全文倒排检索。使用 trigram/unicode61 分词，支持毫秒级 BM25 检索。"""
+        if not query or not query.strip():
+            return []
+        if self.kb_db is None:
+            return []
+
+        from insight_aitest.platform.services.kb.database import tokenize_for_fts
+        from insight_aitest.platform.services.kb.models import Chunk, Document, ScoredChunk
+
+        tokens = tokenize_for_fts(query).split()
+        if not tokens:
+            return []
+
+        # 过滤并清洗特殊标点，构造 FTS5 MATCH 查询语法
+        clean_tokens = [t.replace('"', "").strip() for t in tokens if t.strip()]
+        if not clean_tokens:
+            return []
+        match_query = " OR ".join(f'"{t}"' for t in clean_tokens[:16])
+
+        # 构造 SQL 条件
+        conditions = ["chunks_fts MATCH ?"]
+        params: list[object] = [match_query]
+
+        if document_ids:
+            placeholders = ",".join(["?"] * len(document_ids))
+            conditions.append(f"fts.document_id IN ({placeholders})")
+            params.extend(document_ids)
+        if exclude_document_ids:
+            placeholders = ",".join(["?"] * len(exclude_document_ids))
+            conditions.append(f"fts.document_id NOT IN ({placeholders})")
+            params.extend(exclude_document_ids)
+        if project_id is not None:
+            conditions.append("(fts.project_id = ? OR fts.project_id IS NULL)")
+            params.append(project_id)
+
+        where_clause = " AND ".join(conditions)
+        sql = f"""
+            SELECT c.id, c.document_id, c.chunk_index, c.text, c.char_start, c.char_end, c.embed_status,
+                   d.id, d.filename, d.storage_path, d.content_hash, d.mime_type, d.project_id,
+                   bm25(chunks_fts) as bm25_score
+            FROM chunks_fts fts
+            JOIN chunks c ON fts.chunk_id = c.id
+            JOIN documents d ON fts.document_id = d.id
+            WHERE {where_clause}
+            ORDER BY bm25_score ASC
+            LIMIT ?
+        """
+        params.append(k)
+
+        try:
+            with self.kb_db.get_connection() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        except Exception:
+            return []
+
+        results = []
+        for r in rows:
+            chunk = Chunk(
+                id=r[0],
+                document_id=r[1],
+                chunk_index=r[2],
+                text=r[3],
+                char_start=r[4],
+                char_end=r[5],
+                embed_status=r[6],
+            )
+            doc = Document(
+                id=r[7],
+                filename=r[8],
+                storage_path=r[9],
+                content_hash=r[10],
+                mime_type=r[11],
+                project_id=r[12],
+            )
+            # FTS5 bm25 分数是负数（越小越相关），归一化为正浮点数
+            raw_bm25 = float(r[13])
+            score = round(1.0 / (1.0 + abs(raw_bm25)), 4)
+            results.append(ScoredChunk(chunk=chunk, document=doc, score=score))
+        return results
+
+    # ── RRF 倒排融合算法 ──────────────────────────────
+
+    def _rrf_merge(
+        self,
+        dense_results: list["ScoredChunk"],
+        sparse_results: list["ScoredChunk"],
+        k: int,
+        rrf_k: int = 60,
+        dense_weight: float = 0.6,
+        sparse_weight: float = 0.4,
+    ) -> list["ScoredChunk"]:
+        """Reciprocal Rank Fusion (RRF) 算法合并稠密语义与稀疏倒排结果。
+
+        Score(d) = w_dense / (rrf_k + rank_dense) + w_sparse / (rrf_k + rank_sparse)
+        """
+        if not dense_results and not sparse_results:
+            return []
+        if not dense_results:
+            return sparse_results[:k]
+        if not sparse_results:
+            return dense_results[:k]
+
+        from insight_aitest.platform.services.kb.models import ScoredChunk
+
+        scores: dict[int, float] = {}
+        chunk_map: dict[int, ScoredChunk] = {}
+
+        # 1. 稠密向量路排序累加
+        for rank, item in enumerate(dense_results, start=1):
+            cid = item.chunk.id
+            chunk_map[cid] = item
+            scores[cid] = scores.get(cid, 0.0) + dense_weight * (1.0 / (rrf_k + rank))
+
+        # 2. 稀疏全文路排序累加
+        for rank, item in enumerate(sparse_results, start=1):
+            cid = item.chunk.id
+            if cid not in chunk_map:
+                chunk_map[cid] = item
+            scores[cid] = scores.get(cid, 0.0) + sparse_weight * (1.0 / (rrf_k + rank))
+
+        # 3. 按融合分降序排列
+        sorted_cids = sorted(scores.keys(), key=lambda cid: scores[cid], reverse=True)
+
+        merged: list[ScoredChunk] = []
+        for cid in sorted_cids[:k]:
+            orig = chunk_map[cid]
+            # 融合分标准化
+            merged.append(
+                ScoredChunk(
+                    chunk=orig.chunk,
+                    document=orig.document,
+                    score=round(scores[cid], 5),
+                )
+            )
+        return merged
+
+    # ── 文档多样性控制 ────────────────────────────────
+
+    def _apply_diversity(
+        self,
+        results: list["ScoredChunk"],
+        k: int,
+        document_ids: list[int] | None,
+    ) -> list["ScoredChunk"]:
+        """文档多样性控制：当检索未限定单个文档且结果中包含多个不同文档时，
+        单篇文档最多占据 2 个 chunk，避免某一文档的相似 chunk 霸占全部 top-k 槽位。
+        """
+        if not results:
+            return []
         distinct_docs = {r.document.filename for r in results}
         if not (document_ids and len(document_ids) == 1) and len(distinct_docs) > 1 and len(results) > k:
             doc_counts: dict[str, int] = {}
@@ -183,7 +354,6 @@ class Retriever:
                 if cnt < max_per_doc:
                     diversified.append(r)
                     doc_counts[doc_name] = cnt + 1
-            # 若多样性筛选后不足 k 条，用剩余高分 chunk 补齐
             if len(diversified) < k:
                 seen_chunk_ids = {r.chunk.id for r in diversified}
                 for r in results:
@@ -191,8 +361,7 @@ class Retriever:
                         diversified.append(r)
                         if len(diversified) >= k:
                             break
-            results = diversified
-
+            return diversified[:k]
         return results[:k]
 
     # ── L2: SQL 关键词回退 ────────────────────────────
@@ -369,18 +538,80 @@ class Retriever:
                 continue
         return results
 
-    # ── Rerank (保持不变) ──────────────────────────────
+    # ── Rerank (重排层：支持 Cross-Encoder API 与 LLM 打分兜底) ──
 
     def _rerank(self, query: str, candidates: list["ScoredChunk"], k: int) -> list["ScoredChunk"]:
         if not candidates:
             return candidates
+
+        provider = getattr(self.config, "rerank_provider", "llm")
+        if provider == "cross_encoder" and getattr(self.config, "rerank_base_url", ""):
+            try:
+                return self._cross_encoder_rerank(query, candidates, k)
+            except Exception:
+                pass  # Cross-Encoder 异常降级走 LLM
+
         try:
             scores = self._llm_score(query, [c.chunk.text for c in candidates])
         except Exception:
-            return candidates
+            return candidates[:k]
         paired = list(zip(candidates, scores))
         paired.sort(key=lambda x: x[1], reverse=True)
         return [c for c, _ in paired[: max(k, len(candidates))]]
+
+    def _cross_encoder_rerank(
+        self, query: str, candidates: list["ScoredChunk"], k: int
+    ) -> list["ScoredChunk"]:
+        """调用外部标准 Cross-Encoder Rerank API (如 SiliconFlow / 阿里百炼 / 本地 TEI)。"""
+        import json
+        import urllib.request
+
+        base_url = self.config.rerank_base_url.rstrip("/")
+        if not base_url.endswith("/rerank"):
+            url = f"{base_url}/rerank"
+        else:
+            url = base_url
+
+        api_key = getattr(self.config, "rerank_api_key", "") or getattr(self.config, "llm_api_key", "")
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        model = getattr(self.config, "rerank_model", "BAAI/bge-reranker-v2-m3")
+        doc_texts = [(c.chunk.text or "")[:500] for c in candidates]
+        payload = json.dumps(
+            {
+                "model": model,
+                "query": query,
+                "documents": doc_texts,
+                "top_n": k,
+                "return_documents": False,
+            }
+        ).encode("utf-8")
+
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        # 解析标准响应：{"results": [{"index": 0, "relevance_score": 0.95}, ...]}
+        results_list = data.get("results") or []
+        if not results_list:
+            return candidates[:k]
+
+        reranked: list["ScoredChunk"] = []
+        for item in results_list:
+            idx = item.get("index")
+            score = item.get("relevance_score", 0.0)
+            if idx is not None and 0 <= idx < len(candidates):
+                orig = candidates[idx]
+                reranked.append(
+                    ScoredChunk(
+                        chunk=orig.chunk,
+                        document=orig.document,
+                        score=round(float(score), 4),
+                    )
+                )
+        return reranked if reranked else candidates[:k]
 
     def _llm_score(self, query: str, docs: list[str]) -> list[float]:
         snippets = []

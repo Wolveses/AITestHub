@@ -81,6 +81,10 @@ class ConfigOut(BaseModel):
     min_score: float
     rerank_enabled: bool
     rerank_fetch_k: int
+    rerank_provider: str = "llm"
+    rerank_base_url: str = ""
+    rerank_api_key_set: bool = False
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
     history_turns: int
     ocr_enabled: bool
     vector_enabled: bool
@@ -107,6 +111,10 @@ class ConfigUpdate(BaseModel):
     min_score: float | None = None
     rerank_enabled: bool | None = None
     rerank_fetch_k: int | None = None
+    rerank_provider: str | None = None
+    rerank_base_url: str | None = None
+    rerank_api_key: str | None = None
+    rerank_model: str | None = None
     history_turns: int | None = None
     ocr_enabled: bool | None = None
     vector_enabled: bool | None = None
@@ -162,6 +170,10 @@ def _to_config_out(cfg: AIConfig) -> ConfigOut:
         min_score=cfg.min_score,
         rerank_enabled=cfg.rerank_enabled,
         rerank_fetch_k=cfg.rerank_fetch_k,
+        rerank_provider=getattr(cfg, "rerank_provider", "llm"),
+        rerank_base_url=getattr(cfg, "rerank_base_url", ""),
+        rerank_api_key_set=bool(getattr(cfg, "rerank_api_key", "")),
+        rerank_model=getattr(cfg, "rerank_model", "BAAI/bge-reranker-v2-m3"),
         history_turns=cfg.history_turns,
         ocr_enabled=cfg.ocr_enabled,
         vector_enabled=cfg.vector_enabled,
@@ -204,6 +216,10 @@ async def update_config(body: ConfigUpdate, cfg: AIConfig = Depends(get_config))
         "min_score",
         "rerank_enabled",
         "rerank_fetch_k",
+        "rerank_provider",
+        "rerank_base_url",
+        "rerank_api_key",
+        "rerank_model",
         "history_turns",
         "ocr_enabled",
         "vector_enabled",

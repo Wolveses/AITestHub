@@ -42,9 +42,13 @@ class LLMConfig:
     max_upload_mb: int = 100
     max_chunks_per_doc: int = 5000
 
-    # Rerank（LLM-as-reranker：向量召回 N 候选 → LLM 打分 → 重排取 top_k）
+    # Rerank（多候选 → 重排取 top_k）
     rerank_enabled: bool = False  # 默认关，避免拖慢现有 RAG；按需开启
     rerank_fetch_k: int = 12  # rerank 前的候选数（应 ≥ top_k）
+    rerank_provider: str = "llm"  # "cross_encoder" (外部 BGE/Cohere API) | "llm" (大模型打分兜底)
+    rerank_base_url: str = ""  # Cross-Encoder Rerank API Base URL (如 SiliconFlow / 阿里百炼 / 本地 TEI)
+    rerank_api_key: str = ""  # Rerank 独立 API Key（为空时复用 llm_api_key）
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"  # Rerank 模型名
 
     # OCR（扫描件 PDF / 图片文档抽取文字）
     # True  → LLM OCR（走 vision_model，精度高但需联网 + API Key）
@@ -122,6 +126,10 @@ _ENV_KEYS = {
     "max_upload_mb": "INSIGHT_EYE_AI_MAX_UPLOAD_MB",
     "rerank_enabled": "INSIGHT_EYE_AI_RERANK_ENABLED",
     "rerank_fetch_k": "INSIGHT_EYE_AI_RERANK_FETCH_K",
+    "rerank_provider": "INSIGHT_EYE_AI_RERANK_PROVIDER",
+    "rerank_base_url": "INSIGHT_EYE_AI_RERANK_BASE_URL",
+    "rerank_api_key": "INSIGHT_EYE_AI_RERANK_API_KEY",
+    "rerank_model": "INSIGHT_EYE_AI_RERANK_MODEL",
     "ocr_enabled": "INSIGHT_EYE_AI_OCR_ENABLED",
     "vector_enabled": "INSIGHT_EYE_AI_VECTOR_ENABLED",
     "embed_base_url": "INSIGHT_EYE_AI_EMBED_BASE_URL",
