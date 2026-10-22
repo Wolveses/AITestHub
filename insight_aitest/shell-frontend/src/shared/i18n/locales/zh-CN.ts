@@ -828,7 +828,7 @@ export default {
       uploading: '上传中…',
       uploadHint: '支持拖拽或点击上传，支持 PDF / Word / Excel / TXT / Markdown',
       uploadClickHint: '点击或拖拽文件到此处上传',
-      supportedFormats: '支持 .md .txt .pdf .docx .xlsx .pptx .html，单个 ≤ 20MB',
+      supportedFormats: '支持 .md .txt .pdf .doc .docx .xlsx .xls .pptx .html，单个 ≤ 20MB',
       searchPlaceholder: '搜索文档…',
       searchFilenamePlaceholder: '搜索文件名…',
       noDocuments: '暂无文档',

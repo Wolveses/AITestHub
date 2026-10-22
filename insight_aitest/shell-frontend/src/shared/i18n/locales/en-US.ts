@@ -828,7 +828,7 @@ export default {
       uploading: 'Uploading…',
       uploadHint: 'Drag & drop or click to upload. Supports PDF / Word / Excel / TXT / Markdown',
       uploadClickHint: 'Click or drag a file here to upload',
-      supportedFormats: 'Supports .md .txt .pdf .docx .xlsx .pptx .html, up to 20MB each',
+      supportedFormats: 'Supports .md .txt .pdf .doc .docx .xlsx .xls .pptx .html, up to 20MB each',
       searchPlaceholder: 'Search documents…',
       searchFilenamePlaceholder: 'Search filename…',
       noDocuments: 'No documents',

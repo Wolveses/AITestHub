@@ -472,14 +472,14 @@ export function KnowledgeBase() {
               )}
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-muted, #64748b)', marginTop: 2 }}>
-              {t('kb.supportedFormats', '支持 .md .txt .pdf .docx .xlsx .pptx .html，单个 ≤ 100MB')}
+              {t('kb.supportedFormats', '支持 .md .txt .pdf .doc .docx .xlsx .xls .pptx .html，单个 ≤ 100MB')}
             </div>
           </div>
 
           <input
             ref={inputRef}
             type="file"
-            accept=".md,.markdown,.txt,.pdf,.docx,.xlsx,.xls,.pptx,.html,.htm,.png,.jpg,.jpeg"
+            accept=".md,.markdown,.txt,.pdf,.doc,.docx,.xlsx,.xls,.pptx,.html,.htm,.png,.jpg,.jpeg"
             onChange={onPick}
             hidden
           />

@@ -36,6 +36,7 @@ from . import markdown  # noqa: F401, E402
 from . import text  # noqa: F401, E402
 from . import pdf  # noqa: F401, E402
 from . import docx  # noqa: F401, E402
+from . import doc  # noqa: F401, E402
 from . import image  # noqa: F401, E402
 from . import xlsx  # noqa: F401, E402
 from . import pptx  # noqa: F401, E402
