@@ -890,6 +890,8 @@ export default {
       confirmReindexTitle: '重新向量化',
       confirmReindexMsg: '确定要对文档「{{name}}」重新向量化吗？将重新解析分块并调用 embedding API。',
       reindexHint: '重新解析',
+      reindexAllDoneTitle: '全部重新解析完成',
+      reindexAllDoneMsg: '共处理 {{n}} 个文档',
       // 文档类型标签
       typeUncategorized: '未分类',
       typeRequirement: '需求',

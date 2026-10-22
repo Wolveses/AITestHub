@@ -1534,6 +1534,10 @@ async def list_kb_documents(
     ]
 
 
+# 批量重新解析进度（供前端轮询判断完成并弹出完成提示）
+_reindex_batch = {"running": False, "total": 0, "done": 0}
+
+
 @router.post("/kb/reindex")
 async def reindex_documents(
     body: dict,  # 接收 {all: bool, document_ids: list[int]}
@@ -1590,8 +1594,13 @@ async def reindex_documents(
     # 若每文档起一个线程，并发线程会把 kb.db 的 SQLAlchemy 连接池
     # （默认 5+10）打爆，30s 等不到连接即抛 QueuePool 超时。
     def _batch():
-        for doc_id in valid_ids:
-            _reindex_in_bg(doc_id, kb_db)  # 内部异常已自捕获并写入文档状态
+        _reindex_batch.update(running=True, total=len(valid_ids), done=0)
+        try:
+            for doc_id in valid_ids:
+                _reindex_in_bg(doc_id, kb_db)  # 内部异常已自捕获并写入文档状态
+                _reindex_batch["done"] += 1
+        finally:
+            _reindex_batch["running"] = False
 
     threading.Thread(target=_batch, daemon=True).start()
     return {"results": results}
@@ -1637,4 +1646,5 @@ async def kb_stats(
         "vector_enabled": getattr(config, "vector_enabled", False),
         "embed_model": getattr(config, "embed_model", ""),
         "need_reindex_count": need_reindex_count,
+        "reindex_progress": dict(_reindex_batch),
     }

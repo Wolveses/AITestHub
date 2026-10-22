@@ -890,6 +890,8 @@ export default {
       confirmReindexTitle: 'Re-vectorize',
       confirmReindexMsg: 'Re-vectorize document "{{name}}"? Will re-parse, re-chunk and call embedding API.',
       reindexHint: 'Re-parse',
+      reindexAllDoneTitle: 'Re-parse complete',
+      reindexAllDoneMsg: '{{n}} documents processed',
       // Document type labels
       typeUncategorized: 'Uncategorized',
       typeRequirement: 'Requirement',

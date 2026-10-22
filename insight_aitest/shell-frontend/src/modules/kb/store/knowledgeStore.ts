@@ -91,6 +91,9 @@ interface KnowledgeState {
   deleteDocument: (id: number) => void;
   startPolling: () => void;
   stopPolling: () => void;
+  // 强制轮询：重新解析刚触发时当前页可能还全是终态，需强制保持轮询直到任务结束
+  forcePoll: boolean;
+  setForcePoll: (v: boolean) => void;
   // 飞书主动同步
   listFeishuSpaces: () => Promise<FeishuSpace[]>;
   syncFeishuSpace: (spaceId: string) => Promise<{ ok: boolean; result: any }>;
@@ -111,6 +114,7 @@ const BASE = '/api/modules/kb/documents';
 const FOLDERS_BASE = '/api/modules/kb/folders';
 
 const NON_TERMINAL = ['pending', 'parsing', 'chunking', 'embedding'];
+export const isNonTerminal = (status: string) => NON_TERMINAL.includes(status);
 
 function projectQs(extraParams?: Record<string, any>): string {
   const { currentProjectId, currentVersionId } = useProjectStore.getState();
@@ -147,6 +151,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   syncingFeishu: false,
   feishuModalOpen: false,
   pollTimer: null,
+  forcePoll: false,
   tags: [],
 
   setActiveTab: (tab: 'local' | 'feishu') => {
@@ -192,8 +197,8 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
         filterDocType,
         filterTags,
       });
-      // 有非终态文档则启动轮询
-      if (items.some((d) => NON_TERMINAL.includes(d.status))) {
+      // 有非终态文档或处于强制轮询（如刚触发重新解析）则启动轮询
+      if (get().forcePoll || items.some((d) => NON_TERMINAL.includes(d.status))) {
         get().startPolling();
       } else {
         get().stopPolling();
@@ -312,6 +317,12 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       window.clearInterval(t);
       set({ pollTimer: null });
     }
+  },
+
+  setForcePoll: (v: boolean) => {
+    set({ forcePoll: v });
+    if (v) get().startPolling();
+    else if (!get().documents.some((d) => NON_TERMINAL.includes(d.status))) get().stopPolling();
   },
 
   // ===== KB 升级新增 =====

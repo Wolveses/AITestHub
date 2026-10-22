@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Upload, Folder, ChevronRight, Home, UploadCloud, RefreshCw, Globe } from 'lucide-react';
+import { AlertTriangle, Upload, Folder, ChevronRight, Home, UploadCloud, RefreshCw, Globe, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { useKnowledgeStore, type Document, type FolderNode } from '../store/knowledgeStore';
+import { useKnowledgeStore, isNonTerminal, type Document, type FolderNode } from '../store/knowledgeStore';
 import { useProjectStore } from '../../../shared/store/projectStore';
 import { useConfirmStore } from '../../../shared/store/confirmStore';
 import { useConfigStore } from '../../ai/store/configStore';
@@ -117,6 +117,7 @@ export function KnowledgeBase() {
     uploadDocument,
     deleteDocument,
     stopPolling,
+    setForcePoll,
     exportZipUrl,
     listFeishuSpaces,
     syncFeishuSpace,
@@ -138,11 +139,20 @@ export function KnowledgeBase() {
   const [loadingSpaces, setLoadingSpaces] = useState(false);
   const [feishuError, setFeishuError] = useState('');
   const [syncSpaceIdInput, setSyncSpaceIdInput] = useState('');
+  // 重新解析实时状态跟踪：单文档监听其进入终态，批量监听后端批次进度
+  const [watchDocId, setWatchDocId] = useState<number | null>(null);
+  // 记录监听起点：POST 刚返回时后端线程可能还没写 pending，过早读到旧终态会误判完成
+  const watchStartedAtRef = useRef(0);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [reindexDoneTotal, setReindexDoneTotal] = useState<number | null>(null);
 
   useEffect(() => {
     loadFolders();
     loadDocuments();
-    return () => stopPolling();
+    return () => {
+      stopPolling();
+      setForcePoll(false);
+    };
   }, [currentProjectId, activeTab]); // 项目切换或标签切换时重新加载
 
   // 根据当前 currentFolderId 查找面包屑路径
@@ -262,7 +272,11 @@ export function KnowledgeBase() {
         return;
       }
       toast.success(t('kb.reindexStarted', '已触发重新向量化'));
-      setTimeout(() => loadDocuments(), 1000);
+      // 立即强制轮询：POST 返回时状态可能仍是旧终态，延迟刷新会漏掉中间变化
+      watchStartedAtRef.current = Date.now();
+      setWatchDocId(docId);
+      setForcePoll(true);
+      loadDocuments();
     } catch (e: any) {
       toast.error(`重新向量化失败: ${e?.message || e}`);
     }
@@ -295,7 +309,10 @@ export function KnowledgeBase() {
               return;
             }
             toast.success(t('kb.reindexAllStarted', '已触发批量重新向量化'));
-            setTimeout(() => loadDocuments(), 1500);
+            setReindexDoneTotal(null);
+            setBatchRunning(true);
+            setForcePoll(true);
+            loadDocuments();
           } catch (e: any) {
             toast.error(`批量重新向量化失败: ${e?.message || e}`);
           }
@@ -325,6 +342,50 @@ export function KnowledgeBase() {
   useEffect(() => {
     setVectorEnabled(configVectorEnabled);
   }, [configVectorEnabled]);
+
+  // 单文档重新解析：轮询到该文档进入终态后停止强制轮询
+  useEffect(() => {
+    if (watchDocId === null) return;
+    const target = documents.find((d) => d.id === watchDocId);
+    // 前 1 秒不判完成：此时读到的可能还是任务启动前的旧终态
+    if (target && !isNonTerminal(target.status) && Date.now() - watchStartedAtRef.current >= 1000) {
+      setWatchDocId(null);
+      setForcePoll(false);
+    }
+  }, [documents, watchDocId]);
+  // 兜底：文档被筛选/翻页移出当前页时收不到终态，避免无限轮询
+  useEffect(() => {
+    if (watchDocId === null) return;
+    const timer = window.setTimeout(() => {
+      setWatchDocId(null);
+      setForcePoll(false);
+    }, 5 * 60 * 1000);
+    return () => window.clearTimeout(timer);
+  }, [watchDocId]);
+
+  // 批量重新解析：轮询后端批次进度，批次结束后弹出完成卡片
+  useEffect(() => {
+    if (!batchRunning) return;
+    const tick = async () => {
+      try {
+        const s = await fetch('/api/modules/ai/tasks/kb/stats').then((r) => (r.ok ? r.json() : null));
+        if (!s) return;
+        setNeedReindexCount(s.need_reindex_count ?? 0);
+        const p = s.reindex_progress;
+        // total>0 才认为批次已启动，避免 POST 刚返回、后台线程尚未初始化时误判完成
+        if (p && p.total > 0 && !p.running) {
+          setBatchRunning(false);
+          setForcePoll(false);
+          setReindexDoneTotal(p.total);
+          loadDocuments();
+        }
+      } catch {
+        /* 单次轮询失败忽略，下次再试 */
+      }
+    };
+    const timer = window.setInterval(tick, 2000);
+    return () => window.clearInterval(timer);
+  }, [batchRunning]);
 
   // feishuModalOpen 由 KnowledgeBaseApp 顶部按钮触发，这里监听并初始化飞书空间列表
   useEffect(() => {
@@ -771,6 +832,44 @@ export function KnowledgeBase() {
                 </button>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* 批量重新解析完成提示（右下角卡片，可手动关闭） */}
+        {reindexDoneTotal !== null && (
+          <div
+            style={{
+              position: 'fixed',
+              right: 20,
+              bottom: 20,
+              width: 300,
+              background: 'var(--bg-base, #fff)',
+              border: '1px solid var(--border-color, #e2e8f0)',
+              borderRadius: 8,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+              padding: '12px 14px',
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 8,
+              zIndex: 2500,
+            }}
+          >
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary, #1e293b)' }}>
+                {t('kb.reindexAllDoneTitle', '全部重新解析完成')}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary, #475569)', marginTop: 4 }}>
+                {t('kb.reindexAllDoneMsg', '共处理 {{n}} 个文档', { n: reindexDoneTotal })}
+              </div>
+            </div>
+            <button
+              onClick={() => setReindexDoneTotal(null)}
+              title={t('kb.close', '关闭')}
+              aria-label={t('kb.close', '关闭')}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted, #64748b)', padding: 0, display: 'flex' }}
+            >
+              <X size={16} />
+            </button>
           </div>
         )}
       </div>
