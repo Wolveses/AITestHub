@@ -889,7 +889,7 @@ export default {
       statusEmbedPartial: 'Partial',
       confirmReindexTitle: 'Re-vectorize',
       confirmReindexMsg: 'Re-vectorize document "{{name}}"? Will re-parse, re-chunk and call embedding API.',
-      reindexHint: 'Re-vectorize',
+      reindexHint: 'Re-parse',
       // Document type labels
       typeUncategorized: 'Uncategorized',
       typeRequirement: 'Requirement',

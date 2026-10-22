@@ -889,7 +889,7 @@ export default {
       statusEmbedPartial: '部分成功',
       confirmReindexTitle: '重新向量化',
       confirmReindexMsg: '确定要对文档「{{name}}」重新向量化吗？将重新解析分块并调用 embedding API。',
-      reindexHint: '重新向量化',
+      reindexHint: '重新解析',
       // 文档类型标签
       typeUncategorized: '未分类',
       typeRequirement: '需求',

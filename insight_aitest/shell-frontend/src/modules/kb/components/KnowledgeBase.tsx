@@ -414,7 +414,7 @@ export function KnowledgeBase() {
             title="对所有未向量化/向量化失败的文档重新执行向量化"
           >
             <RefreshCw size={13} />
-            {needReindexCount > 0 ? `全部重新向量化 (${needReindexCount})` : '全部重新向量化'}
+            {needReindexCount > 0 ? `全部重新解析 (${needReindexCount})` : '全部重新解析'}
           </button>
         </div>
 

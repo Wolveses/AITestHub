@@ -248,7 +248,7 @@ export function DocumentRow({
                 : t('kb.confirmReindexMsgRagOff', '当前 RAG 未开启，将重新解析文档「{{name}}」并重置分块（不执行向量化），确定？', { name: doc.filename }),
               onConfirm: () => onReindex(doc.id),
             })}
-            title={t('kb.reindexHint', '重新向量化（复用 reindex 接口）')}
+            title={t('kb.reindexHint', '重新解析（复用 reindex 接口）')}
             style={iconBtnStyle}
           >
             <RefreshCw size={14} />
