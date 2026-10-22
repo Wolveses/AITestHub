@@ -78,6 +78,7 @@ class ConfigOut(BaseModel):
     chunk_strategy: str
     semantic_breakpoint: float
     top_k: int
+    hybrid_recall_k: int = 60
     min_score: float
     rerank_enabled: bool
     rerank_fetch_k: int
@@ -108,6 +109,7 @@ class ConfigUpdate(BaseModel):
     chunk_strategy: str | None = None
     semantic_breakpoint: float | None = None
     top_k: int | None = None
+    hybrid_recall_k: int | None = None
     min_score: float | None = None
     rerank_enabled: bool | None = None
     rerank_fetch_k: int | None = None
@@ -167,6 +169,7 @@ def _to_config_out(cfg: AIConfig) -> ConfigOut:
         chunk_strategy=cfg.chunk_strategy,
         semantic_breakpoint=cfg.semantic_breakpoint,
         top_k=cfg.top_k,
+        hybrid_recall_k=getattr(cfg, "hybrid_recall_k", 60),
         min_score=cfg.min_score,
         rerank_enabled=cfg.rerank_enabled,
         rerank_fetch_k=cfg.rerank_fetch_k,
@@ -213,6 +216,7 @@ async def update_config(body: ConfigUpdate, cfg: AIConfig = Depends(get_config))
         "chunk_strategy",
         "semantic_breakpoint",
         "top_k",
+        "hybrid_recall_k",
         "min_score",
         "rerank_enabled",
         "rerank_fetch_k",

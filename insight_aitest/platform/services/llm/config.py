@@ -37,14 +37,15 @@ class LLMConfig:
         "recursive"  # "recursive"（字符）| "semantic"（embedding 相似度，需 vector_enabled）
     )
     semantic_breakpoint: float = 2.58  # 语义断点 std 倍数（仅 semantic 生效）
-    top_k: int = 4
+    top_k: int = 5
+    hybrid_recall_k: int = 60  # Hybrid 检索总粗排数量（偶数，两路各取 1/2，默认 60 即每路 30）
     min_score: float = 0.3
     max_upload_mb: int = 100
     max_chunks_per_doc: int = 5000
 
     # Rerank（多候选 → 重排取 top_k）
     rerank_enabled: bool = False  # 默认关，避免拖慢现有 RAG；按需开启
-    rerank_fetch_k: int = 12  # rerank 前的候选数（应 ≥ top_k）
+    rerank_fetch_k: int = 20  # rerank 候选数（RRF 融合后挑选前 N 条送入重排，默认 20）
     rerank_provider: str = "llm"  # "cross_encoder" (外部 BGE/Cohere API) | "llm" (大模型打分兜底)
     rerank_base_url: str = ""  # Cross-Encoder Rerank API Base URL (如 SiliconFlow / 阿里百炼 / 本地 TEI)
     rerank_api_key: str = ""  # Rerank 独立 API Key（为空时复用 llm_api_key）
@@ -122,6 +123,7 @@ _ENV_KEYS = {
     "chunk_strategy": "INSIGHT_EYE_AI_CHUNK_STRATEGY",
     "semantic_breakpoint": "INSIGHT_EYE_AI_SEMANTIC_BREAKPOINT",
     "top_k": "INSIGHT_EYE_AI_TOP_K",
+    "hybrid_recall_k": "INSIGHT_EYE_AI_HYBRID_RECALL_K",
     "min_score": "INSIGHT_EYE_AI_MIN_SCORE",
     "max_upload_mb": "INSIGHT_EYE_AI_MAX_UPLOAD_MB",
     "rerank_enabled": "INSIGHT_EYE_AI_RERANK_ENABLED",
@@ -146,6 +148,7 @@ _INT_FIELDS = {
     "chunk_size",
     "chunk_overlap",
     "top_k",
+    "hybrid_recall_k",
     "max_upload_mb",
     "max_chunks_per_doc",
     "rerank_fetch_k",

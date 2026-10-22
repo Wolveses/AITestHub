@@ -32,10 +32,15 @@ export function SettingsPanel() {
       setForm({
         chunk_size: config.chunk_size,
         chunk_overlap: config.chunk_overlap,
+        hybrid_recall_k: config.hybrid_recall_k ?? 60,
         top_k: config.top_k,
         min_score: config.min_score,
         rerank_enabled: config.rerank_enabled,
         rerank_fetch_k: config.rerank_fetch_k,
+        rerank_provider: config.rerank_provider || 'cross_encoder',
+        rerank_base_url: config.rerank_base_url || '',
+        rerank_api_key: '',
+        rerank_model: config.rerank_model || 'BAAI/bge-reranker-v2-m3',
         history_turns: config.history_turns,
         ocr_enabled: config.ocr_enabled,
         vector_enabled: config.vector_enabled,
@@ -137,6 +142,21 @@ export function SettingsPanel() {
           <Row label={t('settings.maxUploadMb')}>
             <NumInput value={form.max_upload_mb} onChange={(v) => set('max_upload_mb', v)} />
           </Row>
+          <Row label={t('settings.hybridRecallK')}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
+              <NumInput
+                value={form.hybrid_recall_k}
+                onChange={(v) => {
+                  // 保证偶数
+                  const num = v ?? 60;
+                  set('hybrid_recall_k', num % 2 === 0 ? num : num + 1);
+                }}
+              />
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                {t('settings.hybridRecallKHint')} (单路: {Math.floor((form.hybrid_recall_k ?? 60) / 2)})
+              </span>
+            </div>
+          </Row>
           <Row label={t('settings.topK')}>
             <NumInput value={form.top_k} onChange={(v) => set('top_k', v)} />
           </Row>
@@ -145,16 +165,80 @@ export function SettingsPanel() {
               value={form.min_score ?? ''} onChange={(e) => set('min_score', parseFloat(e.target.value))} />
           </Row>
 
-          <Row label={t('settings.llmRerank')}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: "var(--text-secondary)", cursor: 'pointer' }}>
-              <input type="checkbox" checked={form.rerank_enabled ?? false}
-                onChange={(e) => set('rerank_enabled', e.target.checked)} />
-              {t('settings.rerankHint')}
-            </label>
+          <Row label={t('settings.rerankMethod')}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, width: '100%' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: "var(--text-secondary)", cursor: 'pointer' }}>
+                <input type="checkbox" checked={form.rerank_enabled ?? false}
+                  onChange={(e) => set('rerank_enabled', e.target.checked)} />
+                {t('settings.rerankHint')}
+              </label>
+
+              {form.rerank_enabled && (
+                <div style={{ display: 'flex', gap: 16, marginTop: 4 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="rerank_provider"
+                      value="cross_encoder"
+                      checked={form.rerank_provider === 'cross_encoder' || !form.rerank_provider}
+                      onChange={() => set('rerank_provider', 'cross_encoder')}
+                    />
+                    {t('settings.rerankModeCrossEncoder')}
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="rerank_provider"
+                      value="llm"
+                      checked={form.rerank_provider === 'llm'}
+                      onChange={() => set('rerank_provider', 'llm')}
+                    />
+                    {t('settings.rerankModeLLM')}
+                  </label>
+                </div>
+              )}
+            </div>
           </Row>
-          <Row label={t('settings.rerankCandidates')}>
-            <NumInput value={form.rerank_fetch_k} onChange={(v) => set('rerank_fetch_k', v)} />
-          </Row>
+
+          {form.rerank_enabled && (
+            <>
+              <Row label={t('settings.rerankCandidates')}>
+                <NumInput value={form.rerank_fetch_k} onChange={(v) => set('rerank_fetch_k', v)} />
+              </Row>
+
+              {form.rerank_provider === 'cross_encoder' && (
+                <>
+                  <Row label={t('settings.rerankBaseUrl')}>
+                    <input
+                      style={inputStyle}
+                      type="text"
+                      placeholder={t('settings.rerankBaseUrlPlaceholder')}
+                      value={form.rerank_base_url ?? ''}
+                      onChange={(e) => set('rerank_base_url', e.target.value)}
+                    />
+                  </Row>
+                  <Row label={t('settings.rerankApiKey')}>
+                    <input
+                      style={inputStyle}
+                      type="password"
+                      placeholder={config.rerank_api_key_set ? '••••••••' : t('settings.rerankApiKeyPlaceholder')}
+                      value={form.rerank_api_key ?? ''}
+                      onChange={(e) => set('rerank_api_key', e.target.value)}
+                    />
+                  </Row>
+                  <Row label={t('settings.rerankModel')}>
+                    <input
+                      style={inputStyle}
+                      type="text"
+                      placeholder={t('settings.rerankModelPlaceholder')}
+                      value={form.rerank_model ?? ''}
+                      onChange={(e) => set('rerank_model', e.target.value)}
+                    />
+                  </Row>
+                </>
+              )}
+            </>
+          )}
         </>
       )}
 

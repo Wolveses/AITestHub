@@ -69,11 +69,11 @@ def test_retrieve_vector_disabled_returns_empty():
 
 
 def test_rerank_disabled_no_llm_call():
-    """rerank 关闭时：不调 LLM chat，按向量排序返回 top_k。"""
+    """rerank 关闭时：不调 LLM chat，粗排由 hybrid_recall_k // 2 控制，按 RRF/向量排序返回 top_k。"""
     vs = MagicMock()
     cfg = AIConfig(
         llm_api_key="k", embed_dim=4, top_k=2, min_score=0.0,
-        rerank_enabled=False, vector_enabled=True,
+        rerank_enabled=False, vector_enabled=True, hybrid_recall_k=20,
     )
     llm = MagicMock()
     llm.embed_query.return_value = [0.1] * 4
@@ -82,16 +82,16 @@ def test_rerank_disabled_no_llm_call():
     results = r.retrieve("query")
     assert len(results) == 2
     llm.chat.assert_not_called()  # 未启用 rerank，不应调 chat
-    # search 时取 top_k=2（不放大）
-    assert vs.search.call_args.kwargs["top_k"] == 2
+    # search 时取 hybrid_recall_k // 2 = 10
+    assert vs.search.call_args.kwargs["top_k"] == 10
 
 
 def test_rerank_enabled_expands_fetch_k():
-    """rerank 开启时：search 放大到 rerank_fetch_k，再用 LLM 重排。"""
+    """rerank 开启时：search 保持粗排单路召回数，RRF 融合后截取 rerank_fetch_k 送入重排。"""
     vs = MagicMock()
     cfg = AIConfig(
         llm_api_key="k", embed_dim=4, top_k=2, min_score=0.0,
-        rerank_enabled=True, rerank_fetch_k=12, vector_enabled=True,
+        rerank_enabled=True, rerank_fetch_k=12, hybrid_recall_k=24, vector_enabled=True,
     )
     llm = MagicMock()
     llm.embed_query.return_value = [0.1] * 4
@@ -100,7 +100,7 @@ def test_rerank_enabled_expands_fetch_k():
     llm.chat.return_value = "[1,1,1,1,1,10,1,1,1,1,1,1]"
     r = Retriever(vs, None, llm, cfg)
     results = r.retrieve("query")
-    assert vs.search.call_args.kwargs["top_k"] == 12  # 放大召回
+    assert vs.search.call_args.kwargs["top_k"] == 12  # hybrid_recall_k // 2 = 12
     assert llm.chat.call_count == 1  # 单次批量打分
     assert len(results) == 2  # 最终 top_k=2
     assert results[0].chunk.id == 5  # LLM 给最高分的排第一

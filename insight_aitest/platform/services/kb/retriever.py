@@ -10,8 +10,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from insight_aitest.platform.services.llm.config import LLMConfig
@@ -54,32 +57,58 @@ class Retriever:
         如果双路均无召回且允许 fallback，退回文档原文兜底。
         """
         k = top_k or self.config.top_k
-        fetch_k = max(self.config.rerank_fetch_k, k) if self.config.rerank_enabled else k
+        # 1. 计算两路粗排召回数量（Hybrid 检索总数的一半，默认各 30）
+        total_recall = getattr(self.config, "hybrid_recall_k", 60)
+        single_recall_k = max(2, total_recall // 2)
 
-        # 1. 向量路 (Dense) 召回
-        dense_results = self._vector_retrieve_raw(query, fetch_k, document_ids, project_id, exclude_document_ids)
+        # 2. 向量路 (Dense) 召回
+        dense_results = self._vector_retrieve_raw(query, single_recall_k, document_ids, project_id, exclude_document_ids)
+        logger.info(
+            f"[KB-Retrieve] 向量路召回 (Dense): 目标={single_recall_k}, 命中数={len(dense_results)}, "
+            f"前3项={[(r.chunk.id, r.document.filename, round(r.score, 4)) for r in dense_results[:3]]}"
+        )
 
-        # 2. 倒排全文路 (Sparse FTS5) 召回
-        sparse_results = self._fts_retrieve(query, fetch_k, document_ids, project_id, exclude_document_ids)
-
+        # 3. 倒排全文路 (Sparse FTS5) 召回
+        sparse_results = self._fts_retrieve(query, single_recall_k, document_ids, project_id, exclude_document_ids)
+        sparse_source = "FTS5"
         # 若 FTS 未配置或未查到，但有关键词提取，降级尝试 SQL LIKE
         if not sparse_results:
-            sparse_results = self._keyword_retrieve(query, fetch_k, document_ids, project_id, exclude_document_ids)
+            sparse_results = self._keyword_retrieve(query, single_recall_k, document_ids, project_id, exclude_document_ids)
+            sparse_source = "SQL_LIKE"
+        logger.info(
+            f"[KB-Retrieve] 全文倒排路 ({sparse_source}): 目标={single_recall_k}, 命中数={len(sparse_results)}, "
+            f"前3项={[(r.chunk.id, r.document.filename, round(r.score, 4)) for r in sparse_results[:3]]}"
+        )
 
-        # 3. RRF 倒排融合
-        fused = self._rrf_merge(dense_results, sparse_results, fetch_k)
+        # 4. RRF 倒排融合：保留 Rerank 候选数（默认 20）
+        rrf_candidate_k = self.config.rerank_fetch_k if self.config.rerank_enabled else max(k, self.config.rerank_fetch_k)
+        fused = self._rrf_merge(dense_results, sparse_results, rrf_candidate_k)
+        logger.info(
+            f"[KB-Retrieve] RRF 融合完成: 目标保留={rrf_candidate_k}, 实际融合数={len(fused)}, "
+            f"前3项={[(r.chunk.id, r.document.filename, round(r.score, 4)) for r in fused[:3]]}"
+        )
 
-        # 若开启 Rerank 且候选数大于 k，执行重排
+        # 5. 若开启 Rerank 且候选数大于 k，执行精排
         if self.config.rerank_enabled and len(fused) > k:
+            provider = getattr(self.config, "rerank_provider", "llm")
             fused = self._rerank(query, fused, k)
+            logger.info(
+                f"[KB-Retrieve] Rerank 重排完成 (provider={provider}): 保留数={len(fused)}, "
+                f"前3项={[(r.chunk.id, r.document.filename, round(r.score, 4)) for r in fused[:3]]}"
+            )
 
-        # 4. 文档多样性控制
+        # 6. 文档多样性控制
         final_results = self._apply_diversity(fused, k, document_ids)
+        logger.info(
+            f"[KB-Retrieve] 最终输出 Top-{k}: 返回数={len(final_results)}, "
+            f"列表={[(r.chunk.id, r.document.filename, round(r.score, 4)) for r in final_results]}"
+        )
         if final_results:
             return final_results
 
         # 5. 原文兜底
         if fallback:
+            logger.warning("[KB-Retrieve] 双路召回均为空，触发原文截断兜底 (L3)")
             return self._fulltext_fallback(query, k, document_ids, project_id, exclude_document_ids=exclude_document_ids)
         return []
 
