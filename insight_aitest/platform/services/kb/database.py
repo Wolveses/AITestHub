@@ -13,11 +13,13 @@ P0-1：documents/chunks 走平台 ORM（session_scope）；chunk_embeddings（ve
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
 import threading
 from datetime import datetime
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -36,6 +38,29 @@ from insight_aitest.platform.services.kb.models import (
 # 多个线程同时执行 _ensure_document_meta_columns → duplicate column name）
 _schema_ready: set[str] = set()
 _schema_lock = threading.Lock()
+
+logger = logging.getLogger(__name__)
+
+
+def _is_windows_path(raw: str) -> bool:
+    """判断是否为 Windows 风格路径（盘符 C:\\ / C:/ 或 UNC \\\\server）。"""
+    return bool(re.match(r"^[A-Za-z]:[\\/]", raw)) or raw.startswith("\\\\")
+
+
+def _to_posix(raw: str) -> str:
+    """统一为 / 分隔的路径字符串（入库与跨平台比对统一使用）。
+
+    Windows 的 str(Path) 产出反斜杠，而 Win32 API 与 pathlib 同时接受 /，
+    因此库里统一存 / 后，跨机迁移只需一套前缀规则。
+    Windows 文件名不允许含反斜杠，故在 Windows 上归一不会有歧义；
+    POSIX 主机上非 Windows 风格路径由 PosixPath 原样保留（含反斜杠的文件名不受影响）。
+    """
+    if not raw:
+        return raw
+    if _is_windows_path(raw):
+        return PureWindowsPath(raw).as_posix()
+    return Path(raw).as_posix()
+
 
 
 def _ensure_project_columns(db_path: str) -> None:
@@ -184,42 +209,50 @@ def _ensure_document_meta_columns(db_path: str) -> None:
 
 
 def _ensure_storage_paths_aligned(db_path: str) -> None:
-    """自动比对当前用户的 ai_docs 路径与库内 storage_path 前缀。
+    """跨机/跨用户迁移时，按 ai_docs 锚点逐行重建 storage_path。
 
-    当跨服务器/跨用户迁移（如 Mac -> Linux，或 /Users/a -> /home/b）时，
-    检测到路径失效则自动平滑替换前缀，无需手动执行 SQL 迁移。
+    以 ai_docs 为锚点保留相对部分，替换为当前用户的 ai_docs 基址；
+    兼容 Windows 反斜杠、UNC、POSIX 正斜杠三种历史写法（统一存 /）。
+    同机同用户（样本路径仍存在）直接跳过，不做任何写入。
     """
-    import sqlite3
-    from pathlib import Path
+    anchor = "/.insight_eye/ai_docs/"
+    new_base = (Path.home() / ".insight_eye" / "ai_docs").as_posix()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            sample = conn.execute(
+                "SELECT storage_path FROM documents WHERE storage_path IS NOT NULL AND storage_path != '' LIMIT 1"
+            ).fetchone()
+            if not sample:
+                return
+            if Path(_to_posix(sample["storage_path"])).exists():
+                return
 
-    current_docs_dir = Path.home() / ".insight_eye" / "ai_docs"
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        sample = conn.execute(
-            "SELECT storage_path FROM documents WHERE storage_path IS NOT NULL AND storage_path != '' LIMIT 1"
-        ).fetchone()
-        if not sample:
-            return
-
-        old_path_str = sample["storage_path"]
-        # 如果历史路径存在，说明在同机器同用户下，无需变更
-        if Path(old_path_str).exists():
-            return
-
-        # 尝试从历史路径中提取 ai_docs 前缀
-        if "/.insight_eye/ai_docs" in old_path_str:
-            old_base = old_path_str.split("/.insight_eye/ai_docs")[0] + "/.insight_eye/ai_docs"
-            new_base = str(current_docs_dir)
-            if old_base != new_base:
-                conn.execute(
-                    "UPDATE documents SET storage_path = REPLACE(storage_path, ?, ?) WHERE storage_path LIKE ? || '%'",
-                    (old_base, new_base, old_base),
-                )
-                conn.execute(
-                    "UPDATE document_versions SET storage_path = REPLACE(storage_path, ?, ?) WHERE storage_path LIKE ? || '%'",
-                    (old_base, new_base, old_base),
-                )
-                conn.commit()
+            existing_tables = {
+                r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            for table in ("documents", "document_versions"):
+                if table not in existing_tables:
+                    continue
+                updates = []
+                for row in conn.execute(f"SELECT id, storage_path FROM {table}"):
+                    norm = _to_posix(row["storage_path"] or "")
+                    idx = norm.find(anchor)
+                    if idx < 0:
+                        # 非默认 docs_dir 或无法识别，保持原样不猜
+                        continue
+                    tail = norm[idx + len(anchor):]
+                    new_val = f"{new_base}/{tail}"
+                    if new_val != row["storage_path"]:
+                        updates.append((new_val, row["id"]))
+                if updates:
+                    conn.executemany(
+                        f"UPDATE {table} SET storage_path = ? WHERE id = ?", updates
+                    )
+                    logger.info("storage_path 自愈：%s 更新 %d 条", table, len(updates))
+            conn.commit()
+    except Exception:
+        logger.warning("storage_path 自愈失败，已跳过", exc_info=True)
 
 
 class KBDatabase:
@@ -356,7 +389,7 @@ class KBDatabase:
         with session_scope(self.db_path) as s:
             d = Document(
                 filename=filename,
-                storage_path=storage_path,
+                storage_path=_to_posix(storage_path),
                 content_hash=content_hash,
                 mime_type=mime_type,
                 project_id=project_id,
@@ -773,7 +806,7 @@ class KBDatabase:
             d = s.get(Document, doc_id)
             if d is None:
                 return
-            d.storage_path = storage_path
+            d.storage_path = _to_posix(storage_path)
             if content_hash is not None:
                 d.content_hash = content_hash
             d.status = DocumentStatus.PENDING
@@ -809,7 +842,7 @@ class KBDatabase:
             v = DocumentVersion(
                 document_id=doc_id,
                 version_no=next_no,
-                storage_path=storage_path,
+                storage_path=_to_posix(storage_path),
                 content_hash=content_hash,
                 char_count=char_count,
                 chunk_count=chunk_count,
