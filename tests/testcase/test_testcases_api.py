@@ -80,3 +80,63 @@ def test_update_content_and_tags(tmp_path, monkeypatch):
 def test_health(tmp_path, monkeypatch):
     c = _setup_app(tmp_path, monkeypatch)
     assert c.get("/api/modules/testcase/health").json()["status"] == "healthy"
+
+
+def test_folders_and_batch_operations(tmp_path, monkeypatch):
+    c = _setup_app(tmp_path, monkeypatch)
+    # 创建目录
+    r = c.post("/api/modules/testcase/testcases/folders", json={"name": "用户模块", "project_id": 1})
+    assert r.status_code == 201
+    f1_id = r.json()["id"]
+
+    # 创建子目录
+    r = c.post("/api/modules/testcase/testcases/folders", json={"name": "注册子模块", "parent_id": f1_id, "project_id": 1})
+    assert r.status_code == 201
+    f2_id = r.json()["id"]
+
+    # 查目录树
+    tree = c.get("/api/modules/testcase/testcases/folders?project_id=1").json()
+    assert len(tree) == 1
+    assert tree[0]["id"] == f1_id
+    assert len(tree[0]["children"]) == 1
+    assert tree[0]["children"][0]["id"] == f2_id
+
+    # 创建带目录的用例
+    c1 = c.post("/api/modules/testcase/testcases", json={"title": "用例1", "project_id": 1, "folder_id": f1_id}).json()["id"]
+    c2 = c.post("/api/modules/testcase/testcases", json={"title": "用例2", "project_id": 1, "folder_id": f2_id}).json()["id"]
+    c3 = c.post("/api/modules/testcase/testcases", json={"title": "用例3", "project_id": 1}).json()["id"]
+
+    # 按目录筛选
+    assert len(c.get(f"/api/modules/testcase/testcases?folder_id={f1_id}").json()) == 1
+    assert len(c.get(f"/api/modules/testcase/testcases?folder_id={f2_id}").json()) == 1
+    assert len(c.get("/api/modules/testcase/testcases?folder_id=-1").json()) == 1  # 未分类
+
+    # 批量分配目录
+    r = c.post("/api/modules/testcase/testcases/batch-assign", json={"case_ids": [c3], "folder_id": f1_id})
+    assert r.status_code == 200
+    assert r.json()["updated"] == 1
+    assert len(c.get(f"/api/modules/testcase/testcases?folder_id={f1_id}").json()) == 2
+
+    # 批量修改所属项目
+    r = c.post("/api/modules/testcase/testcases/batch-assign", json={"case_ids": [c3], "project_id": 2, "folder_id": -1, "version_id": -1})
+    assert r.status_code == 200
+    assert r.json()["updated"] == 1
+    c3_data = c.get("/api/modules/testcase/testcases?project_id=2").json()
+    assert len(c3_data) == 1
+    assert c3_data[0]["id"] == c3
+    assert c3_data[0]["folder_id"] is None
+    assert c3_data[0]["version_id"] is None
+
+    # 批量清空项目
+    r = c.post("/api/modules/testcase/testcases/batch-assign", json={"case_ids": [c3], "project_id": -1})
+    assert r.status_code == 200
+    c3_data_cleared = c.get("/api/modules/testcase/testcases").json()
+    c3_item = next(x for x in c3_data_cleared if x["id"] == c3)
+    assert c3_item["project_id"] is None
+
+    # 批量删除
+    r = c.post("/api/modules/testcase/testcases/batch-delete", json={"case_ids": [c1, c2]})
+    assert r.status_code == 200
+    assert r.json()["deleted"] == 2
+    assert len(c.get("/api/modules/testcase/testcases").json()) == 1
+

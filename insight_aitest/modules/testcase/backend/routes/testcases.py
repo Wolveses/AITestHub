@@ -33,6 +33,7 @@ class CaseOut(BaseModel):
     source: str
     project_id: int | None = None
     version_id: int | None = None
+    folder_id: int | None = None
     last_run_at: str | None
     last_result: str | None
     created_at: str
@@ -51,6 +52,7 @@ class CaseCreate(BaseModel):
     source: str = "manual"
     project_id: int | None = None
     version_id: int | None = None
+    folder_id: int | None = None
 
 
 class CaseUpdate(BaseModel):
@@ -61,7 +63,29 @@ class CaseUpdate(BaseModel):
     preconditions: str | None = None
     content: dict | None = None
     tags: list[str] | None = None
+    project_id: int | None = None
     version_id: int | None = None
+    folder_id: int | None = None
+
+
+class FolderNode(BaseModel):
+    id: int
+    name: str
+    parent_id: int | None = None
+    project_id: int | None = None
+    children: list[FolderNode] = []
+    case_count: int = 0
+
+
+class FolderCreateIn(BaseModel):
+    name: str
+    parent_id: int | None = None
+    project_id: int | None = None
+
+
+class FolderUpdateIn(BaseModel):
+    name: str | None = None
+    parent_id: int | None = -1
 
 
 class StatusUpdate(BaseModel):
@@ -74,10 +98,12 @@ class ResultUpdate(BaseModel):
 
 
 class BatchSyncRequest(BaseModel):
-    """批次同步请求：把选中用例置 ready + 绑定 version_id，删除未选中（可选）。"""
+    """批次同步/导入请求：把选中用例置 ready + 绑定 project_id / version_id / folder_id，删除未选中（可选）。"""
 
     case_ids: list[int]
-    version_id: int
+    project_id: int | None = None
+    version_id: int | None = None
+    folder_id: int | None = None
     delete_unselected: bool = True
     batch_id: str | None = None
 
@@ -97,11 +123,106 @@ def _out(case: TestCase) -> CaseOut:
         source=case.source,
         project_id=case.project_id,
         version_id=case.version_id,
+        folder_id=case.folder_id,
         last_run_at=case.last_run_at.isoformat() if case.last_run_at else None,
         last_result=case.last_result,
         created_at=case.created_at.isoformat(),
         updated_at=case.updated_at.isoformat(),
     )
+
+
+# ===== 目录（Folder）路由 =====
+
+
+@router.get("/folders", response_model=list[FolderNode])
+async def list_folders_tree(
+    project_id: int | None = None,
+    db: TestCaseDatabase = Depends(get_tc_db),
+) -> list[FolderNode]:
+    folders = db.list_folders(project_id=project_id)
+    cases = db.list_cases(project_id=project_id)
+
+    counts: dict[int, int] = {}
+    for c in cases:
+        if c.folder_id:
+            counts[c.folder_id] = counts.get(c.folder_id, 0) + 1
+
+    node_map: dict[int, FolderNode] = {}
+    for f in folders:
+        node_map[f.id] = FolderNode(
+            id=f.id,
+            name=f.name,
+            parent_id=f.parent_id,
+            project_id=f.project_id,
+            case_count=counts.get(f.id, 0),
+            children=[],
+        )
+
+    roots: list[FolderNode] = []
+    for f in folders:
+        node = node_map[f.id]
+        if f.parent_id and f.parent_id in node_map:
+            node_map[f.parent_id].children.append(node)
+        else:
+            roots.append(node)
+
+    return roots
+
+
+@router.post("/folders", response_model=FolderNode, status_code=201)
+async def create_folder(
+    body: FolderCreateIn,
+    db: TestCaseDatabase = Depends(get_tc_db),
+) -> FolderNode:
+    proj_id = body.project_id
+    if proj_id is None and body.parent_id is not None:
+        parent = db.get_folder(body.parent_id)
+        if parent:
+            proj_id = parent.project_id
+    fid = db.create_folder(name=body.name, parent_id=body.parent_id, project_id=proj_id)
+    f = db.get_folder(fid)
+    return FolderNode(
+        id=f.id,
+        name=f.name,
+        parent_id=f.parent_id,
+        project_id=f.project_id,
+        case_count=0,
+        children=[],
+    )
+
+
+@router.put("/folders/{folder_id}", response_model=FolderNode)
+async def update_folder(
+    folder_id: int,
+    body: FolderUpdateIn,
+    db: TestCaseDatabase = Depends(get_tc_db),
+) -> FolderNode:
+    f = db.get_folder(folder_id)
+    if not f:
+        raise HTTPException(404, "目录不存在")
+    db.update_folder(folder_id, name=body.name, parent_id=body.parent_id)
+    updated = db.get_folder(folder_id)
+    return FolderNode(
+        id=updated.id,
+        name=updated.name,
+        parent_id=updated.parent_id,
+        project_id=updated.project_id,
+        case_count=0,
+        children=[],
+    )
+
+
+@router.delete("/folders/{folder_id}")
+async def delete_folder(
+    folder_id: int,
+    db: TestCaseDatabase = Depends(get_tc_db),
+) -> dict:
+    if not db.delete_folder(folder_id):
+        raise HTTPException(404, "目录不存在")
+    return {"deleted": folder_id}
+
+
+# ===== 用例路由 =====
 
 
 @router.get("", response_model=list[CaseOut])
@@ -110,6 +231,7 @@ async def list_cases(
     status: str | None = None,
     project_id: int | None = None,
     version_id: int | None = None,
+    folder_id: int | None = None,
     source: str | None = None,
     task_id: int | None = None,
     db: TestCaseDatabase = Depends(get_tc_db),
@@ -123,6 +245,7 @@ async def list_cases(
             status_filter=sf,
             project_id=project_id,
             version_id=version_id,
+            folder_id=folder_id,
             source=source,
             task_id=task_id,
         )
@@ -144,6 +267,7 @@ async def create_case(body: CaseCreate, db: TestCaseDatabase = Depends(get_tc_db
         source=body.source,
         project_id=body.project_id,
         version_id=body.version_id,
+        folder_id=body.folder_id,
     )
     cid = db.create_case(case)
     return _out(db.get_case(cid))
@@ -152,12 +276,18 @@ async def create_case(body: CaseCreate, db: TestCaseDatabase = Depends(get_tc_db
 class AssignmentUpdate(BaseModel):
     project_id: int | None = None
     version_id: int | None = None
+    folder_id: int | None = None
 
 
 class BatchAssignRequest(BaseModel):
     case_ids: list[int]
     project_id: int | None = None
     version_id: int | None = None
+    folder_id: int | None = None
+
+
+class BatchDeleteRequest(BaseModel):
+    case_ids: list[int]
 
 
 def _validate_version_belongs_to_project(project_id: int, version_id: int) -> bool:
@@ -177,18 +307,25 @@ def _validate_version_belongs_to_project(project_id: int, version_id: int) -> bo
 
 @router.post("/batch-assign")
 async def batch_assign(body: BatchAssignRequest, db: TestCaseDatabase = Depends(get_tc_db)) -> dict:
-    """批量修改用例项目/版本归属。
+    """批量修改用例项目/版本/目录归属。
 
     注册在 ``/{case_id}`` 之前，避免 "batch-assign" 被当作 case_id。
     """
-    if body.project_id is not None and body.version_id is not None:
+    if (
+        body.project_id is not None
+        and body.project_id != -1
+        and body.version_id is not None
+        and body.version_id != -1
+    ):
         if not _validate_version_belongs_to_project(body.project_id, body.version_id):
             raise HTTPException(400, "版本不属于所选项目")
     fields = {}
     if body.project_id is not None:
-        fields["project_id"] = body.project_id
+        fields["project_id"] = None if body.project_id == -1 else body.project_id
     if body.version_id is not None:
-        fields["version_id"] = body.version_id
+        fields["version_id"] = None if body.version_id == -1 else body.version_id
+    if body.folder_id is not None:
+        fields["folder_id"] = None if body.folder_id == -1 else body.folder_id
     updated = 0
     for cid in body.case_ids:
         if db.get_case(cid):
@@ -197,30 +334,48 @@ async def batch_assign(body: BatchAssignRequest, db: TestCaseDatabase = Depends(
     return {"updated": updated, "total": len(body.case_ids)}
 
 
+@router.post("/batch-delete")
+async def batch_delete_cases(
+    body: BatchDeleteRequest, db: TestCaseDatabase = Depends(get_tc_db)
+) -> dict:
+    """批量删除测试用例。"""
+    deleted = db.delete_cases_batch(body.case_ids)
+    return {"deleted": deleted, "total": len(body.case_ids)}
+
+
 @router.post("/batch-sync")
 async def batch_sync_cases(
     req: BatchSyncRequest, db: TestCaseDatabase = Depends(get_tc_db)
 ) -> dict:
-    """批次同步：选中用例 → ready + 绑定 version_id；未选中可删（安全护栏见下）。
-
-    安全护栏：``batch_id`` 必填。batch-sync 会按 batch 维度删除未选中用例，
-    缺少 batch_id 时无法界定删除范围，必须拒绝并提示在用例管理模块逐条处理，
-    避免误删跨批次/手工用例。
-    """
-    if not req.batch_id:
+    """批次同步/导入：选中用例 → ready + 绑定 project_id/version_id/folder_id；未选中可删。"""
+    if req.delete_unselected and not req.batch_id:
         raise HTTPException(
             400,
             "缺少 batch_id，无法安全执行批量同步。请在用例管理模块逐条处理。",
         )
-    # defense-in-depth：update 也限定 batch_id，避免 case_ids 跨批次时误改批次外用例
-    synced = db.update_cases_in_batch(
-        req.case_ids, req.batch_id, status=CaseStatus.READY, version_id=req.version_id
-    )
-    deleted = 0
-    if req.delete_unselected:
-        unselected = db.list_case_ids_by_batch_excluding(req.batch_id, req.case_ids)
-        if unselected:
-            deleted = db.delete_cases_batch(unselected)
+    fields_to_update: dict[str, object] = {
+        "status": CaseStatus.READY,
+    }
+    if req.project_id is not None and req.project_id != -1:
+        fields_to_update["project_id"] = req.project_id
+    if req.version_id is not None and req.version_id != -1:
+        fields_to_update["version_id"] = req.version_id
+    if req.folder_id is not None and req.folder_id != -1:
+        fields_to_update["folder_id"] = req.folder_id
+
+    if req.batch_id:
+        synced = db.update_cases_in_batch(
+            req.case_ids, req.batch_id, **fields_to_update
+        )
+        deleted = 0
+        if req.delete_unselected:
+            unselected = db.list_case_ids_by_batch_excluding(req.batch_id, req.case_ids)
+            if unselected:
+                deleted = db.delete_cases_batch(unselected)
+    else:
+        synced = db.update_cases_batch(req.case_ids, **fields_to_update)
+        deleted = 0
+
     return {"synced": synced, "deleted": deleted}
 
 
@@ -262,14 +417,21 @@ async def update_assignment(
     """修改用例的项目/版本归属（归属迁移）。"""
     if not db.get_case(case_id):
         raise HTTPException(404, "用例不存在")
-    if body.project_id is not None and body.version_id is not None:
+    if (
+        body.project_id is not None
+        and body.project_id != -1
+        and body.version_id is not None
+        and body.version_id != -1
+    ):
         if not _validate_version_belongs_to_project(body.project_id, body.version_id):
             raise HTTPException(400, "版本不属于所选项目")
     fields = {}
     if body.project_id is not None:
-        fields["project_id"] = body.project_id
+        fields["project_id"] = None if body.project_id == -1 else body.project_id
     if body.version_id is not None:
-        fields["version_id"] = body.version_id
+        fields["version_id"] = None if body.version_id == -1 else body.version_id
+    if body.folder_id is not None:
+        fields["folder_id"] = None if body.folder_id == -1 else body.folder_id
     db.update_case(case_id, **fields)
     return _out(db.get_case(case_id))
 

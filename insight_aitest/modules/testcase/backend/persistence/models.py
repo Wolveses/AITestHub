@@ -94,6 +94,7 @@ class TestCase(MappedAsDataclass, Base):
     source: Mapped[str] = mapped_column(Text, default="manual")  # "manual" | "ai:glm-4-flash"
     project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     version_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    folder_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     task_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     batch_id: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     last_run_at: Mapped[datetime | None] = mapped_column(
@@ -104,3 +105,21 @@ class TestCase(MappedAsDataclass, Base):
     )  # pass|fail|blocked|error
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+
+
+class CaseFolder(MappedAsDataclass, Base):
+    """测试用例目录（文件夹）模型。"""
+
+    __tablename__ = "case_folders"
+    __table_args__ = (
+        Index("idx_case_folders_project", "project_id"),
+        Index("idx_case_folders_parent", "parent_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, init=False)
+    name: Mapped[str] = mapped_column(Text, default="")
+    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+

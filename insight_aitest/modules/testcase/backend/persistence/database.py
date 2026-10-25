@@ -9,11 +9,13 @@ P0-1：从裸 sqlite3 + threading.local 迁移到平台 session_scope + ORM。
 from __future__ import annotations
 
 from datetime import datetime
+import threading
 
 from sqlalchemy import delete, select, update
 
 from insight_aitest.platform.persistence import Base, ensure_schema, get_engine, session_scope
 from insight_aitest.modules.testcase.backend.persistence.models import (
+    CaseFolder,
     CaseStatus,
     CaseType,
     TestCase,
@@ -50,14 +52,51 @@ def _ensure_task_columns(db_path: str) -> None:
         conn.commit()
 
 
+def _ensure_folder_columns(db_path: str) -> None:
+    """增量迁移：给旧 testcases 表补 folder_id 列，并建 case_folders 表（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(testcases)")}
+        if "folder_id" not in cols:
+            conn.execute("ALTER TABLE testcases ADD COLUMN folder_id INTEGER")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS case_folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                parent_id INTEGER,
+                project_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.commit()
+
+
+_db_init_lock = threading.Lock()
+
+
 class TestCaseDatabase:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        # CREATE TABLE IF NOT EXISTS 语义：存量表已存在则不重建（旧数据兼容）。
-        # tables= 只建本模块的表，避免 Base.metadata 里其他模块的表被误建到本库。
-        Base.metadata.create_all(get_engine(db_path), tables=[TestCase.__table__])
-        # 增量迁移：旧 testcases 表补 project_id/version_id 列（幂等）
-        ensure_schema(db_path, [_ensure_project_columns, _ensure_task_columns])
+        with _db_init_lock:
+            # CREATE TABLE IF NOT EXISTS 语义：存量表已存在则不重建（旧数据兼容）。
+            # tables= 只建本模块的表，避免 Base.metadata 里其他模块的表被误建到本库。
+            try:
+                Base.metadata.create_all(
+                    get_engine(db_path), tables=[TestCase.__table__, CaseFolder.__table__]
+                )
+            except Exception as e:
+                # 并发建表容错（SQLite OperationalError: table ... already exists）
+                if "already exists" not in str(e).lower():
+                    raise
+            # 增量迁移：旧 testcases 表补 project_id/version_id/folder_id 列（幂等）
+            ensure_schema(
+                db_path,
+                [_ensure_project_columns, _ensure_task_columns, _ensure_folder_columns],
+            )
 
     def create_case(self, case: TestCase) -> int:
         with session_scope(self.db_path) as s:
@@ -75,14 +114,16 @@ class TestCaseDatabase:
         status_filter: CaseStatus | None = None,
         project_id: int | None = None,
         version_id: int | None = None,
+        folder_id: int | None = None,
         source: str | None = None,
         task_id: int | None = None,
     ) -> list[TestCase]:
-        """列出用例，可按 type/status/project/version/source(前缀)/task_id 过滤。
+        """列出用例，可按 type/status/project/version/folder/source(前缀)/task_id 过滤。
 
         source 用前缀匹配（``source like 'ai:batch%'``），便于按
         "manual" / "ai" / "ai:batch:42" 等来源族聚合筛选。
         task_id 精确匹配，回溯某次 Agent task 生成的全部用例。
+        folder_id: -1 表示未分类（folder_id 为空），大于 0 为指定目录。
         """
         stmt = select(TestCase)
         if type_filter is not None:
@@ -93,6 +134,11 @@ class TestCaseDatabase:
             stmt = stmt.where(TestCase.project_id == project_id)
         if version_id is not None:
             stmt = stmt.where(TestCase.version_id == version_id)
+        if folder_id is not None:
+            if folder_id == -1:
+                stmt = stmt.where(TestCase.folder_id.is_(None))
+            else:
+                stmt = stmt.where(TestCase.folder_id == folder_id)
         if source:
             stmt = stmt.where(TestCase.source.like(f"{source}%"))
         if task_id is not None:
@@ -118,7 +164,9 @@ class TestCaseDatabase:
             return 0
         allowed = (
             "status",
+            "project_id",
             "version_id",
+            "folder_id",
             "priority",
             "test_design",
             "task_id",
@@ -146,7 +194,9 @@ class TestCaseDatabase:
             return 0
         allowed = (
             "status",
+            "project_id",
             "version_id",
+            "folder_id",
             "priority",
             "test_design",
             "task_id",
@@ -211,6 +261,7 @@ class TestCaseDatabase:
             "tags",
             "project_id",
             "version_id",
+            "folder_id",
             "task_id",
             "batch_id",
             "source",
@@ -220,9 +271,11 @@ class TestCaseDatabase:
             if case is None:
                 return
             for k in allowed:
-                if k not in fields or fields[k] is None:
-                    continue
-                setattr(case, k, fields[k])
+                if k in fields:
+                    # 允许 folder_id / version_id / project_id 传入 None 进行清除
+                    if fields[k] is None and k not in ("folder_id", "version_id", "project_id"):
+                        continue
+                    setattr(case, k, fields[k])
             case.updated_at = datetime.now()
 
     def update_status(self, case_id: int, status: CaseStatus) -> None:
@@ -250,4 +303,76 @@ class TestCaseDatabase:
             if case is None:
                 return False
             s.delete(case)
+            return True
+
+    # ===== 目录（Folder）CRUD =====
+
+    def list_folders(self, project_id: int | None = None) -> list[CaseFolder]:
+        """按 project_id 列出目录。project_id 为 None 时列出全部。"""
+        stmt = select(CaseFolder)
+        if project_id is not None:
+            stmt = stmt.where(CaseFolder.project_id == project_id)
+        stmt = stmt.order_by(CaseFolder.id.asc())
+        with session_scope(self.db_path) as s:
+            return list(s.scalars(stmt))
+
+    def get_folder(self, folder_id: int) -> CaseFolder | None:
+        with session_scope(self.db_path) as s:
+            return s.get(CaseFolder, folder_id)
+
+    def create_folder(
+        self,
+        name: str,
+        parent_id: int | None = None,
+        project_id: int | None = None,
+    ) -> int:
+        folder = CaseFolder(name=name, parent_id=parent_id, project_id=project_id)
+        with session_scope(self.db_path) as s:
+            s.add(folder)
+            s.flush()
+            return folder.id
+
+    def update_folder(
+        self,
+        folder_id: int,
+        name: str | None = None,
+        parent_id: int | None = -1,
+    ) -> None:
+        with session_scope(self.db_path) as s:
+            folder = s.get(CaseFolder, folder_id)
+            if folder is None:
+                return
+            if name is not None:
+                folder.name = name
+            if parent_id != -1:
+                folder.parent_id = parent_id
+            folder.updated_at = datetime.now()
+
+    def delete_folder(self, folder_id: int) -> bool:
+        """删除目录：级联删除所有子目录，并将关联用例的 folder_id 置为 NULL。"""
+        with session_scope(self.db_path) as s:
+            folder = s.get(CaseFolder, folder_id)
+            if folder is None:
+                return False
+
+            # 递归查找所有子目录 ID
+            all_folders = list(s.scalars(select(CaseFolder)))
+            to_delete_ids = {folder_id}
+            changed = True
+            while changed:
+                changed = False
+                for f in all_folders:
+                    if f.parent_id in to_delete_ids and f.id not in to_delete_ids:
+                        to_delete_ids.add(f.id)
+                        changed = True
+
+            # 将关联用例的 folder_id 置为 NULL
+            s.execute(
+                update(TestCase)
+                .where(TestCase.folder_id.in_(to_delete_ids))
+                .values(folder_id=None)
+            )
+
+            # 删除目录
+            s.execute(delete(CaseFolder).where(CaseFolder.id.in_(to_delete_ids)))
             return True
