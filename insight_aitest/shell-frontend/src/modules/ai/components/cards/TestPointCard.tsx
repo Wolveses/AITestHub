@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 import { useTaskStore } from '../../store/taskStore';
 import { glassPanelStrong, primaryButton, text, RADIUS, SPRING } from '../agentStyles';
+import { formatCaseType, formatTestDesign } from '../../../testcase/utils/caseLabels';
 
 /** 一条测试点（agent message.content 里 JSON 数组的元素结构）
  *  兼容新旧字段名：新结构 summary/suggested_type/suggested_design，
@@ -15,6 +16,7 @@ interface TestPoint {
   type_hint?: string;
   suggested_design?: string;
   design_hint?: string;
+  rationale?: string;
 }
 
 /** 测试点审阅卡片（用例审阅面板阶段 1）。
@@ -61,7 +63,7 @@ export function TestPointCard({ taskId }: { taskId: number }) {
     if (visible.length === 0 || isBusy) return;
     setGenerating(true);
     try {
-      // generateBatch 在 store 内部从 useProjectStore 读 project/version
+      // generateBatch 触发两阶段批量生成
       await generateBatch(taskId, visible as unknown as Record<string, unknown>[]);
     } finally {
       // streamTask 走完后（done/error/cancelled）恢复按钮，允许重试或再次确认
@@ -122,13 +124,22 @@ export function TestPointCard({ taskId }: { taskId: number }) {
                   <div style={{ fontSize: 13, color: text.primary, lineHeight: 1.5, wordBreak: 'break-word' }}>
                     {p.summary || p.description || t('ai.noDescription')}
                   </div>
+                  {p.rationale && (
+                    <div style={{ fontSize: 11, color: text.muted, marginTop: 4 }}>
+                      思路: {p.rationale}
+                    </div>
+                  )}
                   {(p.suggested_type || p.type_hint || p.suggested_design || p.design_hint) && (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
                       {(p.suggested_type || p.type_hint) && (
-                        <span style={badgeStyle('type')}>{p.suggested_type || p.type_hint}</span>
+                        <span style={badgeStyle('type')}>
+                          类型: {formatCaseType(p.suggested_type || p.type_hint)}
+                        </span>
                       )}
                       {(p.suggested_design || p.design_hint) && (
-                        <span style={badgeStyle('design')}>{p.suggested_design || p.design_hint}</span>
+                        <span style={badgeStyle('design')}>
+                          设计: {formatTestDesign(p.suggested_design || p.design_hint)}
+                        </span>
                       )}
                     </div>
                   )}

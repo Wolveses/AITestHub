@@ -47,11 +47,11 @@ export function ReviewTable({
               />
             </th>
             <th style={thStyle}>{t('ai.colTitle')}</th>
-            <th style={{ ...thStyle, width: 64 }}>{t('ai.colType')}</th>
+            <th style={{ ...thStyle, width: 76 }}>{t('ai.colType')}</th>
             <th style={{ ...thStyle, width: 56 }}>{t('ai.colPriority')}</th>
-            <th style={{ ...thStyle, width: 64 }}>{t('ai.colDesign')}</th>
+            <th style={{ ...thStyle, width: 76 }}>{t('ai.colDesign')}</th>
             <th style={{ ...thStyle, width: 64 }}>{t('ai.colStatus')}</th>
-            <th style={{ ...thStyle, width: 56, textAlign: 'right' }}>{t('ai.colActions')}</th>
+            <th style={{ ...thStyle, width: 76, textAlign: 'right' }}>{t('ai.colActions')}</th>
           </tr>
         </thead>
         <tbody>

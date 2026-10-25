@@ -825,7 +825,7 @@ export default {
       colActions: 'Actions',
       // ===== ReviewRow =====
       rowCollapse: 'Collapse',
-      rowEdit: 'Edit',
+      rowEdit: 'Edit Case',
       statusDraft: 'Draft',
       statusReviewed: 'Reviewed',
       statusReady: 'Ready',
@@ -1070,6 +1070,7 @@ export default {
       step3Title: 'Step 3 · Generation complete',
       generatedCount: 'Generated {{done}}/{{total}} cases (draft status)',
       viewCaseList: 'View case list',
+      exportToExcel: 'Export to Excel (TAPD)',
       stepLabel1: 'Pick docs',
       stepLabel2: 'Select points',
       stepLabel3: 'Generate',

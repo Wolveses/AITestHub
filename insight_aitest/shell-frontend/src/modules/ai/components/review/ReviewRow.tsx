@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ReviewCase } from '../../store/taskStore';
 import { CaseEditorInline } from '../../../testcase/components/CaseEditorInline';
+import { formatCaseType, formatTestDesign } from '../../../testcase/utils/caseLabels';
 import { text } from '../agentStyles';
 
 /** 单条用例审阅行：勾选框 + 标题/类型/优先级/设计/状态 + 编辑入口。
@@ -41,23 +42,24 @@ export function ReviewRow({
           />
         </td>
         <td style={{ ...cellBase, color: text.primary, fontWeight: 500 }}>{caseData.title}</td>
-        <td style={{ ...cellBase, width: 64 }}>{caseData.type}</td>
+        <td style={{ ...cellBase, width: 76, whiteSpace: 'nowrap' }}>{formatCaseType(caseData.type)}</td>
         <td style={{ ...cellBase, width: 56 }}>{caseData.priority?.toUpperCase()}</td>
-        <td style={{ ...cellBase, width: 64 }}>{caseData.test_design}</td>
+        <td style={{ ...cellBase, width: 76, whiteSpace: 'nowrap' }}>{formatTestDesign(caseData.test_design)}</td>
         <td style={{ ...cellBase, width: 64 }}>
           <StatusBadge status={caseData.status} />
         </td>
-        <td style={{ ...cellBase, width: 56, textAlign: 'right' }}>
+        <td style={{ ...cellBase, width: 76, textAlign: 'right' }}>
           <button
             onClick={() => setExpanded((v) => !v)}
             style={{
-              background: 'none',
+              background: expanded ? 'var(--bg-elevated)' : 'none',
               border: '1px solid var(--border)',
-              color: text.secondary,
+              color: expanded ? 'var(--text-primary)' : text.secondary,
               borderRadius: 4,
-              padding: '2px 8px',
+              padding: '3px 8px',
               cursor: 'pointer',
               fontSize: 11,
+              whiteSpace: 'nowrap',
             }}
           >
             {expanded ? t('ai.rowCollapse') : t('ai.rowEdit')}
