@@ -1,12 +1,18 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { FolderInput, FileSpreadsheet } from 'lucide-react';
 import { useTaskStore } from '../store/taskStore';
 import { glassPanelStrong, primaryButton, text, RADIUS } from './agentStyles';
+import { ImportToProjectModal } from '../../testcase/components/ImportToProjectModal';
+import { exportTestCasesToExcel } from '../../testcase/utils/exportExcel';
 
 export function TaskResult() {
   const { currentTask } = useTaskStore();
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const [importModalOpen, setImportModalOpen] = useState(false);
+  const [imported, setImported] = useState(false);
   if (!currentTask) return null;
 
   const result = currentTask.result || {};
@@ -81,34 +87,96 @@ export function TaskResult() {
         <div style={{ fontSize: 12, color: text.danger, marginTop: 8 }}>{currentTask.error}</div>
       )}
       {caseIds.length > 0 && (
-        <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button
-            onClick={() => navigate('/testcase')}
-            style={{
-              ...primaryButton,
-              transition: 'all 0.15s cubic-bezier(0.16,1,0.3,1)',
-            }}
-            onMouseDown={(e) => { e.currentTarget.style.transform = 'scale(0.97)'; }}
-            onMouseUp={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
-          >
-            {t('ai.viewCaseList')}
-          </button>
-          {hasExecResults && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 12, color: text.secondary, marginBottom: 10 }}>
+            {imported
+              ? t('testcase.casesImportedNotice', '用例已成功导入目标项目，可前往用例列表查看。')
+              : t('testcase.casesGeneratedNotice', '已完成测试用例生成（尚未入库）。请选择将用例导入到项目，或导出为 TAPD 规范 Excel 文件：')}
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            {!imported && (
+              <>
+                <button
+                  onClick={() => setImportModalOpen(true)}
+                  style={{
+                    ...primaryButton,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '8px 16px',
+                  }}
+                >
+                  <FolderInput size={14} strokeWidth={1.8} />
+                  {t('testcase.importToProject', '导入到项目')}
+                </button>
+
+                <button
+                  onClick={() => exportTestCasesToExcel({
+                    task_id: currentTask.id,
+                    batch_id: (result.batch_id as string | undefined) ?? undefined,
+                    case_ids: caseIds,
+                  })}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '8px 16px',
+                    borderRadius: RADIUS.md,
+                    background: 'var(--bg-base)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text-primary)',
+                    fontSize: 13,
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <FileSpreadsheet size={14} strokeWidth={1.8} style={{ color: 'var(--success, #10b981)' }} />
+                  {t('testcase.exportToExcel', '导出到 Excel（TAPD）')}
+                </button>
+              </>
+            )}
+
             <button
-              onClick={() => navigate('/api-runner')}
+              onClick={() => navigate('/testcase')}
               style={{
                 ...primaryButton,
-                background: 'var(--surface-hover)',
+                background: imported ? 'var(--accent)' : 'var(--surface-hover)',
+                color: imported ? 'var(--bg-base)' : 'var(--text-primary)',
+                border: '1px solid var(--border)',
                 transition: 'all 0.15s cubic-bezier(0.16,1,0.3,1)',
               }}
               onMouseDown={(e) => { e.currentTarget.style.transform = 'scale(0.97)'; }}
               onMouseUp={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
               onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
             >
-              {t('ai.viewExecDetail')}
+              {t('ai.viewCaseList')}
             </button>
-          )}
+            {hasExecResults && (
+              <button
+                onClick={() => navigate('/api-runner')}
+                style={{
+                  ...primaryButton,
+                  background: 'var(--surface-hover)',
+                  transition: 'all 0.15s cubic-bezier(0.16,1,0.3,1)',
+                }}
+                onMouseDown={(e) => { e.currentTarget.style.transform = 'scale(0.97)'; }}
+                onMouseUp={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
+              >
+                {t('ai.viewExecDetail')}
+              </button>
+            )}
+          </div>
+
+          <ImportToProjectModal
+            open={importModalOpen}
+            caseIds={caseIds}
+            batchId={(result.batch_id as string | undefined) ?? null}
+            onClose={() => setImportModalOpen(false)}
+            onSuccess={() => {
+              setImported(true);
+            }}
+          />
         </div>
       )}
     </div>

@@ -13,20 +13,21 @@ export function CaseReviewCard({ taskId }: { taskId: number }) {
   const loadBatchCases = useTaskStore((s) => s.loadBatchCases);
   const toggleSelect = useTaskStore((s) => s.toggleSelect);
   const toggleSelectAll = useTaskStore((s) => s.toggleSelectAll);
-  const syncToVersion = useTaskStore((s) => s.syncToVersion);
   const reviewState = useTaskStore((s) => s.review[taskId]);
 
-  // 从任务结果取 batch_id
+  // 从任务结果取 batch_id 或 case_ids
   const batchId = (currentTask?.result?.batch_id as string | undefined) ?? null;
-  // 避免重复加载：记录已请求过的 batchId
+  const caseIds = (currentTask?.result?.case_ids as number[] | undefined) ?? [];
+  // 避免重复加载：记录已请求过的 key
   const loadedKey = useRef<string | null>(null);
 
   useEffect(() => {
-    if (batchId && loadedKey.current !== batchId) {
-      loadedKey.current = batchId;
-      loadBatchCases(taskId, batchId);
+    const key = batchId || (caseIds.length > 0 ? `task-${taskId}` : null);
+    if (key && loadedKey.current !== key) {
+      loadedKey.current = key;
+      loadBatchCases(taskId, batchId ?? '');
     }
-  }, [batchId, taskId, loadBatchCases]);
+  }, [batchId, caseIds.length, taskId, loadBatchCases]);
 
   const cases = reviewState?.cases ?? [];
   const selectedIds = reviewState?.selectedIds ?? new Set<number>();
@@ -123,9 +124,15 @@ export function CaseReviewCard({ taskId }: { taskId: number }) {
         selectedCount={selectedIds.size}
         totalCount={cases.length}
         syncStatus={reviewState.syncStatus}
-        onSync={(versionId, deleteUnselected) =>
-          syncToVersion(taskId, versionId, deleteUnselected)
-        }
+        caseIds={Array.from(selectedIds)}
+        batchId={batchId}
+        onImportSuccess={() => {
+          useTaskStore.setState((s) => {
+            const cur = s.review[taskId];
+            return cur ? { review: { ...s.review, [taskId]: { ...cur, syncStatus: 'done' } } } : s;
+          });
+          if (reviewState.batchId) loadBatchCases(taskId, reviewState.batchId);
+        }}
       />
     </div>
   );
