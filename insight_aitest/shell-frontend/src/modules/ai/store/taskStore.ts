@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { toast } from 'sonner';
-import { useProjectStore } from '../../../shared/store/projectStore';
 import { parseLLMError } from './llmErrors';
 import type { Citation, Conversation } from './conversationStore';
 
@@ -59,6 +58,7 @@ export interface ReviewCase {
   priority: string
   test_design: string
   status: string
+  preconditions?: string
   description?: string
   content: Record<string, unknown>
   source?: string
@@ -192,7 +192,14 @@ function _rebuildMessages(task: TaskData): AgentMessage[] {
   }
   const finishedStatuses = ['done', 'failed', 'cancelled'];
   if (finishedStatuses.includes(task.status)) {
-    msgs.push({ role: 'agent', card: 'result', taskId: task.id });
+    const res = (task.result || {}) as Record<string, unknown>;
+    const batchId = (res.batch_id as string | undefined) ?? null;
+    const caseIds = (res.case_ids as number[] | undefined) ?? [];
+    if (batchId || caseIds.length > 0) {
+      msgs.push({ role: 'agent', card: 'case_review', taskId: task.id });
+    } else {
+      msgs.push({ role: 'agent', card: 'result', taskId: task.id });
+    }
   }
   return msgs;
 }
@@ -265,9 +272,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   rca: {} as Record<number, TaskRca | null>,
   loadConversations: async () => {
     try {
-      const { currentProjectId } = useProjectStore.getState();
-      const q = currentProjectId !== null ? `?project_id=${currentProjectId}` : '';
-      const r = await fetch(`/api/modules/ai/conversations${q}`);
+      const r = await fetch(`/api/modules/ai/conversations`);
       if (!r.ok) return;
       const convs = await r.json();
       if (Array.isArray(convs)) {
@@ -386,7 +391,6 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   sendIntent: async (text: string) => {
     const { pendingFiles, pendingFileNames, thinkingLevel, kbMode, selectedDocIds, currentTask, workMode } = get();
-    const { currentProjectId, currentVersionId } = useProjectStore.getState();
     const hasFiles = pendingFiles.length > 0;
     const hasText = text.trim().length > 0;
     if (!hasFiles && !hasText) return;
@@ -438,11 +442,11 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       : undefined;
 
     if (workMode === 'chat') {
-      await get()._sendChat(text, uploadedFiles, currentProjectId, thinkingLevel, useKb, ragDocIds);
+      await get()._sendChat(text, uploadedFiles, null, thinkingLevel, useKb, ragDocIds);
     } else {
       const convId = currentTask?.conversation_id ?? undefined;
       // 任务模式下：finalDocIds 为本次上传/关联的需求文档ID，ragDocIds 为手动指定的额外检索范围
-      await get()._sendTask(text, uploadedFiles, currentProjectId, currentVersionId, thinkingLevel, useKb, finalDocIds, convId, kbMode, ragDocIds);
+      await get()._sendTask(text, uploadedFiles, null, null, thinkingLevel, useKb, finalDocIds, convId, kbMode, ragDocIds);
     }
   },
 
@@ -856,7 +860,6 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   selectStrategy: async (strategyId: string) => {
     const { currentTask } = get();
     if (!currentTask) return;
-    const { currentProjectId, currentVersionId } = useProjectStore.getState();
     set({ selectedStrategy: strategyId, phase: 'executing', phaseMessage: PHASE_MESSAGES.executing });
 
     // Agent 执行进度卡片
@@ -876,8 +879,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           strategy_id: strategyId,
-          project_id: currentProjectId,
-          version_id: currentVersionId,
+          project_id: null,
+          version_id: null,
         }),
       });
       if (!r.ok) {
@@ -1032,9 +1035,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             // - 否则 → 默认 result 卡片
             const result = (finalTask.result || {}) as Record<string, unknown>;
             const batchId = (result.batch_id as string | undefined) ?? null;
+            const caseIds = (result.case_ids as number[] | undefined) ?? [];
             let card: AgentMessage['card'] = 'result';
             let content: string | undefined;
-            if (batchId) {
+            if (batchId || caseIds.length > 0) {
               card = 'case_review';
             } else {
               // step 字典里 skill 返回字段被展开到顶层（executor.py:108 / reactor.py:215），
@@ -1084,17 +1088,15 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   // 两阶段生成闭环 · 阶段2：用户确认测试点范围后触发批量生成
   generateBatch: async (taskId, testPoints, projectId, versionId) => {
     set({ phase: 'executing', phaseMessage: '批量生成用例中…' });
-    // project/version 优先用传入值，否则从全局 projectStore 读当前选中
-    const ps = useProjectStore.getState();
-    const pid = projectId !== undefined ? projectId : ps.currentProjectId;
-    const vid = versionId !== undefined ? versionId : ps.currentVersionId;
+    const pid = projectId ?? null;
+    const vid = versionId ?? null;
     const res = await fetch(`${BASE}/${taskId}/generate-batch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         test_points: testPoints,
-        project_id: pid ?? null,
-        version_id: vid ?? null,
+        project_id: pid,
+        version_id: vid,
       }),
     });
     if (!res.ok) {
@@ -1111,9 +1113,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   loadTasks: async () => {
     try {
-      const { currentProjectId } = useProjectStore.getState();
-      const q = currentProjectId !== null ? `?project_id=${currentProjectId}` : '';
-      const r = await fetch(`${BASE}${q}`);
+      const r = await fetch(`${BASE}`);
       if (!r.ok) return;
       const tasks: TaskData[] = await r.json();
       // 防御：API 返回空数组时不覆盖现有列表（避免会话列表闪烁消失）
@@ -1178,7 +1178,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   // 用例审阅面板：加载某批次的用例到审阅状态
   loadBatchCases: async (taskId, batchId) => {
     try {
-      const res = await fetch(`${CASE_BASE}/batch/${batchId}`);
+      let res: Response | null = null;
+      if (batchId) {
+        res = await fetch(`${CASE_BASE}/batch/${batchId}`);
+      }
+      if (!res || !res.ok) {
+        res = await fetch(`${CASE_BASE}?task_id=${taskId}`);
+      }
       if (!res.ok) {
         set((s) => ({
           review: {
@@ -1186,7 +1192,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             [taskId]: {
               caseIds: [], cases: [], selectedIds: new Set(),
               editingId: null, targetVersionId: null, syncStatus: 'idle',
-              batchId, loaded: true, loadError: `加载失败（${res.status}）`,
+              batchId, loaded: true, loadError: `加载失败（${res?.status}）`,
             },
           },
         }));
