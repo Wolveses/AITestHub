@@ -4,7 +4,6 @@ import axios from 'axios';
 import { Menu, X, Users, LogOut, Sun, Moon } from 'lucide-react';
 import { platformIcons } from './icons';
 import { SettingsPanel } from '../modules/ai/components/SettingsPanel';
-import { ProjectSelector } from './ProjectSelector';
 import { useIsMobile } from '../shared/hooks/useIsMobile';
 import LanguageSwitcher from '../shared/components/LanguageSwitcher';
 import { useAuthStore } from '../shared/store/authStore';
@@ -72,7 +71,6 @@ export function TopBar({ onToggleSidebar }: TopBarProps) {
           <strong>AITest 平台</strong>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <ProjectSelector />
           <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>v{version}</span>
           <LanguageSwitcher />
 
