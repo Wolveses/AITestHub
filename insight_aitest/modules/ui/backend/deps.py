@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import threading
 
 from insight_aitest.modules.ui.backend.persistence.database import UIRunDatabase
 from insight_aitest.modules.ui.backend.persistence.batch_database import UIBatchRunDatabase
@@ -11,18 +12,24 @@ from insight_aitest.modules.ui.backend.persistence.batch_database import UIBatch
 _DB_PATH = os.path.expanduser("~/.insight_eye/ui.db")
 
 _run_db: UIRunDatabase | None = None
+_run_db_lock = threading.Lock()
 _batch_db: UIBatchRunDatabase | None = None
+_batch_db_lock = threading.Lock()
 
 
 def get_run_db() -> UIRunDatabase:
     global _run_db
     if _run_db is None:
-        _run_db = UIRunDatabase(_DB_PATH)
+        with _run_db_lock:
+            if _run_db is None:
+                _run_db = UIRunDatabase(_DB_PATH)
     return _run_db
 
 
 def get_batch_db() -> UIBatchRunDatabase:
     global _batch_db
     if _batch_db is None:
-        _batch_db = UIBatchRunDatabase(_DB_PATH)
+        with _batch_db_lock:
+            if _batch_db is None:
+                _batch_db = UIBatchRunDatabase(_DB_PATH)
     return _batch_db

@@ -4,16 +4,20 @@
 from __future__ import annotations
 
 import os
+import threading
 
 from insight_aitest.modules.testcase.backend.persistence.database import TestCaseDatabase
 
 _tc_db: TestCaseDatabase | None = None
+_tc_db_lock = threading.Lock()
 
 
 def get_tc_db() -> TestCaseDatabase:
     global _tc_db
     if _tc_db is None:
-        _tc_db = TestCaseDatabase(os.path.expanduser("~/.insight_eye/testcase.db"))
+        with _tc_db_lock:
+            if _tc_db is None:
+                _tc_db = TestCaseDatabase(os.path.expanduser("~/.insight_eye/testcase.db"))
     return _tc_db
 
 

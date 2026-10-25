@@ -90,6 +90,13 @@ def build_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logger.info("Insight-AITest 平台启动")
+        # 预热核心 DB 单例，在主线程完成建表与增量迁移，避免首波并发请求产生建表竞争
+        try:
+            from insight_aitest.modules.testcase.backend.deps import get_tc_db
+
+            get_tc_db()
+        except Exception as e:
+            logger.warning(f"TestCase DB 预热提示: {e}")
         yield
         logger.info("Insight-AITest 平台关闭")
 

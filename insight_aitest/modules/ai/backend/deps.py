@@ -20,7 +20,10 @@ from insight_aitest.modules.ai.backend.persistence.database import AIDatabase
 import insight_aitest.platform.services.kb.deps as _kb_deps
 
 # ai 模块自己的 ai.db（会话/消息）
+import threading
+
 _db: AIDatabase | None = None
+_db_lock = threading.Lock()
 _agent = None  # RagAgent，延迟 import 避免循环
 _planner = None  # Agent Planner（子项目2）
 _executor = None  # Agent TaskExecutor（子项目2）
@@ -39,7 +42,9 @@ def get_db() -> AIDatabase:
     """ai 模块会话/消息库（ai.db）。"""
     global _db
     if _db is None:
-        _db = AIDatabase(os.path.expanduser("~/.insight_eye/ai.db"))
+        with _db_lock:
+            if _db is None:
+                _db = AIDatabase(os.path.expanduser("~/.insight_eye/ai.db"))
     return _db
 
 
