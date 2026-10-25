@@ -12,6 +12,7 @@ P0-1：从裸 sqlite3 + threading.local 迁移到平台 session_scope + ORM。
 from __future__ import annotations
 
 from datetime import datetime
+import threading
 
 from sqlalchemy import select
 
@@ -124,28 +125,36 @@ def _ensure_thinking_columns(db_path: str) -> None:
         conn.commit()
 
 
+_db_init_lock = threading.Lock()
+
+
 class AIDatabase:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        # 先 create_all（IF NOT EXISTS 建表，只建本模块表），再补增量列（旧库可能缺 rag_enabled）
-        Base.metadata.create_all(
-            get_engine(db_path),
-            tables=[
-                Conversation.__table__,
-                Message.__table__,
-                ConversationDocument.__table__,
-                Task.__table__,
-            ],
-        )
-        ensure_schema(
-            db_path,
-            [
-                _ensure_rag_enabled,
-                _ensure_task_columns,
-                _ensure_thinking_columns,
-                _ensure_conversation_project_column,
-            ],
-        )
+        with _db_init_lock:
+            # 先 create_all（IF NOT EXISTS 建表，只建本模块表），再补增量列（旧库可能缺 rag_enabled）
+            try:
+                Base.metadata.create_all(
+                    get_engine(db_path),
+                    tables=[
+                        Conversation.__table__,
+                        Message.__table__,
+                        ConversationDocument.__table__,
+                        Task.__table__,
+                    ],
+                )
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    raise
+            ensure_schema(
+                db_path,
+                [
+                    _ensure_rag_enabled,
+                    _ensure_task_columns,
+                    _ensure_thinking_columns,
+                    _ensure_conversation_project_column,
+                ],
+            )
 
     # ===== 会话 =====
 

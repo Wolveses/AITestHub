@@ -5,7 +5,6 @@ import { AgentWorkbench } from './components/AgentWorkbench';
 import { useTaskStore } from './store/taskStore';
 import { useConfigStore } from './store/configStore';
 import { useAgentProfileStore } from './store/agentProfileStore';
-import { useProjectStore } from '../../shared/store/projectStore';
 import { useIsMobile } from '../../shared/hooks/useIsMobile';
 import { Bot } from 'lucide-react';
 import { ModuleHelpButton } from '../../shared/components/ModuleHelpButton';
@@ -16,12 +15,11 @@ export function AIApp() {
   const { loadAllHistory } = useTaskStore();
   const { config, loadConfig } = useConfigStore();
   const agentName = useAgentProfileStore((s) => s.name);
-  const currentProjectId = useProjectStore((s) => s.currentProjectId);
 
   useEffect(() => {
     loadAllHistory();
     loadConfig();
-  }, [currentProjectId]);
+  }, [loadAllHistory, loadConfig]);
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: isMobile ? 'column' : 'row', background: "var(--bg-base)", color: "var(--text-primary)" }}>

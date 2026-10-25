@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { toast } from 'sonner';
-import { useProjectStore } from '../../../shared/store/projectStore';
 import { parseLLMError } from './llmErrors';
 import { errorMessage } from '../../../shared/utils/errorMessage';
 
@@ -75,19 +74,16 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   abortCtrl: null,
 
   loadConversations: async () => {
-    const { currentProjectId } = useProjectStore.getState();
-    const q = currentProjectId !== null ? `?project_id=${currentProjectId}` : '';
-    const r = await fetch(`${BASE}/conversations${q}`);
+    const r = await fetch(`${BASE}/conversations`);
     const convs = await r.json();
-    set({ conversations: convs });
+    set({ conversations: Array.isArray(convs) ? convs : [] });
   },
 
   createConversation: async () => {
-    const { currentProjectId } = useProjectStore.getState();
     const { conversations, messages } = get();
     // 前端复用已有空会话（无消息），避免重复创建
     const emptyConv = conversations.find(
-      (c) => c.project_id === currentProjectId && (messages[c.id]?.length ?? 0) === 0
+      (c) => (messages[c.id]?.length ?? 0) === 0
     );
     if (emptyConv) {
       set({ activeId: emptyConv.id });
@@ -95,7 +91,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     }
     const r = await fetch(`${BASE}/conversations`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_id: currentProjectId }),
+      body: JSON.stringify({ project_id: null }),
     });
     if (!r.ok) {
       toast.error('创建会话失败');
