@@ -107,10 +107,10 @@ _STRATEGY_PROMPT = """你是一个资深测试 Agent。基于以下测试需求�
 [{{"id": "A", "label": "策略简称", "description": "这个策略覆盖什么", "plan": [{{"skill": "skill_id", "desc": "步骤描述", "params": {{...}}}}]}}]
 
 策略应从窄到宽递进，例如：
-- A: 批量生成用例（plan 仅含 extract_test_points 一步），从需求文档提取测试点供人工确认范围，确认后由前端触发批量生成。**上传了需求文档时此项必须为 A（首选）**
-- B: 仅功能用例
-- C: 仅接口用例
-- D: 接口生成 + 执行验证闭环（write_api_case → execute_api_case 带 loop）
+- A: 需求测试点规划与批量生成（两阶段闭环，plan 仅含 extract_test_points 一步），从需求提取系统性测试点供人工确认范围，确认后由前端触发批量生成。**用例生成场景此项必须为 A（首选）**
+- B: 核心业务功能覆盖（plan 含 extract_test_points，聚焦核心业务路径）
+- C: 接口自动化测试闭环（generate_data_driven_api_case → execute_data_driven_api_case 带 loop）
+- D: 全量测试设计闭环（涵盖功能、接口与异常边界）
 
 注意：E 型（extract_test_points）策略的 plan 里不能出现 write_cases_batch、write_functional_case、write_api_case 等生成 skill——它们属于阶段2，由前端在用户确认测试点后自动触发。
 
@@ -280,11 +280,11 @@ class Planner:
         return valid if valid else [self._default_strategy()]
 
     def _default_strategy(self) -> dict:
-        """降级默认策略。"""
+        """降级默认策略：需求测试点提取与规划（两阶段第一阶段）。"""
         return {
             "id": "A",
-            "label": "标准测试",
-            "description": "检索知识库并生成功能用例",
+            "label": "需求测试点规划与批量生成",
+            "description": "提取可测点并在人工确认范围后批量生成测试用例集",
             "plan": [
                 {
                     "skill": "rag_search",
@@ -292,9 +292,9 @@ class Planner:
                     "params": {"query": ""},
                 },
                 {
-                    "skill": "write_functional_case",
-                    "desc": "生成功能用例",
-                    "params": {"query": "", "design": "positive"},
+                    "skill": "extract_test_points",
+                    "desc": "提取需求测试点",
+                    "params": {"query": ""},
                 },
             ],
         }

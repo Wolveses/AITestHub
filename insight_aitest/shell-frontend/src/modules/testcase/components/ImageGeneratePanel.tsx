@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, AlertTriangle } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Camera, AlertTriangle, Check, FolderInput, FileSpreadsheet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '../../../shared/i18n';
-import { useCaseStore } from '../store/caseStore';
-import { useProjectStore } from '../../../shared/store/projectStore';
+import { useCaseStore, type TestCase } from '../store/caseStore';
+import { ImportToProjectModal } from './ImportToProjectModal';
+import { exportTestCasesToExcel } from '../utils/exportExcel';
 
 const inputStyle: React.CSSProperties = {
   background: "var(--bg-card)", border: '1px solid var(--bg-elevated)', borderRadius: 4,
@@ -66,14 +68,18 @@ async function streamImageTask(taskId: number): Promise<void> {
 
 export function ImageGeneratePanel({ onDone }: { onDone?: () => void }) {
   const { t } = useTranslation();
-  const { createQuickTask } = useCaseStore();
-  const { currentProjectId, currentVersionId } = useProjectStore();
+  const navigate = useNavigate();
+  const { createQuickTask, loadCases, selectedProjectId } = useCaseStore();
   const [files, setFiles] = useState<File[]>([]);
   const [baseUrl, setBaseUrl] = useState('');
   const [pointSummary, setPointSummary] = useState('');
   const [error, setError] = useState('');
   const [imageGenerating, setImageGenerating] = useState(false);
   const [genStatus, setGenStatus] = useState('');
+  const [createdTaskId, setCreatedTaskId] = useState<number | null>(null);
+  const [generatedCases, setGeneratedCases] = useState<TestCase[]>([]);
+  const [importModalOpen, setImportModalOpen] = useState(false);
+  const [imported, setImported] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const addFiles = (newFiles: File[]) => {
@@ -96,6 +102,9 @@ export function ImageGeneratePanel({ onDone }: { onDone?: () => void }) {
   const submit = async () => {
     setError('');
     setGenStatus('');
+    setImported(false);
+    setCreatedTaskId(null);
+    setGeneratedCases([]);
     if (files.length === 0) {
       setError(t('testcase.selectAtLeastOneScreenshot'));
       return;
@@ -113,14 +122,26 @@ export function ImageGeneratePanel({ onDone }: { onDone?: () => void }) {
         images: images.map((img) => ({ data: img.data, mime: img.mime })),
         base_url: baseUrl.trim(),
         point_summary: pointSummary.trim(),
-        project_id: currentProjectId,
-        version_id: currentVersionId,
+        project_id: selectedProjectId,
+        version_id: null,
       });
+      setCreatedTaskId(task_id);
 
       setGenStatus(t('testcase.visionAnalyzing'));
       await streamImageTask(task_id);
       setGenStatus(t('testcase.generateComplete'));
-      onDone?.();
+
+      try {
+        const r = await fetch(`/api/modules/testcase/testcases?task_id=${task_id}`);
+        if (r.ok) {
+          const list = await r.json();
+          if (Array.isArray(list)) {
+            setGeneratedCases(list);
+          }
+        }
+      } catch {
+        // 保持现状
+      }
     } catch (e) {
       setError((e as Error).message);
       setGenStatus('');
@@ -252,6 +273,102 @@ export function ImageGeneratePanel({ onDone }: { onDone?: () => void }) {
           <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{genStatus}</span>
         )}
       </div>
+
+      {/* 生成完成后的审阅与导入/导出区 */}
+      {createdTaskId !== null && !imageGenerating && (
+        <div style={{ marginTop: 24, padding: 16, background: 'var(--bg-card)', borderRadius: 8, border: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--success)', fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+            <Check size={16} strokeWidth={2} />
+            {t('testcase.generateComplete', '用例生成完成')}
+            <span style={{ fontSize: 12, fontWeight: 'normal', color: 'var(--text-secondary)' }}>
+              ({t('testcase.totalCasesCount', `共 {{count}} 条用例`, { count: generatedCases.length })})
+            </span>
+          </div>
+
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14 }}>
+            {imported
+              ? t('testcase.casesImportedNotice', '用例已成功导入目标项目，可前往用例列表查看。')
+              : t('testcase.casesGeneratedNotice', '已完成测试用例生成（尚未入库）。请选择将用例导入到项目，或导出为 TAPD 规范 Excel 文件：')}
+          </div>
+
+          {generatedCases.length > 0 && (
+            <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6, marginBottom: 16, background: 'var(--bg-base)' }}>
+              {generatedCases.map((c, idx) => (
+                <div key={c.id} style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                  <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>#{idx + 1}</span>
+                  <span style={{ flex: 1, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.title}</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{c.type}</span>
+                  <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 3, border: '1px solid var(--border)' }}>{c.priority.toUpperCase()}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            {!imported && (
+              <>
+                <button
+                  onClick={() => setImportModalOpen(true)}
+                  disabled={generatedCases.length === 0}
+                  style={{ ...primaryBtn, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                >
+                  <FolderInput size={14} strokeWidth={1.8} />
+                  {t('testcase.importToProject', '导入到项目')}
+                </button>
+
+                <button
+                  onClick={() => exportTestCasesToExcel({
+                    task_id: createdTaskId,
+                    case_ids: generatedCases.map((c) => c.id),
+                  })}
+                  disabled={generatedCases.length === 0}
+                  style={{
+                    background: 'var(--bg-base)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text-primary)',
+                    borderRadius: 6,
+                    padding: '8px 16px',
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <FileSpreadsheet size={14} strokeWidth={1.8} style={{ color: 'var(--success, #10b981)' }} />
+                  {t('testcase.exportToExcel', '导出到 Excel（TAPD）')}
+                </button>
+              </>
+            )}
+
+            <button
+              onClick={() => {
+                if (onDone) onDone();
+                else navigate('/testcase');
+              }}
+              style={{
+                background: 'none',
+                border: '1px solid var(--border)',
+                color: 'var(--text-secondary)',
+                borderRadius: 6,
+                padding: '8px 16px',
+                cursor: 'pointer',
+              }}
+            >
+              {t('testcase.backToList', '返回用例列表')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <ImportToProjectModal
+        open={importModalOpen}
+        caseIds={generatedCases.map((c) => c.id)}
+        onClose={() => setImportModalOpen(false)}
+        onSuccess={async () => {
+          setImported(true);
+          await loadCases();
+        }}
+      />
     </div>
   );
 }

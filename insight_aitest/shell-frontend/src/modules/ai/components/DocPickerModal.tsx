@@ -1,7 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Folder, FolderOpen, ChevronRight, ChevronDown, X, FileText, CheckSquare, Square, MinusSquare } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useProjectStore } from '../../../shared/store/projectStore';
 
 export interface DocItem {
   id: number;
@@ -28,7 +27,6 @@ interface DocPickerModalProps {
 
 export function DocPickerModal({ open, onClose, selectedDocIds, onConfirm }: DocPickerModalProps) {
   const { t } = useTranslation();
-  const { currentProjectId } = useProjectStore();
 
   const [docs, setDocs] = useState<DocItem[]>([]);
   const [folders, setFolders] = useState<FolderItem[]>([]);
@@ -40,11 +38,10 @@ export function DocPickerModal({ open, onClose, selectedDocIds, onConfirm }: Doc
     if (open) {
       setTempSelected(new Set(selectedDocIds));
       setLoading(true);
-      const params = currentProjectId != null ? `?project_id=${currentProjectId}` : '';
 
       Promise.all([
-        fetch(`/api/modules/kb/folders${params}`).then((r) => (r.ok ? r.json() : [])),
-        fetch(`/api/modules/kb/documents${params}`).then((r) => (r.ok ? r.json() : [])),
+        fetch(`/api/modules/kb/folders`).then((r) => (r.ok ? r.json() : [])),
+        fetch(`/api/modules/kb/documents`).then((r) => (r.ok ? r.json() : [])),
       ])
         .then(([foldersData, docsData]) => {
           setFolders(Array.isArray(foldersData) ? foldersData : []);
@@ -52,7 +49,7 @@ export function DocPickerModal({ open, onClose, selectedDocIds, onConfirm }: Doc
         })
         .finally(() => setLoading(false));
     }
-  }, [open, selectedDocIds, currentProjectId]);
+  }, [open, selectedDocIds]);
 
   // 映射：计算每个文件夹下包含的所有文档 ID（含递归子目录）
   const folderDocMap = useMemo(() => {

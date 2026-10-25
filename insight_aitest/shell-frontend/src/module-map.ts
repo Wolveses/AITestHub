@@ -57,7 +57,7 @@ export const childrenMap: Record<string, Record<string, ComponentType>> = {
     mobile: lazy(() => import('./modules/ui').then((m) => ({ default: m.MobilePlaceholder }))),
   },
   testcase: {
-    list: lazy(() => import('./modules/testcase').then((m) => ({ default: m.CaseEditor }))),
+    list: lazy(() => import('./modules/testcase').then((m) => ({ default: m.CaseList }))),
     generate: lazy(() => import('./modules/testcase').then((m) => ({ default: m.GenerateWizard }))),
     image: lazy(() => import('./modules/testcase').then((m) => ({ default: m.ImageGeneratePanel }))),
   },

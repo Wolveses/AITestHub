@@ -239,8 +239,12 @@ class ReActAgent:
             if isinstance(obs, dict):
                 if "error" in obs:
                     any_failed = True
-                if "case_id" in obs:
+                if "case_id" in obs and obs["case_id"] not in case_ids:
                     case_ids.append(obs["case_id"])
+                if "case_ids" in obs and isinstance(obs["case_ids"], list):
+                    for cid in obs["case_ids"]:
+                        if cid not in case_ids:
+                            case_ids.append(cid)
                 # 取第一个含 batch_id 的 step 结果顶到顶层（write_cases_batch 产物）
                 if batch_id is None and obs.get("batch_id"):
                     batch_id = obs["batch_id"]
@@ -254,6 +258,14 @@ class ReActAgent:
                 return
 
         # 完成
+        for cid in case_ids:
+            try:
+                c = self.ctx.case_db.get_case(cid)
+                if c and not c.task_id and task_id:
+                    self.ctx.case_db.update_case(cid, task_id=task_id)
+            except Exception:
+                pass
+
         result_summary = {
             "steps": step_results,
             "case_ids": case_ids,

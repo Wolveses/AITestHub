@@ -94,53 +94,6 @@ def _rag_search(params: dict, ctx: SkillContext) -> dict:
     return {"chunks": chunks, "count": len(chunks)}
 
 
-def _write_case(params: dict, ctx: SkillContext, case_type: str) -> dict:
-    """生成测试用例并落库。case_type = functional | api。"""
-    from insight_aitest.modules.testcase.backend.generator.analyzer import TestPoint
-    from insight_aitest.modules.testcase.backend.persistence.models import CaseType, TestType
-
-    query = params.get("query", "")
-    design = params.get("design", "positive")
-    document_ids = params.get("document_ids")
-
-    # 构造一个 TestPoint 驱动 Generator
-    point = TestPoint(
-        id=f"agent-{case_type}",
-        summary=query,
-        suggested_type=CaseType(case_type),
-        suggested_design=TestType(design),
-        rationale="Agent 自动生成",
-    )
-    documents_text = params.get("documents_text", "")
-    case = ctx.generator.generate(
-        point,
-        document_ids=document_ids,
-        project_id=ctx.project_id,
-        documents_text=documents_text,
-    )
-
-    # 落库 + 关联 project
-    case.project_id = ctx.project_id
-    case.version_id = ctx.version_id
-    case.source = f"ai:agent:{ctx.config.chat_model}"
-    case_id = ctx.case_db.create_case(case)
-
-    return {
-        "case_id": case_id,
-        "title": case.title,
-        "type": case_type,
-        "source": case.source,
-    }
-
-
-def _write_functional_case(params: dict, ctx: SkillContext) -> dict:
-    return _write_case(params, ctx, "functional")
-
-
-def _write_api_case(params: dict, ctx: SkillContext) -> dict:
-    return _write_case(params, ctx, "api")
-
-
 # ===== 执行闭环 skill =====
 
 
@@ -504,13 +457,24 @@ def _write_ui_case_from_image(params: dict, ctx: SkillContext) -> dict:
     point_summary = params.get("point_summary", "")
 
     case = ctx.generator.generate_from_image(images, base_url, point_summary)
-    case.project_id = ctx.project_id
-    case.version_id = ctx.version_id
+    case.project_id = None
+    case.version_id = None
     case.source = f"ai:agent-vision:{ctx.config.chat_model}"
+    if ctx.task_id is not None:
+        case.task_id = ctx.task_id
+    import time
+    batch_id = (
+        f"batch-{ctx.task_id}-{int(time.time())}"
+        if ctx.task_id is not None
+        else f"batch-ui-{int(time.time())}"
+    )
+    case.batch_id = batch_id
     case_id = ctx.case_db.create_case(case)
 
     return {
         "case_id": case_id,
+        "case_ids": [case_id],
+        "batch_id": batch_id,
         "title": case.title,
         "type": "ui",
         "source": case.source,
@@ -1038,8 +1002,8 @@ def _write_cases_batch(params: dict, ctx: SkillContext) -> dict:
                 documents_text=documents_text,
                 exclude_document_ids=exclude_doc_ids,
             )
-            case.project_id = ctx.project_id
-            case.version_id = ctx.version_id
+            case.project_id = None
+            case.version_id = None
             case.source = f"ai:batch:{ctx.config.chat_model}"
             if task_id is not None:
                 case.task_id = task_id
@@ -1062,6 +1026,50 @@ def _write_cases_batch(params: dict, ctx: SkillContext) -> dict:
         "batch_id": batch_id,
         "validation": validation,
     }
+
+
+def _write_case(params: dict, ctx: SkillContext, case_type: str) -> dict:
+    """向后兼容单条生成：包装为单测试点，统一走 _write_cases_batch 引擎。"""
+    query = params.get("query", "")
+    design = params.get("design", "positive")
+    test_points = [
+        {
+            "id": f"point-{case_type}-1",
+            "summary": query or f"验证{case_type}业务功能",
+            "suggested_type": case_type,
+            "suggested_design": design,
+            "rationale": "单用例生成（统一收口批次引擎）",
+        }
+    ]
+    batch_params = dict(params)
+    batch_params["test_points"] = test_points
+    batch_res = _write_cases_batch(batch_params, ctx)
+    case_ids = batch_res.get("case_ids", [])
+    cid = case_ids[0] if case_ids else None
+    title = query or f"{case_type}测试用例"
+    if cid and ctx.case_db:
+        try:
+            c = ctx.case_db.get_case(cid)
+            if c:
+                title = c.title
+        except Exception:
+            pass
+    return {
+        "case_id": cid,
+        "case_ids": case_ids,
+        "batch_id": batch_res.get("batch_id"),
+        "title": title,
+        "type": case_type,
+        "source": f"ai:batch:{ctx.config.chat_model}",
+    }
+
+
+def _write_functional_case(params: dict, ctx: SkillContext) -> dict:
+    return _write_case(params, ctx, "functional")
+
+
+def _write_api_case(params: dict, ctx: SkillContext) -> dict:
+    return _write_case(params, ctx, "api")
 
 
 def _validate_and_fix_cases(params: dict, ctx: SkillContext) -> dict:
@@ -1261,14 +1269,14 @@ SKILLS: dict[str, SkillSpec] = {
     "write_functional_case": SkillSpec(
         id="write_functional_case",
         name="写功能用例",
-        description="基于需求文档生成一条功能测试用例（含操作步骤和预期结果）。",
+        description="基于需求生成功能测试用例（底层已收口至统一批次引擎，批量场景首选 extract_test_points + write_cases_batch）。",
         params_description='{"query": "测试目标描述", "design": "positive|negative|boundary|edge"}',
         execute=_write_functional_case,
     ),
     "write_api_case": SkillSpec(
         id="write_api_case",
         name="写接口用例",
-        description="基于接口文档生成一条 API 接口测试用例（含请求方法、路径、断言）。",
+        description="基于接口文档生成接口测试用例（底层已收口至统一批次引擎，批量场景首选 extract_test_points + write_cases_batch）。",
         params_description='{"query": "接口目标描述", "design": "positive|negative|boundary|edge"}',
         execute=_write_api_case,
     ),

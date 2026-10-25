@@ -116,8 +116,12 @@ class TaskExecutor:
             if "error" in result:
                 any_failed = True
             if isinstance(result, dict):
-                if "case_id" in result:
+                if "case_id" in result and result["case_id"] not in case_ids:
                     case_ids.append(result["case_id"])
+                if "case_ids" in result and isinstance(result["case_ids"], list):
+                    for cid in result["case_ids"]:
+                        if cid not in case_ids:
+                            case_ids.append(cid)
                 # 取第一个含 batch_id 的 step 结果顶到顶层（write_cases_batch 产物）
                 if batch_id is None and result.get("batch_id"):
                     batch_id = result["batch_id"]
@@ -126,6 +130,14 @@ class TaskExecutor:
                 prev_result = None
 
         # 完成
+        for cid in case_ids:
+            try:
+                c = self.ctx.case_db.get_case(cid)
+                if c and not c.task_id and task_id:
+                    self.ctx.case_db.update_case(cid, task_id=task_id)
+            except Exception:
+                pass
+
         result_summary = {
             "steps": step_results,
             "case_ids": case_ids,

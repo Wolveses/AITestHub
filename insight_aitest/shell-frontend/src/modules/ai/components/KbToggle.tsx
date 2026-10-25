@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import { Zap, FileText, AlertCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { text, RADIUS } from './agentStyles';
-import { useProjectStore } from '../../../shared/store/projectStore';
 import { DocPickerModal } from './DocPickerModal';
 
 export type KbMode = 'off' | 'auto' | 'manual';
@@ -18,17 +17,15 @@ const BASE = '/api/modules/ai/tasks';
 
 export function KbToggle({ mode, onModeChange, selectedDocIds, onDocIdsChange }: Props) {
   const { t } = useTranslation();
-  const { currentProjectId } = useProjectStore();
   const [stats, setStats] = useState({ total_docs: 0, total_chunks: 0, vector_enabled: false });
   const [modalOpen, setModalOpen] = useState(false);
 
   useEffect(() => {
-    const params = currentProjectId != null ? `?project_id=${currentProjectId}` : '';
-    fetch(`${BASE}/kb/stats${params}`)
+    fetch(`${BASE}/kb/stats`)
       .then(r => r.ok ? r.json() : { total_docs: 0, total_chunks: 0, vector_enabled: false })
       .then(setStats)
       .catch(() => setStats({ total_docs: 0, total_chunks: 0, vector_enabled: false }));
-  }, [currentProjectId]);
+  }, []);
 
   const vectorReady = stats.vector_enabled;
   const iconSize = 13;
