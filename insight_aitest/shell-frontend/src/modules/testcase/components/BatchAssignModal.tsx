@@ -12,8 +12,6 @@ interface BatchAssignModalProps {
   onSuccess: () => void;
 }
 
-type AssignValue = 'keep' | number;
-
 export function BatchAssignModal({
   open,
   caseIds,
@@ -21,57 +19,60 @@ export function BatchAssignModal({
   onSuccess,
 }: BatchAssignModalProps) {
   const { t } = useTranslation();
-  const { projects, versions: currentVersions, loadProjects, loadVersions } = useProjectStore();
-  const { folders: currentFolders, selectedProjectId, batchAssign } = useCaseStore();
+  const { projects, loadProjects } = useProjectStore();
+  const { batchAssign } = useCaseStore();
 
-  const [projectId, setProjectId] = useState<AssignValue>('keep');
-  const [versionId, setVersionId] = useState<AssignValue>('keep');
-  const [folderId, setFolderId] = useState<AssignValue>('keep');
+  // 项目为必选项（null = 尚未选择）；版本/目录 null 表示「空」（--）
+  const [projectId, setProjectId] = useState<number | null>(null);
+  const [versionId, setVersionId] = useState<number | null>(null);
+  const [folderId, setFolderId] = useState<number | null>(null);
 
   const [projectVersions, setProjectVersions] = useState<ProjectVersion[]>([]);
   const [projectFolders, setProjectFolders] = useState<FolderNode[]>([]);
   const [loadingExtras, setLoadingExtras] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // 打开弹窗时重置表单为默认 "保持不变"
-  useEffect(() => {
-    if (open) {
-      loadProjects();
-      setProjectId('keep');
-      setVersionId('keep');
-      setFolderId('keep');
-      if (selectedProjectId !== null) {
-        loadVersions(selectedProjectId);
-      }
-    }
-  }, [open, selectedProjectId, loadProjects, loadVersions]);
+  // caseIds 每次渲染都是新数组，依赖用稳定的字符串
+  const caseIdKey = caseIds.join(',');
 
-  // 当选择的项目变化时，若选择了具体项目，动态加载该项目专属的版本和目录列表
+  // 打开弹窗：默认回显所选用例当前的归属值
   useEffect(() => {
     if (!open) return;
+    loadProjects();
 
-    if (projectId === 'keep') {
+    const ids = caseIdKey ? caseIdKey.split(',').map(Number) : [];
+    const selected = useCaseStore.getState().cases.filter((c) => ids.includes(c.id));
+    // 所有选中用例该属性一致时返回该值；不一致返回 undefined
+    const commonOf = (key: 'project_id' | 'version_id' | 'folder_id') => {
+      if (!selected.length) return undefined;
+      const first = selected[0][key];
+      return selected.every((c) => c[key] === first) ? first : undefined;
+    };
+
+    const commonProject = commonOf('project_id');
+    const pid = commonProject === undefined ? null : commonProject;
+
+    setProjectId(pid);
+    if (pid === null) {
+      // 未归属项目（或跨项目混选）：版本/目录无归属上下文
+      setVersionId(null);
+      setFolderId(null);
+    } else {
+      setVersionId(commonOf('version_id') ?? null);
+      setFolderId(commonOf('folder_id') ?? null);
+    }
+  }, [open, caseIdKey, loadProjects]);
+
+  // 项目确定后加载该项目的版本与目录（切换项目时在 onChange 中重置版本/目录）
+  useEffect(() => {
+    if (!open || projectId === null) {
       setProjectVersions([]);
       setProjectFolders([]);
       return;
     }
 
-    if (projectId === -1) {
-      // 清空项目，同时版本和目录自动设为清空
-      setProjectVersions([]);
-      setProjectFolders([]);
-      setVersionId(-1);
-      setFolderId(-1);
-      return;
-    }
-
-    // 选择了新的具体项目，拉取该项目的版本与目录
     let isMounted = true;
     setLoadingExtras(true);
-    // 切换到新项目时，建议默认将版本和目录重置为未绑定/未分类
-    setVersionId(-1);
-    setFolderId(-1);
-
     Promise.all([
       fetch(`/api/platform/projects/${projectId}/versions`)
         .then((r) => (r.ok ? r.json() : []))
@@ -94,35 +95,20 @@ export function BatchAssignModal({
 
   if (!open) return null;
 
-  // 计算可供选择的版本列表
-  const availableVersions: ProjectVersion[] =
-    projectId === 'keep' ? (selectedProjectId !== null ? currentVersions : []) : projectVersions;
-
-  // 计算可供选择的目录列表
-  const availableFolders: FolderNode[] =
-    projectId === 'keep' ? currentFolders : projectFolders;
-
   const handleConfirm = async () => {
-    if (projectId === 'keep' && versionId === 'keep' && folderId === 'keep') {
-      toast.info(t('testcase.noChangesMade', '未修改任何归属属性'));
-      onClose();
+    if (projectId === null) {
+      toast.error(t('testcase.selectProjectRequired', '请选择所属项目'));
       return;
     }
 
     setSaving(true);
     try {
-      const payload: { project_id?: number | null; version_id?: number | null; folder_id?: number | null } = {};
-      if (projectId !== 'keep') {
-        payload.project_id = projectId === -1 ? -1 : projectId;
-      }
-      if (versionId !== 'keep') {
-        payload.version_id = versionId === -1 ? -1 : versionId;
-      }
-      if (folderId !== 'keep') {
-        payload.folder_id = folderId === -1 ? -1 : folderId;
-      }
-
-      await batchAssign(caseIds, payload);
+      // 版本/目录为 null 时传 -1，表示置空
+      await batchAssign(caseIds, {
+        project_id: projectId,
+        version_id: versionId ?? -1,
+        folder_id: folderId ?? -1,
+      });
       toast.success(t('testcase.batchAssignmentSuccess', '成功修改 {{count}} 条用例归属', { count: caseIds.length }));
       onSuccess();
       onClose();
@@ -209,80 +195,82 @@ export function BatchAssignModal({
             })}
           </div>
 
-          {/* 1. 所属项目 */}
+          {/* 1. 所属项目（必选，仅展示系统中已添加的项目） */}
           <div>
             <label style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
               {t('testcase.belongProject', '所属项目')}
             </label>
             <select
-              value={projectId}
+              value={projectId === null ? '' : String(projectId)}
               onChange={(e) => {
-                const val = e.target.value;
-                setProjectId(val === 'keep' ? 'keep' : Number(val));
+                setProjectId(e.target.value === '' ? null : Number(e.target.value));
+                // 切换项目后，版本与目录的归属上下文变化，重置为空
+                setVersionId(null);
+                setFolderId(null);
               }}
               style={selectStyle}
             >
-              <option value="keep">{t('testcase.keepUnchanged', '保持不变（不修改所属项目）')}</option>
+              {projectId === null && (
+                <option value="" disabled>
+                  {t('testcase.selectProjectPlaceholder', '请选择项目')}
+                </option>
+              )}
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
                 </option>
               ))}
             </select>
+            {projectId === null && (
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>
+                {t('testcase.selectProjectRequired', '请选择所属项目')}
+              </span>
+            )}
           </div>
 
-          {/* 2. 所属版本 */}
+          {/* 2. 所属版本（-- 表示空） */}
           <div>
             <label style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
               {t('testcase.belongVersion', '所属版本')}
             </label>
             <select
-              value={versionId}
-              disabled={projectId === -1 || (projectId === 'keep' && selectedProjectId === null && availableVersions.length === 0)}
+              value={versionId === null ? '' : String(versionId)}
+              disabled={projectId === null || loadingExtras}
               onChange={(e) => {
-                const val = e.target.value;
-                setVersionId(val === 'keep' ? 'keep' : Number(val));
+                setVersionId(e.target.value === '' ? null : Number(e.target.value));
               }}
               style={{
                 ...selectStyle,
-                opacity: projectId === -1 ? 0.6 : 1,
+                opacity: projectId === null ? 0.6 : 1,
               }}
             >
-              <option value="keep">{t('testcase.keepVersionUnchanged', '保持不变（不修改版本）')}</option>
-              <option value="-1">{t('testcase.noVersion', '未绑定版本（清空版本）')}</option>
-              {availableVersions.map((v) => (
+              <option value="">--</option>
+              {projectVersions.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.name}
                 </option>
               ))}
             </select>
-            {projectId === 'keep' && selectedProjectId === null && availableVersions.length === 0 && (
-              <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>
-                {t('testcase.selectProjectFirstForVersion', '（当前为全部项目视图，如需分配版本请先在上方指定具体项目）')}
-              </span>
-            )}
           </div>
 
-          {/* 3. 所属目录 */}
+          {/* 3. 所属目录（-- 表示空） */}
           <div>
             <label style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
               {t('testcase.belongFolder', '所属目录')}
             </label>
             <select
-              value={folderId}
-              disabled={projectId === -1 || loadingExtras}
+              value={folderId === null ? '' : String(folderId)}
+              disabled={projectId === null || loadingExtras}
               onChange={(e) => {
-                const val = e.target.value;
-                setFolderId(val === 'keep' ? 'keep' : Number(val));
+                setFolderId(e.target.value === '' ? null : Number(e.target.value));
               }}
               style={{
                 ...selectStyle,
-                opacity: projectId === -1 ? 0.6 : 1,
+                opacity: projectId === null ? 0.6 : 1,
               }}
             >
-              <option value="keep">{t('testcase.keepFolderUnchanged', '保持不变（不修改目录）')}</option>
-              <option value="-1">{t('testcase.unclassifiedFolder', '未分类（移出原目录）')}</option>
-              {renderFolderOptions(availableFolders)}
+              <option value="">--</option>
+              {renderFolderOptions(projectFolders)}
             </select>
           </div>
 
@@ -305,7 +293,7 @@ export function BatchAssignModal({
             <span>
               {t(
                 'testcase.batchAssignTips',
-                '设为「保持不变」的属性将保留原有用例的归属值；切换至新项目时，建议同时确认或重置目标版本与目录。'
+                '确认后将覆盖所选用例的项目、版本与目录；版本、目录选择「--」表示置空。'
               )}
             </span>
           </div>
@@ -340,7 +328,7 @@ export function BatchAssignModal({
           </button>
           <button
             onClick={handleConfirm}
-            disabled={saving}
+            disabled={saving || projectId === null}
             style={{
               padding: '6px 16px',
               borderRadius: 6,
@@ -349,8 +337,8 @@ export function BatchAssignModal({
               color: '#fff',
               fontSize: 13,
               fontWeight: 500,
-              cursor: saving ? 'not-allowed' : 'pointer',
-              opacity: saving ? 0.6 : 1,
+              cursor: saving || projectId === null ? 'not-allowed' : 'pointer',
+              opacity: saving || projectId === null ? 0.6 : 1,
             }}
           >
             {saving ? t('common.saving', '保存中...') : t('common.confirm', '确认修改')}
@@ -372,4 +360,3 @@ const selectStyle: React.CSSProperties = {
   outline: 'none',
   cursor: 'pointer',
 };
-
