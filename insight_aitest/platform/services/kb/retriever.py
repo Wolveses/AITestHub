@@ -574,7 +574,11 @@ class Retriever:
             return candidates
 
         provider = getattr(self.config, "rerank_provider", "llm")
-        if provider == "cross_encoder" and getattr(self.config, "rerank_base_url", ""):
+        # 未单独配置 rerank 端点时回退到 LLM 端点（设置页「与 LLM 保持一致」）
+        rerank_base = getattr(self.config, "rerank_base_url", "") or getattr(
+            self.config, "llm_base_url", ""
+        )
+        if provider == "cross_encoder" and rerank_base:
             try:
                 return self._cross_encoder_rerank(query, candidates, k)
             except Exception:
@@ -595,7 +599,10 @@ class Retriever:
         import json
         import urllib.request
 
-        base_url = self.config.rerank_base_url.rstrip("/")
+        base_url = (
+            getattr(self.config, "rerank_base_url", "")
+            or getattr(self.config, "llm_base_url", "")
+        ).rstrip("/")
         if not base_url.endswith("/rerank"):
             url = f"{base_url}/rerank"
         else:

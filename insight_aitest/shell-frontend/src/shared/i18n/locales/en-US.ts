@@ -529,6 +529,8 @@ export default {
       ocrEnabled: 'Enable OCR',
       embedEndpoint: 'Embedding endpoint',
       embedModel: 'Embedding model',
+      sameAsLlm: 'Same as LLM',
+      endpointAndKey: 'Endpoint & key',
       saveRag: 'Save RAG settings',
       saved: 'Saved, takes effect immediately.',
       saveFailed: 'Save failed',

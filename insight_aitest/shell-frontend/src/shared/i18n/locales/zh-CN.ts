@@ -529,6 +529,8 @@ export default {
       ocrEnabled: '启用 OCR',
       embedEndpoint: 'Embedding 端点',
       embedModel: 'Embedding 模型',
+      sameAsLlm: '与 LLM 保持一致',
+      endpointAndKey: '端点与 Key',
       saveRag: '保存 RAG 设置',
       saved: '已保存，即时生效。',
       saveFailed: '保存失败',

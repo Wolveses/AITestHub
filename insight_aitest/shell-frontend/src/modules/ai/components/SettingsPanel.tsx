@@ -19,6 +19,9 @@ export function SettingsPanel() {
   const [form, setForm] = useState<AIConfigUpdate>({});
   const [vectorExpanded, setVectorExpanded] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // 「与 LLM 保持一致」：URL 与 Key 都为空即视为复用 LLM 配置
+  const [embedSameAsLlm, setEmbedSameAsLlm] = useState(false);
+  const [rerankSameAsLlm, setRerankSameAsLlm] = useState(false);
 
   useEffect(() => {
     loadConfig();
@@ -50,6 +53,8 @@ export function SettingsPanel() {
         max_upload_mb: config.max_upload_mb ?? 100,
       });
       setVectorExpanded(config.vector_enabled);
+      setEmbedSameAsLlm(!config.embed_base_url && !config.embed_api_key_set);
+      setRerankSameAsLlm(!config.rerank_base_url && !config.rerank_api_key_set);
     }
   }
 
@@ -64,8 +69,18 @@ export function SettingsPanel() {
     setMsg(null);
     try {
       const payload = { ...form };
-      if (!payload.embed_api_key) {
+      if (embedSameAsLlm) {
+        // 勾选后显式清空，后端按空值回退到 LLM 的 URL / API Key
+        payload.embed_base_url = '';
+        payload.embed_api_key = '';
+      } else if (!payload.embed_api_key) {
         delete payload.embed_api_key;
+      }
+      if (rerankSameAsLlm) {
+        payload.rerank_base_url = '';
+        payload.rerank_api_key = '';
+      } else if (!payload.rerank_api_key) {
+        delete payload.rerank_api_key;
       }
       await updateConfig(payload);
       setMsg({ ok: true, text: t('settings.saved') });
@@ -109,17 +124,29 @@ export function SettingsPanel() {
             </label>
           </Row>
 
-          <Row label={t('settings.embedEndpoint')}>
-            <input style={inputStyle} value={form.embed_base_url ?? ''} autoComplete="off"
-              placeholder={t('settings.embedEndpointPlaceholder')}
-              onChange={(e) => set('embed_base_url', e.target.value)} />
+          <Row label={t('settings.endpointAndKey')}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: "var(--text-secondary)", cursor: 'pointer' }}>
+              <input type="checkbox" checked={embedSameAsLlm}
+                onChange={(e) => setEmbedSameAsLlm(e.target.checked)} />
+              {t('settings.sameAsLlm')}
+            </label>
           </Row>
 
-          <Row label={t('settings.embedApiKey')}>
-            <input style={inputStyle} type="password" autoComplete="new-password" value={form.embed_api_key ?? ''}
-              placeholder={config.embed_api_key_set ? t('settings.apiKeySet') : t('settings.embedApiKeyPlaceholder')}
-              onChange={(e) => set('embed_api_key', e.target.value)} />
-          </Row>
+          {!embedSameAsLlm && (
+            <>
+              <Row label={t('settings.embedEndpoint')}>
+                <input style={inputStyle} value={form.embed_base_url ?? ''} autoComplete="off"
+                  placeholder={t('settings.embedEndpointPlaceholder')}
+                  onChange={(e) => set('embed_base_url', e.target.value)} />
+              </Row>
+
+              <Row label={t('settings.embedApiKey')}>
+                <input style={inputStyle} type="password" autoComplete="new-password" value={form.embed_api_key ?? ''}
+                  placeholder={config.embed_api_key_set ? t('settings.apiKeySet') : t('settings.embedApiKeyPlaceholder')}
+                  onChange={(e) => set('embed_api_key', e.target.value)} />
+              </Row>
+            </>
+          )}
 
           <Row label={t('settings.vectorModel')}>
             <input style={inputStyle} value={form.embed_model ?? ''}
@@ -208,26 +235,38 @@ export function SettingsPanel() {
 
               {form.rerank_provider === 'cross_encoder' && (
                 <>
-                  <Row label={t('settings.rerankBaseUrl')}>
-                    <input
-                      style={inputStyle}
-                      type="text"
-                      autoComplete="off"
-                      placeholder={t('settings.rerankBaseUrlPlaceholder')}
-                      value={form.rerank_base_url ?? ''}
-                      onChange={(e) => set('rerank_base_url', e.target.value)}
-                    />
+                  <Row label={t('settings.endpointAndKey')}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: "var(--text-secondary)", cursor: 'pointer' }}>
+                      <input type="checkbox" checked={rerankSameAsLlm}
+                        onChange={(e) => setRerankSameAsLlm(e.target.checked)} />
+                      {t('settings.sameAsLlm')}
+                    </label>
                   </Row>
-                  <Row label={t('settings.rerankApiKey')}>
-                    <input
-                      style={inputStyle}
-                      type="password"
-                      autoComplete="new-password"
-                      placeholder={config.rerank_api_key_set ? '••••••••' : t('settings.rerankApiKeyPlaceholder')}
-                      value={form.rerank_api_key ?? ''}
-                      onChange={(e) => set('rerank_api_key', e.target.value)}
-                    />
-                  </Row>
+
+                  {!rerankSameAsLlm && (
+                    <>
+                      <Row label={t('settings.rerankBaseUrl')}>
+                        <input
+                          style={inputStyle}
+                          type="text"
+                          autoComplete="off"
+                          placeholder={t('settings.rerankBaseUrlPlaceholder')}
+                          value={form.rerank_base_url ?? ''}
+                          onChange={(e) => set('rerank_base_url', e.target.value)}
+                        />
+                      </Row>
+                      <Row label={t('settings.rerankApiKey')}>
+                        <input
+                          style={inputStyle}
+                          type="password"
+                          autoComplete="new-password"
+                          placeholder={config.rerank_api_key_set ? '••••••••' : t('settings.rerankApiKeyPlaceholder')}
+                          value={form.rerank_api_key ?? ''}
+                          onChange={(e) => set('rerank_api_key', e.target.value)}
+                        />
+                      </Row>
+                    </>
+                  )}
                   <Row label={t('settings.rerankModel')}>
                     <input
                       style={inputStyle}
