@@ -46,7 +46,7 @@ def _env_out(env) -> dict:
 
 
 @router.post("", status_code=201)
-async def create_env(body: EnvCreate, db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
+def create_env(body: EnvCreate, db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
     if db.get_by_name(body.name):
         raise HTTPException(409, f"环境名 '{body.name}' 已存在")
     eid = db.create(
@@ -60,7 +60,7 @@ async def create_env(body: EnvCreate, db: EnvironmentDatabase = Depends(get_env_
 
 
 @router.get("")
-async def list_envs(db: EnvironmentDatabase = Depends(get_env_db)) -> list[dict]:
+def list_envs(db: EnvironmentDatabase = Depends(get_env_db)) -> list[dict]:
     return [_env_out(e) for e in db.list()]
 
 
@@ -68,7 +68,7 @@ async def list_envs(db: EnvironmentDatabase = Depends(get_env_db)) -> list[dict]
 
 
 @router.get("/export")
-async def export_envs(db: EnvironmentDatabase = Depends(get_env_db)) -> Response:
+def export_envs(db: EnvironmentDatabase = Depends(get_env_db)) -> Response:
     """导出所有环境为 JSON。"""
     import json
 
@@ -82,7 +82,7 @@ async def export_envs(db: EnvironmentDatabase = Depends(get_env_db)) -> Response
 
 
 @router.post("/import")
-async def import_envs(body: list[dict], db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
+def import_envs(body: list[dict], db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
     """批量导入环境 JSON。
 
     已存在的环境名跳过（不覆盖）。
@@ -108,7 +108,7 @@ async def import_envs(body: list[dict], db: EnvironmentDatabase = Depends(get_en
 
 
 @router.get("/{env_id}")
-async def get_env(env_id: int, db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
+def get_env(env_id: int, db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
     env = db.get(env_id)
     if not env:
         raise HTTPException(404, "环境不存在")
@@ -116,7 +116,7 @@ async def get_env(env_id: int, db: EnvironmentDatabase = Depends(get_env_db)) ->
 
 
 @router.put("/{env_id}")
-async def update_env(
+def update_env(
     env_id: int, body: EnvUpdate, db: EnvironmentDatabase = Depends(get_env_db)
 ) -> dict:
     if not db.get(env_id):
@@ -128,7 +128,7 @@ async def update_env(
 
 
 @router.post("/{env_id}/clone", status_code=201)
-async def clone_env(
+def clone_env(
     env_id: int, body: CloneRequest, db: EnvironmentDatabase = Depends(get_env_db)
 ) -> dict:
     """克隆环境。"""
@@ -142,7 +142,7 @@ async def clone_env(
 
 
 @router.delete("/{env_id}")
-async def delete_env(env_id: int, db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
+def delete_env(env_id: int, db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
     if not db.delete(env_id):
         raise HTTPException(404, "环境不存在")
     return {"deleted": env_id}

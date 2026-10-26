@@ -156,13 +156,13 @@ def build_projects_router() -> APIRouter:
     # ----- Project CRUD -----
 
     @router.get("/projects")
-    async def list_projects() -> list[dict[str, Any]]:
+    def list_projects() -> list[dict[str, Any]]:
         db = get_project_db()
         projects = db.list_projects()
         return [_project_to_dict(p, db.count_versions(p.id)) for p in projects]
 
     @router.post("/projects", status_code=201)
-    async def create_project(body: ProjectCreate) -> dict[str, Any]:
+    def create_project(body: ProjectCreate) -> dict[str, Any]:
         db = get_project_db()
         if db.name_exists(body.name):
             raise HTTPException(409, f"项目名「{body.name}」已存在")
@@ -170,7 +170,7 @@ def build_projects_router() -> APIRouter:
         return _project_to_dict(db.get_project(pid))
 
     @router.get("/projects/{project_id}")
-    async def get_project(project_id: int) -> dict[str, Any]:
+    def get_project(project_id: int) -> dict[str, Any]:
         db = get_project_db()
         p = db.get_project(project_id)
         if p is None:
@@ -178,7 +178,7 @@ def build_projects_router() -> APIRouter:
         return _project_to_dict(p, db.count_versions(project_id))
 
     @router.put("/projects/{project_id}")
-    async def update_project(project_id: int, body: ProjectUpdate) -> dict[str, Any]:
+    def update_project(project_id: int, body: ProjectUpdate) -> dict[str, Any]:
         db = get_project_db()
         p = db.get_project(project_id)
         if p is None:
@@ -198,7 +198,7 @@ def build_projects_router() -> APIRouter:
         return _project_to_dict(db.get_project(project_id), db.count_versions(project_id))
 
     @router.delete("/projects/{project_id}")
-    async def delete_project(project_id: int) -> dict[str, Any]:
+    def delete_project(project_id: int) -> dict[str, Any]:
         db = get_project_db()
         p = db.get_project(project_id)
         if p is None:
@@ -233,7 +233,7 @@ def build_projects_router() -> APIRouter:
     # ----- Version CRUD -----
 
     @router.get("/projects/{project_id}/versions")
-    async def list_versions(project_id: int) -> list[dict[str, Any]]:
+    def list_versions(project_id: int) -> list[dict[str, Any]]:
         db = get_project_db()
         p = db.get_project(project_id)
         if p is None:
@@ -241,7 +241,7 @@ def build_projects_router() -> APIRouter:
         return [_version_to_dict(v) for v in db.list_versions(project_id)]
 
     @router.post("/projects/{project_id}/versions", status_code=201)
-    async def create_version(project_id: int, body: VersionCreate) -> dict[str, Any]:
+    def create_version(project_id: int, body: VersionCreate) -> dict[str, Any]:
         db = get_project_db()
         p = db.get_project(project_id)
         if p is None:
@@ -254,7 +254,7 @@ def build_projects_router() -> APIRouter:
         return _version_to_dict(db.get_version(vid))
 
     @router.put("/versions/{version_id}")
-    async def update_version(version_id: int, body: VersionUpdate) -> dict[str, Any]:
+    def update_version(version_id: int, body: VersionUpdate) -> dict[str, Any]:
         db = get_project_db()
         v = db.get_version(version_id)
         if v is None:
@@ -271,7 +271,7 @@ def build_projects_router() -> APIRouter:
         return _version_to_dict(db.get_version(version_id))
 
     @router.delete("/versions/{version_id}")
-    async def delete_version(version_id: int) -> dict[str, Any]:
+    def delete_version(version_id: int) -> dict[str, Any]:
         db = get_project_db()
         v = db.get_version(version_id)
         if v is None:

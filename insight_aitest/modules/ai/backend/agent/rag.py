@@ -109,7 +109,15 @@ class RagAgent:
         thinking_level != "off" 时读 reasoning 发 thinking 事件（按模型族探测注入参数）。
         project_id 非 None 时按项目隔离检索（KB 升级，杜绝跨项目污染）。
         """
-        scored = self._retrieve(query, document_ids, project_id=project_id) if use_rag else []
+        # 检索是同步阻塞调用（embedding HTTP + sqlite KNN），放线程池，
+        # 避免首个事件发出前卡住事件循环。
+        scored = (
+            await asyncio.to_thread(
+                self._retrieve, query, document_ids, project_id=project_id
+            )
+            if use_rag
+            else []
+        )
         citations = self._to_citations(scored)
         yield StreamEvent(type="citations", data=citations)
 

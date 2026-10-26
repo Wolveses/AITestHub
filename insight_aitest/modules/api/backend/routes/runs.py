@@ -75,7 +75,7 @@ def _run_out(run: RunRecord) -> dict:
 
 
 @router.post("/execute")
-async def execute_case(
+def execute_case(
     body: ExecuteRequest,
     environment_id: int | None = Query(None),
     db: RunDatabase = Depends(get_run_db),
@@ -136,7 +136,7 @@ async def execute_case(
 
 
 @router.get("")
-async def list_runs(
+def list_runs(
     case_id: int | None = Query(None),
     status: str | None = Query(None),
     project_id: int | None = Query(None),
@@ -151,7 +151,7 @@ async def list_runs(
 
 
 @router.get("/stats")
-async def stats(case_id: int | None = Query(None), db: RunDatabase = Depends(get_run_db)) -> dict:
+def stats(case_id: int | None = Query(None), db: RunDatabase = Depends(get_run_db)) -> dict:
     rows = db.list_runs(case_id=case_id, limit=1000)
     total = len(rows)
     by = {"passed": 0, "failed": 0, "error": 0}
@@ -231,7 +231,7 @@ async def stats(case_id: int | None = Query(None), db: RunDatabase = Depends(get
 
 
 @router.get("/{run_id}")
-async def get_run(run_id: int, db: RunDatabase = Depends(get_run_db)) -> dict:
+def get_run(run_id: int, db: RunDatabase = Depends(get_run_db)) -> dict:
     run = db.get_run(run_id)
     if not run:
         raise HTTPException(404, "执行记录不存在")
@@ -239,7 +239,7 @@ async def get_run(run_id: int, db: RunDatabase = Depends(get_run_db)) -> dict:
 
 
 @router.delete("/{run_id}")
-async def delete_run(run_id: int, db: RunDatabase = Depends(get_run_db)) -> dict:
+def delete_run(run_id: int, db: RunDatabase = Depends(get_run_db)) -> dict:
     if not db.delete_run(run_id):
         raise HTTPException(404, "执行记录不存在")
     return {"deleted": run_id}

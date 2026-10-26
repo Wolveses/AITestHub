@@ -189,18 +189,18 @@ def _to_config_out(cfg: AIConfig) -> ConfigOut:
 
 
 @router.get("/presets")
-async def get_presets() -> dict:
+def get_presets() -> dict:
     """返回内置 Provider 预设（前端面板快捷填充）。"""
     return {"presets": PROVIDER_PRESETS}
 
 
 @router.get("", response_model=ConfigOut)
-async def get_config_route(cfg: AIConfig = Depends(get_config)) -> ConfigOut:
+def get_config_route(cfg: AIConfig = Depends(get_config)) -> ConfigOut:
     return _to_config_out(cfg)
 
 
 @router.put("", response_model=ConfigOut)
-async def update_config(body: ConfigUpdate, cfg: AIConfig = Depends(get_config)) -> ConfigOut:
+def update_config(body: ConfigUpdate, cfg: AIConfig = Depends(get_config)) -> ConfigOut:
     # embed_dim 不允许热更新（维度变 = 向量表失效）
     if body.embed_dim is not None and body.embed_dim != cfg.embed_dim:
         raise HTTPException(400, "embed_dim 不支持热更新，需重新索引所有文档")
@@ -251,14 +251,14 @@ async def update_config(body: ConfigUpdate, cfg: AIConfig = Depends(get_config))
 
 
 @router.post("/test")
-async def test_provider(body: TestRequest) -> dict:
+def test_provider(body: TestRequest) -> dict:
     """临时 client 探测连通性（不写配置、不动单例）。"""
     ok, msg = test_connection(body.base_url, body.api_key, body.model)
     return {"ok": ok, "message": msg}
 
 
 @router.put("/providers/{provider_id}", response_model=ConfigOut)
-async def upsert_provider(
+def upsert_provider(
     provider_id: str,
     body: ProviderUpsert,
     cfg: AIConfig = Depends(get_config),
@@ -298,7 +298,7 @@ async def upsert_provider(
 
 
 @router.delete("/providers/{provider_id}", response_model=ConfigOut)
-async def delete_provider(
+def delete_provider(
     provider_id: str,
     cfg: AIConfig = Depends(get_config),
 ) -> ConfigOut:
@@ -317,7 +317,7 @@ async def delete_provider(
 
 
 @router.put("/activate/{provider_id}", response_model=ConfigOut)
-async def activate_provider(
+def activate_provider(
     provider_id: str,
     cfg: AIConfig = Depends(get_config),
 ) -> ConfigOut:

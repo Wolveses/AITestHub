@@ -78,7 +78,7 @@ class ExecuteResponse(BaseModel):
 
 
 @router.post("/{suite_id}/execute", response_model=ExecuteResponse)
-async def execute_suite_endpoint(
+def execute_suite_endpoint(
     suite_id: int,
     background_tasks: BackgroundTasks,
     environment_id: int | None = Query(None),
@@ -177,7 +177,7 @@ def _fetch_child_runs(case_run_ids: list[int]) -> list:
 
 
 @router.get("/runs")
-async def list_suite_runs(
+def list_suite_runs(
     suite_id: int | None = Query(None),
     status: str | None = Query(None),
     limit: int = Query(50),
@@ -189,7 +189,7 @@ async def list_suite_runs(
 
 
 @router.get("/runs/{run_id}")
-async def get_suite_run(run_id: int, db: SuiteRunDatabase = Depends(get_suite_run_db)) -> dict:
+def get_suite_run(run_id: int, db: SuiteRunDatabase = Depends(get_suite_run_db)) -> dict:
     sr = db.get(run_id)
     if not sr:
         raise HTTPException(404, "套件执行记录不存在")
@@ -210,7 +210,7 @@ async def get_suite_run(run_id: int, db: SuiteRunDatabase = Depends(get_suite_ru
 
 
 @router.delete("/runs/{run_id}")
-async def delete_suite_run(run_id: int, db: SuiteRunDatabase = Depends(get_suite_run_db)) -> dict:
+def delete_suite_run(run_id: int, db: SuiteRunDatabase = Depends(get_suite_run_db)) -> dict:
     if not db.delete(run_id):
         raise HTTPException(404, "套件执行记录不存在")
     return {"deleted": run_id}
@@ -235,7 +235,7 @@ def _suite_run_to_dict(sr) -> dict:
 
 
 @router.get("/runs/{run_id}/report.html")
-async def suite_run_report_html(
+def suite_run_report_html(
     run_id: int, suite_run_db: SuiteRunDatabase = Depends(get_suite_run_db)
 ) -> Response:
     """套件聚合 HTML 报告。"""
@@ -250,7 +250,7 @@ async def suite_run_report_html(
 
 
 @router.get("/runs/{run_id}/report.junit.xml")
-async def suite_run_report_junit(
+def suite_run_report_junit(
     run_id: int, suite_run_db: SuiteRunDatabase = Depends(get_suite_run_db)
 ) -> Response:
     """套件 JUnit XML 报告（CI/CD 集成）。"""
@@ -270,7 +270,7 @@ async def suite_run_report_junit(
 
 # ===== 套件 CRUD（动态路径 /{suite_id}）=====
 @router.post("", status_code=201)
-async def create_suite(body: SuiteCreate, db: SuiteDatabase = Depends(get_suite_db)) -> dict:
+def create_suite(body: SuiteCreate, db: SuiteDatabase = Depends(get_suite_db)) -> dict:
     sid = db.create(
         Suite(
             name=body.name,
@@ -284,12 +284,12 @@ async def create_suite(body: SuiteCreate, db: SuiteDatabase = Depends(get_suite_
 
 
 @router.get("")
-async def list_suites(db: SuiteDatabase = Depends(get_suite_db)) -> list[dict]:
+def list_suites(db: SuiteDatabase = Depends(get_suite_db)) -> list[dict]:
     return [_suite_out(s) for s in db.list()]
 
 
 @router.get("/{suite_id}")
-async def get_suite(suite_id: int, db: SuiteDatabase = Depends(get_suite_db)) -> dict:
+def get_suite(suite_id: int, db: SuiteDatabase = Depends(get_suite_db)) -> dict:
     s = db.get(suite_id)
     if not s:
         raise HTTPException(404, "套件不存在")
@@ -297,7 +297,7 @@ async def get_suite(suite_id: int, db: SuiteDatabase = Depends(get_suite_db)) ->
 
 
 @router.put("/{suite_id}")
-async def update_suite(
+def update_suite(
     suite_id: int, body: SuiteUpdate, db: SuiteDatabase = Depends(get_suite_db)
 ) -> dict:
     if not db.get(suite_id):
@@ -307,7 +307,7 @@ async def update_suite(
 
 
 @router.delete("/{suite_id}")
-async def delete_suite(suite_id: int, db: SuiteDatabase = Depends(get_suite_db)) -> dict:
+def delete_suite(suite_id: int, db: SuiteDatabase = Depends(get_suite_db)) -> dict:
     if not db.delete(suite_id):
         raise HTTPException(404, "套件不存在")
     return {"deleted": suite_id}

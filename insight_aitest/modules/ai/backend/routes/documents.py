@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import threading
@@ -56,7 +57,7 @@ def _doc_to_out(doc) -> DocumentOut:
 
 
 @router.get("", response_model=list[DocumentOut])
-async def list_documents(db: KBDatabase = Depends(get_kb_db)) -> list[DocumentOut]:
+def list_documents(db: KBDatabase = Depends(get_kb_db)) -> list[DocumentOut]:
     return [_doc_to_out(d) for d in db.list_documents()]
 
 
@@ -77,21 +78,25 @@ async def upload_document(
     if len(content) > cfg.max_upload_mb * 1024 * 1024:
         raise HTTPException(413, f"文件超过 {cfg.max_upload_mb}MB 限制")
 
-    # 3. 去重
-    content_hash = hashlib.sha256(content).hexdigest()
-    existing = db.find_by_content_hash(content_hash)
-    if existing:
-        return _doc_to_out(existing)
+    # 3~5. 去重 / 存原始文件 / 入库（同步 IO 统一放线程池，避免阻塞事件循环）
+    def _store() -> tuple[int | None, DocumentOut]:
+        content_hash = hashlib.sha256(content).hexdigest()
+        existing = db.find_by_content_hash(content_hash)
+        if existing:
+            return None, _doc_to_out(existing)
+        ext = Path(file.filename or "").suffix
+        docs_dir = Path(cfg.docs_dir)
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        storage_path = docs_dir / f"{uuid.uuid4().hex}{ext}"
+        storage_path.write_bytes(content)
+        doc_id = db.create_document(
+            file.filename, str(storage_path), content_hash, file.content_type
+        )
+        return doc_id, _doc_to_out(db.get_document(doc_id))
 
-    # 4. 存原始文件
-    ext = Path(file.filename or "").suffix
-    docs_dir = Path(cfg.docs_dir)
-    docs_dir.mkdir(parents=True, exist_ok=True)
-    storage_path = docs_dir / f"{uuid.uuid4().hex}{ext}"
-    storage_path.write_bytes(content)
-
-    # 5. 入库
-    doc_id = db.create_document(file.filename, str(storage_path), content_hash, file.content_type)
+    doc_id, out = await asyncio.to_thread(_store)
+    if doc_id is None:
+        return out
 
     # 6. 后台线程处理
     def _bg():
@@ -106,11 +111,11 @@ async def upload_document(
 
     threading.Thread(target=_bg, daemon=True).start()
 
-    return _doc_to_out(db.get_document(doc_id))
+    return out
 
 
 @router.get("/{doc_id}", response_model=DocumentOut)
-async def get_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOut:
+def get_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOut:
     doc = db.get_document(doc_id)
     if not doc:
         raise HTTPException(404, "文档不存在")
@@ -118,7 +123,7 @@ async def get_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> Docu
 
 
 @router.delete("/{doc_id}")
-async def delete_document(
+def delete_document(
     doc_id: int, db: KBDatabase = Depends(get_kb_db), vs=Depends(get_vector_store)
 ) -> dict:
     doc = db.get_document(doc_id)
@@ -140,7 +145,7 @@ async def delete_document(
 
 
 @router.post("/{doc_id}/reindex", response_model=DocumentOut)
-async def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOut:
+def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOut:
     """重新索引（换 embedding 模型后用）。删旧向量与 chunks，状态置 pending。"""
     doc = db.get_document(doc_id)
     if not doc:

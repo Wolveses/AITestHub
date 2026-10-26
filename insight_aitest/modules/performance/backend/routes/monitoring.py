@@ -80,7 +80,7 @@ async def stop_monitoring(request: StopMonitoringRequest):
 
 
 @router.get("/sessions")
-async def list_sessions(limit: int = 100, project_id: int | None = None):
+def list_sessions(limit: int = 100, project_id: int | None = None):
     """列出所有会话（可按项目过滤）"""
     try:
         import os
@@ -109,7 +109,7 @@ async def list_sessions(limit: int = 100, project_id: int | None = None):
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: int):
+def get_session(session_id: int):
     """获取会话详情"""
     try:
         import os
@@ -140,7 +140,7 @@ async def get_session(session_id: int):
 
 
 @router.get("/sessions/{session_id}/metrics")
-async def get_session_metrics(session_id: int, limit: int = 1000):
+def get_session_metrics(session_id: int, limit: int = 1000):
     """获取会话的所有指标数据"""
     try:
         import os
@@ -176,7 +176,7 @@ async def get_session_metrics(session_id: int, limit: int = 1000):
 
 
 @router.get("/sessions/{session_id}/statistics")
-async def get_session_statistics(session_id: int):
+def get_session_statistics(session_id: int):
     """获取会话的统计数据"""
     try:
         import os
@@ -203,7 +203,7 @@ async def get_session_statistics(session_id: int):
 
 
 @router.get("/sessions/{session_id}/alerts")
-async def get_session_alerts(session_id: int):
+def get_session_alerts(session_id: int):
     """获取会话的告警记录"""
     try:
         import os
@@ -242,7 +242,7 @@ async def get_session_alerts(session_id: int):
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: int):
+def delete_session(session_id: int):
     """删除指定会话及其相关数据"""
     try:
         import os
@@ -266,7 +266,7 @@ async def delete_session(session_id: int):
 
 
 @router.post("/sessions/batch-delete")
-async def batch_delete_sessions(session_ids: list[int]):
+def batch_delete_sessions(session_ids: list[int]):
     """批量删除会话"""
     try:
         import os

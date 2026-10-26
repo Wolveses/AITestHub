@@ -219,7 +219,7 @@ async def execute_batch(
 
 
 @router.get("/runs")
-async def list_batch_runs(
+def list_batch_runs(
     limit: int = Query(50),
     offset: int = Query(0),
     db: UIBatchRunDatabase = Depends(get_batch_db),
@@ -228,7 +228,7 @@ async def list_batch_runs(
 
 
 @router.get("/runs/{batch_id}")
-async def get_batch_run(
+def get_batch_run(
     batch_id: int,
     db: UIBatchRunDatabase = Depends(get_batch_db),
     run_db: UIRunDatabase = Depends(get_run_db),
@@ -258,7 +258,7 @@ async def get_batch_run(
 
 
 @router.delete("/runs/{batch_id}")
-async def delete_batch_run(
+def delete_batch_run(
     batch_id: int,
     db: UIBatchRunDatabase = Depends(get_batch_db),
 ) -> dict:

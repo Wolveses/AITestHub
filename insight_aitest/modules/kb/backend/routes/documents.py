@@ -10,6 +10,7 @@ KB 升级新增：project_id/version_id 分类筛选 + 上传时关联项目 +
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -116,7 +117,7 @@ class MoveDocumentIn(BaseModel):
 
 
 @router.get("", response_model=dict)
-async def list_documents(
+def list_documents(
     project_id: int | None = None,
     version_id: int | None = None,
     folder_id: int | None = None,
@@ -149,7 +150,7 @@ async def list_documents(
 
 
 @router.patch("/{doc_id}/move", response_model=DocumentOut)
-async def move_document(
+def move_document(
     doc_id: int,
     body: MoveDocumentIn,
     db: KBDatabase = Depends(get_kb_db),
@@ -180,29 +181,31 @@ async def upload_document(
     if len(content) > cfg.max_upload_mb * 1024 * 1024:
         raise HTTPException(413, f"文件超过 {cfg.max_upload_mb}MB 限制")
 
-    # 3. 去重
-    content_hash = hashlib.sha256(content).hexdigest()
-    existing = db.find_by_content_hash(content_hash)
-    if existing:
-        return _doc_to_out(existing)
+    # 3~5. 去重 / 存原始文件 / 入库（同步 IO 统一放线程池，避免阻塞事件循环）
+    def _store() -> tuple[int | None, DocumentOut]:
+        content_hash = hashlib.sha256(content).hexdigest()
+        existing = db.find_by_content_hash(content_hash)
+        if existing:
+            return None, _doc_to_out(existing)
+        ext = Path(file.filename or "").suffix
+        docs_dir = Path(cfg.docs_dir)
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        storage_path = docs_dir / f"{uuid.uuid4().hex}{ext}"
+        storage_path.write_bytes(content)
+        doc_id = db.create_document(
+            file.filename,
+            str(storage_path),
+            content_hash,
+            file.content_type,
+            project_id=project_id,
+            version_id=version_id,
+            folder_id=folder_id,
+        )
+        return doc_id, _doc_to_out(db.get_document(doc_id))
 
-    # 4. 存原始文件
-    ext = Path(file.filename or "").suffix
-    docs_dir = Path(cfg.docs_dir)
-    docs_dir.mkdir(parents=True, exist_ok=True)
-    storage_path = docs_dir / f"{uuid.uuid4().hex}{ext}"
-    storage_path.write_bytes(content)
-
-    # 5. 入库（关联项目/版本/文件夹）
-    doc_id = db.create_document(
-        file.filename,
-        str(storage_path),
-        content_hash,
-        file.content_type,
-        project_id=project_id,
-        version_id=version_id,
-        folder_id=folder_id,
-    )
+    doc_id, out = await asyncio.to_thread(_store)
+    if doc_id is None:
+        return out
 
     # 6. 后台线程处理
     def _bg():
@@ -217,11 +220,11 @@ async def upload_document(
 
     threading.Thread(target=_bg, daemon=True).start()
 
-    return _doc_to_out(db.get_document(doc_id))
+    return out
 
 
 @router.get("/{doc_id}", response_model=DocumentOut)
-async def get_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOut:
+def get_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOut:
     doc = db.get_document(doc_id)
     if not doc:
         raise HTTPException(404, "文档不存在")
@@ -229,7 +232,7 @@ async def get_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> Docu
 
 
 @router.delete("/{doc_id}")
-async def delete_document(
+def delete_document(
     doc_id: int, db: KBDatabase = Depends(get_kb_db), vs=Depends(get_vector_store)
 ) -> dict:
     doc = db.get_document(doc_id)
@@ -278,7 +281,7 @@ def is_reindexing(doc_id: int) -> bool:
 
 
 @router.post("/{doc_id}/reindex", response_model=DocumentOut)
-async def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db), cfg=Depends(get_config)) -> DocumentOut:
+def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db), cfg=Depends(get_config)) -> DocumentOut:
     """重新索引（删旧向量与 chunks，后台重新解析向量化）。
 
     RAG 关闭时仍执行：清旧分块 → 重新解析分块 → 跳过向量化 → 状态 NOT_VECTORIZED。
@@ -343,7 +346,7 @@ def _reindex_in_bg(doc_id: int, db: KBDatabase, reserved: bool = False) -> None:
 
 
 @router.get("/{doc_id}/content")
-async def get_document_content(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> dict:
+def get_document_content(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> dict:
     """返回文档解析后的纯文本（拼接 chunks）。用于前端预览/编辑加载。"""
     doc = db.get_document(doc_id)
     if not doc:
@@ -359,7 +362,7 @@ async def get_document_content(doc_id: int, db: KBDatabase = Depends(get_kb_db))
 
 
 @router.get("/{doc_id}/chunks")
-async def list_document_chunks(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> dict:
+def list_document_chunks(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> dict:
     """返回文档的全部分块列表（只读，供前端诊断分块效果）。"""
     doc = db.get_document(doc_id)
     if not doc:
@@ -386,7 +389,7 @@ async def list_document_chunks(doc_id: int, db: KBDatabase = Depends(get_kb_db))
 
 
 @router.get("/{doc_id}/raw")
-async def download_document_raw(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> FileResponse:
+def download_document_raw(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> FileResponse:
     """下载文档原始文件（保留原扩展名）。"""
     doc = db.get_document(doc_id)
     if not doc:
@@ -400,7 +403,7 @@ async def download_document_raw(doc_id: int, db: KBDatabase = Depends(get_kb_db)
 
 
 @router.get("/export/zip")
-async def export_documents_zip(
+def export_documents_zip(
     project_id: int | None = None,
     version_id: int | None = None,
     db: KBDatabase = Depends(get_kb_db),
@@ -440,7 +443,7 @@ class DocumentContentUpdate(BaseModel):
 
 
 @router.put("/{doc_id}/content", response_model=DocumentOut)
-async def update_document_content(
+def update_document_content(
     doc_id: int,
     body: DocumentContentUpdate,
     db: KBDatabase = Depends(get_kb_db),
@@ -497,7 +500,7 @@ async def update_document_file(
 
     前端在线编辑器（SuperDoc/Univer）导出 Blob 后通过 FormData 上传到此端点。
     """
-    doc = db.get_document(doc_id)
+    doc = await asyncio.to_thread(db.get_document, doc_id)
     if not doc:
         raise HTTPException(404, "文档不存在")
 
@@ -505,32 +508,36 @@ async def update_document_file(
     if len(content) > cfg.max_upload_mb * 1024 * 1024:
         raise HTTPException(413, f"文件超过 {cfg.max_upload_mb}MB 限制")
 
-    # 1. 保留旧版本快照
-    old_path = Path(doc.storage_path)
-    if old_path.exists():
-        version_dir = old_path.parent / "versions"
-        version_dir.mkdir(parents=True, exist_ok=True)
-        snapshot_path = version_dir / f"{doc_id}_v{uuid.uuid4().hex[:8]}{old_path.suffix}"
-        snapshot_path.write_bytes(old_path.read_bytes())
-        db.create_version_snapshot(
-            doc_id,
-            str(snapshot_path),
-            doc.content_hash,
-            doc.char_count,
-            doc.chunk_count,
-            note=note,
-        )
+    # 1~2. 版本快照 + 写新文件 + 更新记录（同步 IO 统一放线程池）
+    def _save() -> DocumentOut:
+        old_path = Path(doc.storage_path)
+        if old_path.exists():
+            version_dir = old_path.parent / "versions"
+            version_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_path = version_dir / f"{doc_id}_v{uuid.uuid4().hex[:8]}{old_path.suffix}"
+            snapshot_path.write_bytes(old_path.read_bytes())
+            db.create_version_snapshot(
+                doc_id,
+                str(snapshot_path),
+                doc.content_hash,
+                doc.char_count,
+                doc.chunk_count,
+                note=note,
+            )
 
-    # 2. 写新文件（保留原扩展名，覆盖 storage_path）
-    ext = Path(doc.filename).suffix
-    new_path = old_path.parent / f"{uuid.uuid4().hex}{ext}"
-    new_path.write_bytes(content)
-    new_hash = hashlib.sha256(content).hexdigest()
-    db.update_document_file(doc_id, str(new_path), new_hash)
+        # 保留原扩展名，写入新的 storage_path
+        ext = Path(doc.filename).suffix
+        new_path = old_path.parent / f"{uuid.uuid4().hex}{ext}"
+        new_path.write_bytes(content)
+        new_hash = hashlib.sha256(content).hexdigest()
+        db.update_document_file(doc_id, str(new_path), new_hash)
+        return _doc_to_out(db.get_document(doc_id))
+
+    out = await asyncio.to_thread(_save)
 
     # 3. 后台 reindex
     threading.Thread(target=_reindex_in_bg, args=(doc_id, db), daemon=True).start()
-    return _doc_to_out(db.get_document(doc_id))
+    return out
 
 
 # ----- 标签与元数据 -----
@@ -543,7 +550,7 @@ class DocumentMetaUpdate(BaseModel):
 
 
 @router.put("/{doc_id}/meta", response_model=DocumentOut)
-async def update_document_meta(
+def update_document_meta(
     doc_id: int,
     body: DocumentMetaUpdate,
     db: KBDatabase = Depends(get_kb_db),
@@ -560,7 +567,7 @@ async def update_document_meta(
 
 
 @router.get("/tags/all")
-async def list_all_tags(
+def list_all_tags(
     project_id: int | None = None, db: KBDatabase = Depends(get_kb_db)
 ) -> list[dict]:
     """聚合返回所有标签及计数（供标签云）。"""
@@ -595,7 +602,7 @@ class VersionOut(BaseModel):
 
 
 @router.get("/{doc_id}/versions", response_model=list[VersionOut])
-async def list_document_versions(
+def list_document_versions(
     doc_id: int, db: KBDatabase = Depends(get_kb_db)
 ) -> list[VersionOut]:
     """列出文档的版本历史（按版本号降序）。"""
@@ -606,7 +613,7 @@ async def list_document_versions(
 
 
 @router.get("/{doc_id}/versions/{version_no}/content")
-async def get_version_content(
+def get_version_content(
     doc_id: int, version_no: int, db: KBDatabase = Depends(get_kb_db)
 ) -> dict:
     """读取指定历史版本的纯文本内容（用于版本对比）。"""
@@ -636,7 +643,7 @@ async def get_version_content(
 
 
 @router.post("/{doc_id}/rollback/{version_no}", response_model=DocumentOut)
-async def rollback_to_version(
+def rollback_to_version(
     doc_id: int, version_no: int, db: KBDatabase = Depends(get_kb_db)
 ) -> DocumentOut:
     """回滚到指定版本：当前内容另存快照 → 目标版本写回 → 后台 reindex。"""

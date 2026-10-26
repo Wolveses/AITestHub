@@ -16,7 +16,7 @@ router = APIRouter(prefix="/runs", tags=["api"])
 
 
 @router.get("/{run_id}/report.html")
-async def run_report_html(run_id: int, db: RunDatabase = Depends(get_run_db)) -> Response:
+def run_report_html(run_id: int, db: RunDatabase = Depends(get_run_db)) -> Response:
     """单次执行的 HTML 报告。"""
     run = db.get_run(run_id)
     if not run:

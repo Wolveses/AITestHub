@@ -42,16 +42,16 @@ def build_platform_router() -> APIRouter:
     router = APIRouter(tags=["platform"])
 
     @router.get("/modules")
-    async def list_modules() -> list[dict[str, Any]]:
+    def list_modules() -> list[dict[str, Any]]:
         """返回已加载模块清单（前端据此生成路由/菜单/卡片）。"""
         return _registry_view()
 
     @router.get("/health")
-    async def health() -> dict[str, str]:
+    def health() -> dict[str, str]:
         return {"status": "healthy", "version": __version__}
 
     @router.get("/dashboard/summary")
-    async def dashboard_summary() -> dict[str, Any]:
+    def dashboard_summary() -> dict[str, Any]:
         """跨模块聚合仪表盘：API/UI 执行结果 + 用例统计 + 性能会话。
 
         数据由 kernel 注入的 provider 提供（平台层不直接 import 模块 DB）。

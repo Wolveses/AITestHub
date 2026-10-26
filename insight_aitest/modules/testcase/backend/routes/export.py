@@ -217,7 +217,7 @@ def _export_dict(case) -> dict:
 
 
 @router.get("/{case_id}/export")
-async def export_one(case_id: int, db: TestCaseDatabase = Depends(get_tc_db)) -> dict:
+def export_one(case_id: int, db: TestCaseDatabase = Depends(get_tc_db)) -> dict:
     case = db.get_case(case_id)
     if not case:
         raise HTTPException(404, "用例不存在")
@@ -225,7 +225,7 @@ async def export_one(case_id: int, db: TestCaseDatabase = Depends(get_tc_db)) ->
 
 
 @router.post("/export")
-async def export_batch(
+def export_batch(
     body: ExportRequest, db: TestCaseDatabase = Depends(get_tc_db)
 ) -> list[dict]:
     out = []
@@ -237,7 +237,7 @@ async def export_batch(
 
 
 @router.post("/export-excel")
-async def export_excel(
+def export_excel(
     body: ExportExcelRequest, db: TestCaseDatabase = Depends(get_tc_db)
 ):
     cases: list[TestCase] = []

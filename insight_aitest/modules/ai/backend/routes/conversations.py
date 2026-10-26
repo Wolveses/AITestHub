@@ -52,7 +52,7 @@ def _out(conv) -> ConversationOut:
 
 
 @router.get("", response_model=list[ConversationOut])
-async def list_conversations(
+def list_conversations(
     project_id: int | None = None,
     current_user: User | None = Depends(get_current_user_optional),
     db: AIDatabase = Depends(get_db),
@@ -62,7 +62,7 @@ async def list_conversations(
 
 
 @router.post("", response_model=ConversationOut)
-async def create_conversation(
+def create_conversation(
     body: ConversationCreate | None = None,
     current_user: User | None = Depends(get_current_user_optional),
     db: AIDatabase = Depends(get_db),
@@ -80,7 +80,7 @@ async def create_conversation(
 
 
 @router.get("/{conv_id}")
-async def get_conversation(conv_id: int, db: AIDatabase = Depends(get_db)) -> dict:
+def get_conversation(conv_id: int, db: AIDatabase = Depends(get_db)) -> dict:
     conv = db.get_conversation(conv_id)
     if not conv:
         raise HTTPException(404, "会话不存在")
@@ -107,7 +107,7 @@ async def get_conversation(conv_id: int, db: AIDatabase = Depends(get_db)) -> di
 
 
 @router.patch("/{conv_id}", response_model=ConversationOut)
-async def update_conversation(
+def update_conversation(
     conv_id: int, body: ConversationUpdate, db: AIDatabase = Depends(get_db)
 ) -> ConversationOut:
     if not db.get_conversation(conv_id):
@@ -125,7 +125,7 @@ async def update_conversation(
 
 
 @router.delete("/{conv_id}")
-async def delete_conversation(
+def delete_conversation(
     conv_id: int,
     db: AIDatabase = Depends(get_db),
     config=Depends(get_config),

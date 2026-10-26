@@ -135,7 +135,7 @@ def _out(case: TestCase) -> CaseOut:
 
 
 @router.get("/folders", response_model=list[FolderNode])
-async def list_folders_tree(
+def list_folders_tree(
     project_id: int | None = None,
     db: TestCaseDatabase = Depends(get_tc_db),
 ) -> list[FolderNode]:
@@ -170,7 +170,7 @@ async def list_folders_tree(
 
 
 @router.post("/folders", response_model=FolderNode, status_code=201)
-async def create_folder(
+def create_folder(
     body: FolderCreateIn,
     db: TestCaseDatabase = Depends(get_tc_db),
 ) -> FolderNode:
@@ -192,7 +192,7 @@ async def create_folder(
 
 
 @router.put("/folders/{folder_id}", response_model=FolderNode)
-async def update_folder(
+def update_folder(
     folder_id: int,
     body: FolderUpdateIn,
     db: TestCaseDatabase = Depends(get_tc_db),
@@ -213,7 +213,7 @@ async def update_folder(
 
 
 @router.delete("/folders/{folder_id}")
-async def delete_folder(
+def delete_folder(
     folder_id: int,
     db: TestCaseDatabase = Depends(get_tc_db),
 ) -> dict:
@@ -226,7 +226,7 @@ async def delete_folder(
 
 
 @router.get("", response_model=list[CaseOut])
-async def list_cases(
+def list_cases(
     type: str | None = None,
     status: str | None = None,
     project_id: int | None = None,
@@ -253,7 +253,7 @@ async def list_cases(
 
 
 @router.post("", response_model=CaseOut, status_code=201)
-async def create_case(body: CaseCreate, db: TestCaseDatabase = Depends(get_tc_db)) -> CaseOut:
+def create_case(body: CaseCreate, db: TestCaseDatabase = Depends(get_tc_db)) -> CaseOut:
     case = TestCase(
         title=body.title,
         type=CaseType(body.type),
@@ -306,7 +306,7 @@ def _validate_version_belongs_to_project(project_id: int, version_id: int) -> bo
 
 
 @router.post("/batch-assign")
-async def batch_assign(body: BatchAssignRequest, db: TestCaseDatabase = Depends(get_tc_db)) -> dict:
+def batch_assign(body: BatchAssignRequest, db: TestCaseDatabase = Depends(get_tc_db)) -> dict:
     """批量修改用例项目/版本/目录归属。
 
     注册在 ``/{case_id}`` 之前，避免 "batch-assign" 被当作 case_id。
@@ -335,7 +335,7 @@ async def batch_assign(body: BatchAssignRequest, db: TestCaseDatabase = Depends(
 
 
 @router.post("/batch-delete")
-async def batch_delete_cases(
+def batch_delete_cases(
     body: BatchDeleteRequest, db: TestCaseDatabase = Depends(get_tc_db)
 ) -> dict:
     """批量删除测试用例。"""
@@ -344,7 +344,7 @@ async def batch_delete_cases(
 
 
 @router.post("/batch-sync")
-async def batch_sync_cases(
+def batch_sync_cases(
     req: BatchSyncRequest, db: TestCaseDatabase = Depends(get_tc_db)
 ) -> dict:
     """批次同步/导入：选中用例 → ready + 绑定 project_id/version_id/folder_id；未选中可删。"""
@@ -380,7 +380,7 @@ async def batch_sync_cases(
 
 
 @router.get("/batch/{batch_id}", response_model=list[CaseOut])
-async def get_batch_cases(
+def get_batch_cases(
     batch_id: str, db: TestCaseDatabase = Depends(get_tc_db)
 ) -> list[CaseOut]:
     """按 batch_id 列出同批次用例（用例审阅面板批次视图用）。"""
@@ -388,7 +388,7 @@ async def get_batch_cases(
 
 
 @router.get("/{case_id}", response_model=CaseOut)
-async def get_case(case_id: int, db: TestCaseDatabase = Depends(get_tc_db)) -> CaseOut:
+def get_case(case_id: int, db: TestCaseDatabase = Depends(get_tc_db)) -> CaseOut:
     case = db.get_case(case_id)
     if not case:
         raise HTTPException(404, "用例不存在")
@@ -396,7 +396,7 @@ async def get_case(case_id: int, db: TestCaseDatabase = Depends(get_tc_db)) -> C
 
 
 @router.put("/{case_id}", response_model=CaseOut)
-async def update_case(
+def update_case(
     case_id: int, body: CaseUpdate, db: TestCaseDatabase = Depends(get_tc_db)
 ) -> CaseOut:
     if not db.get_case(case_id):
@@ -411,7 +411,7 @@ async def update_case(
 
 
 @router.patch("/{case_id}/assignment", response_model=CaseOut)
-async def update_assignment(
+def update_assignment(
     case_id: int, body: AssignmentUpdate, db: TestCaseDatabase = Depends(get_tc_db)
 ) -> CaseOut:
     """修改用例的项目/版本归属（归属迁移）。"""
@@ -437,7 +437,7 @@ async def update_assignment(
 
 
 @router.patch("/{case_id}/status", response_model=CaseOut)
-async def update_status(
+def update_status(
     case_id: int, body: StatusUpdate, db: TestCaseDatabase = Depends(get_tc_db)
 ) -> CaseOut:
     if not db.get_case(case_id):
@@ -447,14 +447,14 @@ async def update_status(
 
 
 @router.delete("/{case_id}")
-async def delete_case(case_id: int, db: TestCaseDatabase = Depends(get_tc_db)) -> dict:
+def delete_case(case_id: int, db: TestCaseDatabase = Depends(get_tc_db)) -> dict:
     if not db.delete_case(case_id):
         raise HTTPException(404, "用例不存在")
     return {"deleted": case_id}
 
 
 @router.patch("/{case_id}/result", response_model=CaseOut)
-async def update_result(
+def update_result(
     case_id: int, body: ResultUpdate, db: TestCaseDatabase = Depends(get_tc_db)
 ) -> CaseOut:
     """E/F 执行后回填 last_result / last_run_at（闭环支撑）。"""
@@ -473,7 +473,7 @@ async def update_result(
 
 
 @router.get("/documents/all")
-async def list_kb_documents():
+def list_kb_documents():
     """代理平台 KB 文档列表（生成向导选文档范围用）。
 
     路径用 /documents/all 避免与 /{case_id} 混淆（case_id 是 int，静态段不会撞）。

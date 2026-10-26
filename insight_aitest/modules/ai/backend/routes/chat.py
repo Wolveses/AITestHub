@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -43,7 +44,7 @@ def _sse(event_type: str, data) -> str:
 
 
 @router.post("/stream")
-async def chat_stream(
+def chat_stream(
     body: ChatRequest, agent=Depends(get_agent), db: AIDatabase = Depends(get_db)
 ):
     conv = db.get_conversation(body.conversation_id)
@@ -181,7 +182,7 @@ async def upload_attachments(
     不入知识库（只服务本次对话预览）。
     """
     attachments_dir = Path(config.docs_dir) / "attachments"
-    attachments_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(attachments_dir.mkdir, parents=True, exist_ok=True)
 
     result = []
     for f in files:
@@ -191,13 +192,16 @@ async def upload_attachments(
         ext = Path(f.filename or "").suffix
         basename = f"{uuid.uuid4().hex}{ext}"
         storage_path = attachments_dir / basename
-        storage_path.write_bytes(content)
+        # 写盘与文本抽取均为同步 IO，放线程池
+        await asyncio.to_thread(storage_path.write_bytes, content)
 
         mime = f.content_type or "application/octet-stream"
         kind = "image" if _is_image_mime(mime) else "document"
         preview_text = None
         if kind == "document":
-            preview_text = _extract_preview_text(f.filename or "", storage_path)
+            preview_text = await asyncio.to_thread(
+                _extract_preview_text, f.filename or "", storage_path
+            )
 
         result.append(
             {
@@ -214,7 +218,7 @@ async def upload_attachments(
 
 
 @router.get("/attachments/{attachment_id}")
-async def download_attachment(
+def download_attachment(
     attachment_id: str,
     config=Depends(get_config),
 ):

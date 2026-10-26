@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -43,7 +45,7 @@ def _get_cfg():
 
 
 @router.get("")
-async def get_ui_config() -> dict:
+def get_ui_config() -> dict:
     cfg = _get_cfg()
     ui = cfg.ui_vision_config or {}
     return {
@@ -71,10 +73,11 @@ async def update_ui_config(body: UIConfigUpdate) -> dict:
         ui["model"] = body.model.strip()
 
     cfg.ui_vision_config = ui
-    save_config(cfg)
-    reset_llm_singletons()
+    # 写配置文件 + 重置单例是同步 IO，放线程池
+    await asyncio.to_thread(save_config, cfg)
+    await asyncio.to_thread(reset_llm_singletons)
 
-    return await get_ui_config()
+    return get_ui_config()
 
 
 @router.post("/test")

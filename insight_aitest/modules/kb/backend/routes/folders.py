@@ -43,7 +43,7 @@ class FolderUpdateIn(BaseModel):
 
 
 @router.get("", response_model=list[FolderNode])
-async def list_folders_tree(
+def list_folders_tree(
     project_id: int | None = None,
     source_type: str | None = None,
     db: KBDatabase = Depends(get_kb_db),
@@ -85,7 +85,7 @@ async def list_folders_tree(
 
 
 @router.post("", response_model=FolderNode)
-async def create_folder(
+def create_folder(
     body: FolderCreateIn,
     db: KBDatabase = Depends(get_kb_db),
 ) -> FolderNode:
@@ -108,7 +108,7 @@ async def create_folder(
 
 
 @router.put("/{folder_id}", response_model=dict[str, Any])
-async def update_folder(
+def update_folder(
     folder_id: int,
     body: FolderUpdateIn,
     db: KBDatabase = Depends(get_kb_db),
@@ -121,7 +121,7 @@ async def update_folder(
 
 
 @router.delete("/{folder_id}", response_model=dict[str, Any])
-async def delete_folder(
+def delete_folder(
     folder_id: int,
     db: KBDatabase = Depends(get_kb_db),
 ) -> dict[str, Any]:

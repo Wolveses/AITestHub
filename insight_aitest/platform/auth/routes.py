@@ -87,7 +87,7 @@ class AuditLogListResponse(BaseModel):
 # ===== 路由接口 =====
 
 @router.post("/register", response_model=LoginResponse)
-async def register(req: RegisterRequest, db: UserDatabase = Depends(get_user_db)):
+def register(req: RegisterRequest, db: UserDatabase = Depends(get_user_db)):
     """测试人员自行注册接口。"""
     username = req.username.strip()
     display_name = req.display_name.strip()
@@ -109,7 +109,7 @@ async def register(req: RegisterRequest, db: UserDatabase = Depends(get_user_db)
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(req: LoginRequest, db: UserDatabase = Depends(get_user_db)):
+def login(req: LoginRequest, db: UserDatabase = Depends(get_user_db)):
     """用户登录接口。"""
     username = req.username.strip()
     user = db.get_user_by_username(username)
@@ -124,13 +124,13 @@ async def login(req: LoginRequest, db: UserDatabase = Depends(get_user_db)):
 
 
 @router.get("/me", response_model=UserOut)
-async def get_me(user: User = Depends(get_current_user)):
+def get_me(user: User = Depends(get_current_user)):
     """获取当前登录用户信息。"""
     return UserOut.from_orm(user)
 
 
 @router.put("/me", response_model=UserOut)
-async def update_me(
+def update_me(
     req: UpdateProfileRequest,
     user: User = Depends(get_current_user),
     db: UserDatabase = Depends(get_user_db),
@@ -142,7 +142,7 @@ async def update_me(
 
 
 @router.post("/change-password")
-async def change_password(
+def change_password(
     req: ChangePasswordRequest,
     user: User = Depends(get_current_user),
     db: UserDatabase = Depends(get_user_db),
@@ -158,7 +158,7 @@ async def change_password(
 # ===== 管理员专属接口 =====
 
 @router.get("/users", response_model=List[UserOut])
-async def list_users(
+def list_users(
     admin: User = Depends(require_admin),
     db: UserDatabase = Depends(get_user_db),
 ):
@@ -168,7 +168,7 @@ async def list_users(
 
 
 @router.post("/users/{user_id}/reset-password")
-async def admin_reset_password(
+def admin_reset_password(
     user_id: int,
     req: AdminResetPasswordRequest,
     admin: User = Depends(require_admin),
@@ -184,7 +184,7 @@ async def admin_reset_password(
 
 
 @router.post("/users/{user_id}/toggle-active")
-async def admin_toggle_active(
+def admin_toggle_active(
     user_id: int,
     active: bool,
     admin: User = Depends(require_admin),
@@ -203,7 +203,7 @@ async def admin_toggle_active(
 
 
 @router.get("/audit-logs", response_model=AuditLogListResponse)
-async def list_audit_logs(
+def list_audit_logs(
     limit: int = 50,
     offset: int = 0,
     username: str | None = None,

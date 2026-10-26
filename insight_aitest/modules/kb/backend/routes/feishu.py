@@ -29,7 +29,7 @@ class SyncSpaceIn(BaseModel):
 
 
 @router.get("/spaces", response_model=list[dict[str, Any]])
-async def list_spaces() -> list[dict[str, Any]]:
+def list_spaces() -> list[dict[str, Any]]:
     """获取飞书应用有权限访问的知识库空间列表。"""
     client = FeishuClient()
     if not client.is_configured():

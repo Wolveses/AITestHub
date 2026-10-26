@@ -330,7 +330,7 @@ def _parse_file_content(filename: str, content: bytes, llm, config) -> str:
 
 
 @router.get("", response_model=list[TaskOut])
-async def list_tasks(
+def list_tasks(
     project_id: int | None = None,
     current_user: User | None = Depends(get_current_user_optional),
     db: AIDatabase = Depends(get_db),
@@ -359,11 +359,14 @@ async def upload_files(
         content = await f.read()
         if len(content) > config.max_upload_mb * 1024 * 1024:
             raise HTTPException(413, f"文件超过 {config.max_upload_mb}MB 限制")
-        text = _parse_file_content(f.filename or "unknown", content, llm, config)
+        # 解析（PDF/xlsx/OCR 等）是同步 CPU/IO 密集操作，放线程池
+        text = await asyncio.to_thread(
+            _parse_file_content, f.filename or "unknown", content, llm, config
+        )
         parsed_files.append({"filename": f.filename, "content": text})
 
         # 同时存入知识库（复用 kb 模块的 ingest）
-        try:
+        def _store_kb() -> int:
             from insight_aitest.platform.services.kb.deps import get_kb_db
             from insight_aitest.platform.services.kb.models import DocumentStatus
             from insight_aitest.platform.services.kb.ingest import process_document
@@ -373,31 +376,34 @@ async def upload_files(
             existing = kb_db.find_by_content_hash(content_hash)
             if existing:
                 # 文件已存在，复用已有文档ID
-                document_ids.append(existing.id)
-            else:
-                ext = Path(f.filename or "").suffix
-                docs_dir = Path(config.docs_dir)
-                docs_dir.mkdir(parents=True, exist_ok=True)
-                storage_path = docs_dir / f"{uuid.uuid4().hex}{ext}"
-                storage_path.write_bytes(content)
-                doc_id = kb_db.create_document(
-                    f.filename, str(storage_path), content_hash, f.content_type
-                )
-                document_ids.append(doc_id)
+                return existing.id
 
-                # 后台索引
-                def _bg(did=doc_id):
-                    try:
-                        from insight_aitest.platform.services.kb.deps import (
-                            get_llm as _get_llm,
-                            get_vector_store as _get_vs,
-                        )
+            ext = Path(f.filename or "").suffix
+            docs_dir = Path(config.docs_dir)
+            docs_dir.mkdir(parents=True, exist_ok=True)
+            storage_path = docs_dir / f"{uuid.uuid4().hex}{ext}"
+            storage_path.write_bytes(content)
+            doc_id = kb_db.create_document(
+                f.filename, str(storage_path), content_hash, f.content_type
+            )
 
-                        process_document(did, kb_db, _get_vs(), _get_llm(), config)
-                    except Exception:
-                        kb_db.update_document_status(did, DocumentStatus.PARSE_FAILED)
+            # 后台索引
+            def _bg(did=doc_id):
+                try:
+                    from insight_aitest.platform.services.kb.deps import (
+                        get_llm as _get_llm,
+                        get_vector_store as _get_vs,
+                    )
 
-                threading.Thread(target=_bg, daemon=True).start()
+                    process_document(did, kb_db, _get_vs(), _get_llm(), config)
+                except Exception:
+                    kb_db.update_document_status(did, DocumentStatus.PARSE_FAILED)
+
+            threading.Thread(target=_bg, daemon=True).start()
+            return doc_id
+
+        try:
+            document_ids.append(await asyncio.to_thread(_store_kb))
         except Exception:
             # 不阻塞任务，但必须留痕——否则上传的文档会无声消失
             logger.warning(
@@ -410,7 +416,7 @@ async def upload_files(
 
 
 @router.post("", response_model=TaskOut)
-async def create_task(
+def create_task(
     body: TaskCreateRequest,
     current_user: User | None = Depends(get_current_user_optional),
     db: AIDatabase = Depends(get_db),
@@ -758,7 +764,7 @@ class AgentChatRequest(BaseModel):
 
 
 @router.post("/chat")
-async def agent_chat(
+def agent_chat(
     body: AgentChatRequest,
     current_user: User | None = Depends(get_current_user_optional),
     llm=Depends(get_llm),
@@ -1141,7 +1147,7 @@ async def select_strategy(
 
 
 @router.get("/{task_id}", response_model=TaskOut)
-async def get_task(task_id: int, db: AIDatabase = Depends(get_db)) -> TaskOut:
+def get_task(task_id: int, db: AIDatabase = Depends(get_db)) -> TaskOut:
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(404, "任务不存在")
@@ -1149,7 +1155,7 @@ async def get_task(task_id: int, db: AIDatabase = Depends(get_db)) -> TaskOut:
 
 
 @router.get("/{task_id}/messages")
-async def get_task_messages(task_id: int, db: AIDatabase = Depends(get_db)) -> dict:
+def get_task_messages(task_id: int, db: AIDatabase = Depends(get_db)) -> dict:
     """返回任务关联的消息列表（用于前端刷新后重建对话历史）。
 
     若 task 有 conversation_id，同时返回同会话下其他任务的消息，
@@ -1386,7 +1392,7 @@ async def create_quick_task(
 
 
 @router.get("/{task_id}/stream")
-async def stream_task(
+def stream_task(
     task_id: int,
     db: AIDatabase = Depends(get_db),
 ):
@@ -1500,7 +1506,7 @@ async def stream_task(
 
 
 @router.delete("/{task_id}")
-async def cancel_task(task_id: int, db: AIDatabase = Depends(get_db)) -> dict:
+def cancel_task(task_id: int, db: AIDatabase = Depends(get_db)) -> dict:
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(404, "任务不存在")
@@ -1513,7 +1519,7 @@ async def cancel_task(task_id: int, db: AIDatabase = Depends(get_db)) -> dict:
 
 
 @router.get("/kb/documents")
-async def list_kb_documents(
+def list_kb_documents(
     project_id: int | None = None,
     kb_db=Depends(get_kb_db),
 ) -> list[dict]:
@@ -1541,7 +1547,7 @@ _batch_lock = threading.Lock()
 
 
 @router.post("/kb/reindex")
-async def reindex_documents(
+def reindex_documents(
     body: dict,  # 接收 {all: bool, document_ids: list[int]}
     kb_db=Depends(get_kb_db),
     config=Depends(get_config),
@@ -1622,7 +1628,7 @@ async def reindex_documents(
 
 
 @router.get("/kb/stats")
-async def kb_stats(
+def kb_stats(
     project_id: int | None = None,
     config=Depends(get_config),
     kb_db=Depends(get_kb_db),
