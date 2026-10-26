@@ -24,7 +24,11 @@ export function GenerateWizard({ onDone }: { onDone?: () => void }) {
   const [imported, setImported] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/modules/kb/documents`).then((r) => r.json()).then(setDocs).catch(() => {});
+    // 列表接口已改为分页返回 { items, total, ... }
+    fetch(`/api/modules/kb/documents?page_size=500`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => setDocs(Array.isArray(data) ? data : (data?.items ?? [])))
+      .catch(() => {});
   }, []);
 
   const doAnalyze = async () => {
@@ -90,13 +94,24 @@ export function GenerateWizard({ onDone }: { onDone?: () => void }) {
           <div style={{ marginBottom: 12 }}>
             <div style={labelStyle}>{t('testcase.docScope')}</div>
             {docs.length === 0 && <div style={hintStyle}>{t('testcase.noDocsHint')}</div>}
-            {docs.map((d) => (
-              <label key={d.id} style={{ display: 'block', padding: '4px 0', fontSize: 13, color: 'var(--text-muted)' }}>
-                <input type="checkbox" checked={selectedDocs.includes(d.id)}
-                  onChange={() => toggleDoc(d.id)} style={{ marginRight: 8 }} />
-                {d.filename}
-              </label>
-            ))}
+            {/* 文档列表内部独立滚动，避免把下方「分析主题」和按钮顶到屏外 */}
+            <div
+              style={{
+                maxHeight: 240,
+                overflowY: 'auto',
+                border: docs.length ? '1px solid var(--bg-elevated)' : 'none',
+                borderRadius: 6,
+                padding: docs.length ? '2px 10px' : 0,
+              }}
+            >
+              {docs.map((d) => (
+                <label key={d.id} style={{ display: 'block', padding: '4px 0', fontSize: 13, color: 'var(--text-muted)' }}>
+                  <input type="checkbox" checked={selectedDocs.includes(d.id)}
+                    onChange={() => toggleDoc(d.id)} style={{ marginRight: 8 }} />
+                  {d.filename}
+                </label>
+              ))}
+            </div>
           </div>
           <div style={{ marginBottom: 16 }}>
             <div style={labelStyle}>{t('testcase.analyzeTopic')}</div>
@@ -117,10 +132,13 @@ export function GenerateWizard({ onDone }: { onDone?: () => void }) {
           {analyzePoints.length === 0 && (
             <div style={hintStyle}>{t('testcase.noPointsHint')}</div>
           )}
-          {analyzePoints.map((p) => (
-            <PointRow key={p.id} p={p} checked={!!selected[p.id]}
-              onToggle={() => togglePoint(p.id)} />
-          ))}
+          {/* 可测点列表内部独立滚动，保持底部「上一步 / 生成」按钮常驻可见 */}
+          <div style={{ maxHeight: 360, overflowY: 'auto', paddingRight: 4 }}>
+            {analyzePoints.map((p) => (
+              <PointRow key={p.id} p={p} checked={!!selected[p.id]}
+                onToggle={() => togglePoint(p.id)} />
+            ))}
+          </div>
           <div style={{ marginTop: 16, display: 'flex', gap: 12 }}>
             <button onClick={() => setStep(1)} style={{ ...secondaryBtn, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <ArrowLeft size={13} strokeWidth={1.5} /> {t('testcase.back')}

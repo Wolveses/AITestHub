@@ -41,11 +41,12 @@ export function DocPickerModal({ open, onClose, selectedDocIds, onConfirm }: Doc
 
       Promise.all([
         fetch(`/api/modules/kb/folders`).then((r) => (r.ok ? r.json() : [])),
-        fetch(`/api/modules/kb/documents`).then((r) => (r.ok ? r.json() : [])),
+        fetch(`/api/modules/kb/documents?page_size=500`).then((r) => (r.ok ? r.json() : [])),
       ])
         .then(([foldersData, docsData]) => {
           setFolders(Array.isArray(foldersData) ? foldersData : []);
-          setDocs(Array.isArray(docsData) ? docsData : []);
+          // 列表接口已改为分页返回 { items, total, ... }
+          setDocs(Array.isArray(docsData) ? docsData : (docsData?.items ?? []));
         })
         .finally(() => setLoading(false));
     }
