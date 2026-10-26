@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""对话 API 集成测试（非流式 + SSE 流式）。mock agent。"""
+"""对话 API 集成测试（SSE 流式）。mock agent。"""
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
@@ -30,22 +30,6 @@ def _setup_app(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(ai_router, prefix="/api/modules/ai")
     return app, TestClient(app)
-
-
-def test_chat_non_stream(tmp_path, monkeypatch):
-    app, c = _setup_app(tmp_path, monkeypatch)
-    conv = c.post("/api/modules/ai/conversations").json()
-    conv_id = conv["id"]
-    from insight_aitest.modules.ai.backend.agent.rag import RagResult
-    from insight_aitest.modules.ai.backend.deps import get_agent
-    fake_agent = MagicMock()
-    fake_agent.answer.return_value = RagResult(answer="回答", citations=[])
-    app.dependency_overrides[get_agent] = lambda: fake_agent
-    r = c.post("/api/modules/ai/chat", json={
-        "conversation_id": conv_id, "query": "你好", "history_turns": 6})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["answer"] == "回答"
 
 
 def test_chat_stream_sse(tmp_path, monkeypatch):
@@ -132,25 +116,8 @@ def test_chat_stream_citations_format(tmp_path, monkeypatch):
         assert False, "未找到带 a.pdf 的 citations data 行"
 
 
-def test_chat_unknown_conversation_404(tmp_path, monkeypatch):
+def test_chat_stream_unknown_conversation_404(tmp_path, monkeypatch):
     app, c = _setup_app(tmp_path, monkeypatch)
-    r = c.post("/api/modules/ai/chat", json={
+    r = c.post("/api/modules/ai/chat/stream", json={
         "conversation_id": 99999, "query": "x"})
     assert r.status_code == 404
-
-
-def test_chat_non_stream_rag_disabled(tmp_path, monkeypatch):
-    """非流式 /chat：会话 rag_enabled=False 时传 use_rag=False。"""
-    app, c = _setup_app(tmp_path, monkeypatch)
-    conv = c.post("/api/modules/ai/conversations", json={"rag_enabled": False}).json()
-    conv_id = conv["id"]
-    from insight_aitest.modules.ai.backend.agent.rag import RagResult
-    from insight_aitest.modules.ai.backend.deps import get_agent
-    fake_agent = MagicMock()
-    fake_agent.answer.return_value = RagResult(answer="纯聊", citations=[])
-    app.dependency_overrides[get_agent] = lambda: fake_agent
-    r = c.post("/api/modules/ai/chat", json={
-        "conversation_id": conv_id, "query": "你好"})
-    assert r.status_code == 200
-    # answer 第 4 个位置参数 use_rag 应为 False
-    assert fake_agent.answer.call_args.kwargs.get("use_rag") is False

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""对话 API：非流式 /chat + SSE 流式 /chat/stream。"""
+"""对话 API：SSE 流式 /chat/stream + 会话附件。"""
 
 from __future__ import annotations
 
@@ -31,53 +31,6 @@ class ChatRequest(BaseModel):
     thinking_level: str | None = None  # off/low/medium/high；None 时回退会话级配置
     attachments: list[dict] | None = None
     use_kb: bool | None = None  # 请求级覆盖会话级 rag_enabled（None→用会话配置）
-
-
-class ChatResponse(BaseModel):
-    answer: str
-    citations: list[dict]
-
-
-@router.post("", response_model=ChatResponse)
-async def chat(
-    body: ChatRequest, agent=Depends(get_agent), db: AIDatabase = Depends(get_db)
-) -> ChatResponse:
-    conv = db.get_conversation(body.conversation_id)
-    if not conv:
-        raise HTTPException(404, "会话不存在")
-    history = db.list_messages_by_turns(body.conversation_id, turns=body.history_turns)
-    history_msgs = [{"role": m.role.value, "content": m.content} for m in history]
-    # use_rag：请求级 use_kb 优先（None→用会话级 rag_enabled）
-    use_rag = body.use_kb if body.use_kb is not None else conv.rag_enabled
-    # KB 升级：按会话所属项目隔离检索（project_id 来自 Conversation，杜绝跨项目污染）
-    proj_id = getattr(conv, "project_id", None)
-    logger.info(
-        "[AI Chat] 收到同步对话请求 (会话 %s): query=%r, use_rag=%s",
-        body.conversation_id,
-        body.query[:100],
-        use_rag,
-    )
-    # 先持久化 user 消息（保证历史完整，即使 answer 失败也不丢失用户输入）
-    db.add_message(body.conversation_id, Role.USER, body.query)
-    try:
-        result = agent.answer(
-            body.query, history_msgs, body.document_ids, use_rag=use_rag, project_id=proj_id
-        )
-        logger.info(
-            "[AI Chat] 同步对话完成 (会话 %s): 回复字数=%d, 引用文献数=%d",
-            body.conversation_id,
-            len(result.answer),
-            len(result.citations),
-        )
-    except Exception as e:
-        # answer 失败：写错误占位消息，与流式路径行为一致
-        db.add_message(body.conversation_id, Role.ASSISTANT, f"[reply failed: {e}]")
-        raise HTTPException(500, f"reply failed: {e}")
-    db.add_message(body.conversation_id, Role.ASSISTANT, result.answer, result.citations)
-    return ChatResponse(
-        answer=result.answer,
-        citations=[c.__dict__ for c in result.citations],
-    )
 
 
 def _sse(event_type: str, data) -> str:

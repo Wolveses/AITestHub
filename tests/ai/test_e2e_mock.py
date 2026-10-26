@@ -4,13 +4,13 @@
 不依赖真实 API key / 网络。验证：
 1. 上传文档 → 后台线程（用 FakeLLM embed）→ 状态变 ready
 2. 创建会话 → 流式提问 → 收到 citations + token + done
-3. 非流式提问 → 拿到带引用的回答
-4. 重启模拟（新 AIDatabase 实例读同一 db 文件）→ 历史/文档持久化
+3. 重启模拟（新 AIDatabase 实例读同一 db 文件）→ 历史/文档持久化
 
 FakeLLM 的 embed 对所有文本返回同一向量（保证检索恒命中，distance=0, score=1）。
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -122,7 +122,7 @@ def _wait_status(c, doc_id, target, timeout=15):
 
 
 def test_e2e_upload_index_chat(tmp_path):
-    """完整链路：上传 → 索引就绪 → 流式问答带引用 → 非流式问答。"""
+    """完整链路：上传 → 索引就绪 → 流式问答带引用。"""
     _install_fake_deps(tmp_path)
     c = _app()
 
@@ -173,15 +173,6 @@ def test_e2e_upload_index_chat(tmp_path):
     asst = [m for m in detail["messages"] if m["role"] == "assistant"]
     assert asst and len(asst[-1]["citations"]) > 0, "assistant 消息无引用"
 
-    # 6. 非流式问答（第二个会话）
-    conv2 = c.post("/api/modules/ai/conversations").json()
-    r = c.post("/api/modules/ai/chat", json={
-        "conversation_id": conv2["id"], "query": "性能监控包含哪些指标?"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["answer"], "非流式回答为空"
-    assert len(body["citations"]) > 0, "非流式回答无引用"
-
 
 def test_e2e_persistence_across_restart(tmp_path):
     """模拟重启：新库实例读同一文件，文档（kb.db）与会话（ai.db）仍在。"""
@@ -207,13 +198,27 @@ def test_e2e_empty_kb_still_answers(tmp_path):
     _install_fake_deps(tmp_path)
     c = _app()
     conv = c.post("/api/modules/ai/conversations").json()
-    r = c.post("/api/modules/ai/chat", json={
-        "conversation_id": conv["id"], "query": "你好"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["answer"], "空库应仍能回答"
+    with c.stream("POST", "/api/modules/ai/chat/stream",
+                  json={"conversation_id": conv["id"], "query": "你好"}) as r:
+        assert r.status_code == 200
+        buf = b"".join(r.iter_bytes()).decode("utf-8")
+    tokens = []
+    citations_payload = None
+    for block in buf.split("\n\n"):
+        if not block.strip():
+            continue
+        etype = block.split("event: ", 1)[1].split("\n", 1)[0] if "event: " in block else None
+        if etype == "token":
+            tokens.append(block)
+        elif etype == "citations":
+            data_line = next(
+                (ln for ln in block.splitlines() if ln.startswith("data:")), "data: {}"
+            )
+            citations_payload = json.loads(data_line[len("data:"):].strip())
+    assert tokens, "空库应仍能回答"
     # 空库 → 检索无命中 → citations 为空
-    assert body["citations"] == [], "空库不应有引用"
+    assert citations_payload is not None and citations_payload.get("citations") == [], \
+        "空库不应有引用"
 
 
 def test_e2e_delete_document(tmp_path):
