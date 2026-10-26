@@ -110,13 +110,13 @@ export function SettingsPanel() {
           </Row>
 
           <Row label={t('settings.embedEndpoint')}>
-            <input style={inputStyle} value={form.embed_base_url ?? ''}
+            <input style={inputStyle} value={form.embed_base_url ?? ''} autoComplete="off"
               placeholder={t('settings.embedEndpointPlaceholder')}
               onChange={(e) => set('embed_base_url', e.target.value)} />
           </Row>
 
           <Row label={t('settings.embedApiKey')}>
-            <input style={inputStyle} type="password" value={form.embed_api_key ?? ''}
+            <input style={inputStyle} type="password" autoComplete="new-password" value={form.embed_api_key ?? ''}
               placeholder={config.embed_api_key_set ? t('settings.apiKeySet') : t('settings.embedApiKeyPlaceholder')}
               onChange={(e) => set('embed_api_key', e.target.value)} />
           </Row>
@@ -212,6 +212,7 @@ export function SettingsPanel() {
                     <input
                       style={inputStyle}
                       type="text"
+                      autoComplete="off"
                       placeholder={t('settings.rerankBaseUrlPlaceholder')}
                       value={form.rerank_base_url ?? ''}
                       onChange={(e) => set('rerank_base_url', e.target.value)}
@@ -221,6 +222,7 @@ export function SettingsPanel() {
                     <input
                       style={inputStyle}
                       type="password"
+                      autoComplete="new-password"
                       placeholder={config.rerank_api_key_set ? '••••••••' : t('settings.rerankApiKeyPlaceholder')}
                       value={form.rerank_api_key ?? ''}
                       onChange={(e) => set('rerank_api_key', e.target.value)}
@@ -482,15 +484,15 @@ function ProviderEditor({ provider, presets, saving, onSave, onCancel, onTest }:
       </div>
 
       <Row label={t('settings.fieldName')}>
-        <input style={inputStyle} value={name} placeholder={t('settings.namePlaceholder')}
+        <input style={inputStyle} value={name} autoComplete="off" placeholder={t('settings.namePlaceholder')}
           onChange={(e) => setName(e.target.value)} />
       </Row>
       <Row label="Base URL">
-        <input style={inputStyle} value={baseUrl} placeholder="https://api.openai.com/v1"
+        <input style={inputStyle} value={baseUrl} autoComplete="off" placeholder="https://api.openai.com/v1"
           onChange={(e) => setBaseUrl(e.target.value)} />
       </Row>
       <Row label={t('settings.apiKey')}>
-        <input style={inputStyle} type="password" value={apiKey}
+        <input style={inputStyle} type="password" autoComplete="new-password" value={apiKey}
           placeholder={provider?.api_key_set ? t('settings.apiKeySet') : t('settings.apiKeyPlaceholder')}
           onChange={(e) => setApiKey(e.target.value)} />
       </Row>
