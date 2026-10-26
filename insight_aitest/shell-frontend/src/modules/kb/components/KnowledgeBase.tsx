@@ -144,6 +144,9 @@ export function KnowledgeBase() {
   // 记录监听起点：POST 刚返回时后端线程可能还没写 pending，过早读到旧终态会误判完成
   const watchStartedAtRef = useRef(0);
   const [batchRunning, setBatchRunning] = useState(false);
+  // 后端批次状态（含其他用户触发的批次），用于置灰「全部重新解析」按钮
+  const [serverBatchRunning, setServerBatchRunning] = useState(false);
+  const batchDisabled = batchRunning || serverBatchRunning;
   const [reindexDoneTotal, setReindexDoneTotal] = useState<number | null>(null);
 
   useEffect(() => {
@@ -268,7 +271,9 @@ export function KnowledgeBase() {
       const r = await fetch(`/api/modules/kb/documents/${docId}/reindex`, { method: 'POST' });
       if (!r.ok) {
         const err = await r.text();
-        toast.error(err || `重新向量化失败 (HTTP ${r.status})`);
+        let msg = err;
+        try { msg = JSON.parse(err)?.detail || err; } catch { /* 非 JSON 原文 */ }
+        toast.error(msg || `重新向量化失败 (HTTP ${r.status})`);
         return;
       }
       toast.success(t('kb.reindexStarted', '已触发重新向量化'));
@@ -305,7 +310,9 @@ export function KnowledgeBase() {
             });
             if (!r.ok) {
               const err = await r.text();
-              toast.error(err || `批量重新向量化失败 (HTTP ${r.status})`);
+              let msg = err;
+              try { msg = JSON.parse(err)?.detail || err; } catch { /* 非 JSON 原文 */ }
+              toast.error(msg || `批量重新向量化失败 (HTTP ${r.status})`);
               return;
             }
             toast.success(t('kb.reindexAllStarted', '已触发批量重新向量化'));
@@ -334,9 +341,30 @@ export function KnowledgeBase() {
       .then(s => {
         setNeedReindexCount(s?.need_reindex_count ?? 0);
         setVectorEnabled(!!s?.vector_enabled);
+        setServerBatchRunning(!!s?.reindex_progress?.running);
       })
       .catch(() => {});
   }, [activeTab, currentFolderId, configVectorEnabled]);
+
+  // 多用户：其他用户触发的单文档/批量解析不会通知本页，周期刷新 stats 与列表感知。
+  // 已有 2s 文档轮询时跳过列表刷新，避免重复请求。
+  useEffect(() => {
+    const tick = async () => {
+      try {
+        const s = await fetch('/api/modules/ai/tasks/kb/stats').then((r) => (r.ok ? r.json() : null));
+        if (s) {
+          setNeedReindexCount(s.need_reindex_count ?? 0);
+          setVectorEnabled(!!s.vector_enabled);
+          setServerBatchRunning(!!s.reindex_progress?.running);
+        }
+      } catch {
+        /* 单次失败忽略 */
+      }
+      if (!useKnowledgeStore.getState().pollTimer) loadDocuments();
+    };
+    const timer = window.setInterval(tick, 5000);
+    return () => window.clearInterval(timer);
+  }, [activeTab, currentFolderId]);
   // 同步到本地 state（保存配置后后端 stats 接口需要重新拉才能拿到最新值，
   // 但 configStore 已经更新了，这里用它当即时源让 UI 立即响应）
   useEffect(() => {
@@ -458,6 +486,7 @@ export function KnowledgeBase() {
 
           <button
             onClick={handleReindexAll}
+            disabled={batchDisabled}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -469,13 +498,18 @@ export function KnowledgeBase() {
               padding: '4px 12px',
               fontSize: 12,
               fontWeight: 500,
-              cursor: 'pointer',
+              cursor: batchDisabled ? 'not-allowed' : 'pointer',
+              opacity: batchDisabled ? 0.55 : 1,
               transition: 'all 0.15s ease',
             }}
-            title="对所有未向量化/向量化失败的文档重新执行向量化"
+            title={batchDisabled ? '批量重新解析进行中' : '对所有未向量化/向量化失败的文档重新执行向量化'}
           >
             <RefreshCw size={13} />
-            {needReindexCount > 0 ? `全部重新解析 (${needReindexCount})` : '全部重新解析'}
+            {batchDisabled
+              ? '全部重新解析中…'
+              : needReindexCount > 0
+                ? `全部重新解析 (${needReindexCount})`
+                : '全部重新解析'}
           </button>
         </div>
 

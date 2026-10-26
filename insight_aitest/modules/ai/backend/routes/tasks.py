@@ -1536,6 +1536,8 @@ async def list_kb_documents(
 
 # 批量重新解析进度（供前端轮询判断完成并弹出完成提示）
 _reindex_batch = {"running": False, "total": 0, "done": 0}
+# 批量入口全局互斥：多用户同时点批量时只允许一个批次在跑
+_batch_lock = threading.Lock()
 
 
 @router.post("/kb/reindex")
@@ -1551,8 +1553,7 @@ async def reindex_documents(
       - all=true             : 自动查所有需要 reindex 的文档（终态：ready / not_vectorized / embed_failed / embed_partial / parse_failed）
     不再强制 RAG 开启——关闭时只做重新解析分块（不向量化），与单文档 reindex 入口一致。
     """
-    from insight_aitest.modules.kb.backend.routes.documents import _reindex_in_bg
-    import threading
+    from insight_aitest.modules.kb.backend.routes.documents import _reindex_in_bg, is_reindexing
 
     all_mode = bool(body.get("all", False))
     document_ids = body.get("document_ids") or []
@@ -1586,21 +1587,35 @@ async def reindex_documents(
     for doc_id in document_ids:
         if kb_db.get_document(doc_id) is None:
             results.append({"id": doc_id, "status": "not_found"})
+        elif is_reindexing(doc_id):
+            # 该文档已有重解析任务在跑（可能是其他用户触发的单文档重解析）
+            results.append({"id": doc_id, "status": "already_running"})
         else:
             valid_ids.append(doc_id)
             results.append({"id": doc_id, "status": "reindexing"})
+
+    if not valid_ids:
+        return {"results": results, "message": "所选文档均已在重新解析中"}
+
+    # 多用户同时触发批量：running 标志的检查与置位必须原子完成，
+    # 否则两个请求会各自起一条串行流水线，同时写 kb.db 并互相覆盖进度。
+    with _batch_lock:
+        if _reindex_batch["running"]:
+            raise HTTPException(409, "批量重新解析正在进行中，请稍后再试")
+        _reindex_batch.update(running=True, total=len(valid_ids), done=0)
 
     # 批量 reindex 串行执行：只起一个后台线程逐个处理。
     # 若每文档起一个线程，并发线程会把 kb.db 的 SQLAlchemy 连接池
     # （默认 5+10）打爆，30s 等不到连接即抛 QueuePool 超时。
     def _batch():
-        _reindex_batch.update(running=True, total=len(valid_ids), done=0)
         try:
             for doc_id in valid_ids:
                 _reindex_in_bg(doc_id, kb_db)  # 内部异常已自捕获并写入文档状态
-                _reindex_batch["done"] += 1
+                with _batch_lock:
+                    _reindex_batch["done"] += 1
         finally:
-            _reindex_batch["running"] = False
+            with _batch_lock:
+                _reindex_batch["running"] = False
 
     threading.Thread(target=_batch, daemon=True).start()
     return {"results": results}

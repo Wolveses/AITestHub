@@ -53,6 +53,8 @@ class DocumentOut(BaseModel):
     source_url: str = ""
     external_id: str = ""
     created_at: str
+    # 后台重解析进行中：内存标记，早于 status 变为 pending，供前端展示解析中并置灰操作
+    reindexing: bool = False
 
     @classmethod
     def from_doc(cls, doc) -> "DocumentOut":
@@ -84,7 +86,9 @@ class DocumentOut(BaseModel):
 
 
 def _doc_to_out(doc) -> DocumentOut:
-    return DocumentOut.from_doc(doc)
+    out = DocumentOut.from_doc(doc)
+    out.reindexing = is_reindexing(doc.id)
+    return out
 
 
 def resolve_storage_path(storage_path_str: str) -> Path:
@@ -246,6 +250,33 @@ async def delete_document(
     return {"deleted": doc_id}
 
 
+# 并发守护：同一文档同一时刻只允许一个重解析任务。
+# 多用户同时点同一文档 / 批量与单文档交叉触发时，重复任务会重复清块、
+# 重复调 embedding，并互相覆盖文档状态，因此在入口处占用槽位。
+_reindex_lock = threading.Lock()
+_reindex_inflight: set[int] = set()
+
+
+def _reserve_reindex(doc_id: int) -> bool:
+    """占用文档的重解析槽位；已被占用返回 False。"""
+    with _reindex_lock:
+        if doc_id in _reindex_inflight:
+            return False
+        _reindex_inflight.add(doc_id)
+        return True
+
+
+def _release_reindex(doc_id: int) -> None:
+    with _reindex_lock:
+        _reindex_inflight.discard(doc_id)
+
+
+def is_reindexing(doc_id: int) -> bool:
+    """文档当前是否有重解析任务在跑（供批量入口跳过）。"""
+    with _reindex_lock:
+        return doc_id in _reindex_inflight
+
+
 @router.post("/{doc_id}/reindex", response_model=DocumentOut)
 async def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db), cfg=Depends(get_config)) -> DocumentOut:
     """重新索引（删旧向量与 chunks，后台重新解析向量化）。
@@ -256,15 +287,25 @@ async def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db), cfg
     doc = db.get_document(doc_id)
     if not doc:
         raise HTTPException(404, "文档不存在")
-    threading.Thread(target=_reindex_in_bg, args=(doc_id, db), daemon=True).start()
+    if not _reserve_reindex(doc_id):
+        raise HTTPException(409, "该文档正在重新解析中，请稍后再试")
+    threading.Thread(target=_reindex_in_bg, args=(doc_id, db, True), daemon=True).start()
     return _doc_to_out(db.get_document(doc_id))
 
 
 # ===== KB 升级：预览 / 导出 / 编辑 / 标签 / 版本 =====
 
 
-def _reindex_in_bg(doc_id: int, db: KBDatabase) -> None:
-    """后台重新索引文档（删旧 chunks+向量 → 重新解析分块向量化）。复用 ingest 管线。"""
+def _reindex_in_bg(doc_id: int, db: KBDatabase, reserved: bool = False) -> None:
+    """后台重新索引文档（删旧 chunks+向量 → 重新解析分块向量化）。复用 ingest 管线。
+
+    reserved=True 表示调用方已占用 _reindex_inflight 槽位（单文档入口）；
+    批量、编辑、版本回滚等入口在此尝试占用，已被占用则直接跳过，
+    避免多用户重复触发同一文档的解析与向量化。
+    """
+    if not reserved and not _reserve_reindex(doc_id):
+        logger.info("文档 %s 已在重新解析中，跳过重复任务", doc_id)
+        return
     try:
         llm = get_llm()
         vs = get_vector_store()
@@ -294,6 +335,8 @@ def _reindex_in_bg(doc_id: int, db: KBDatabase) -> None:
         db.update_document_status(
             doc_id, DocumentStatus.EMBED_FAILED, error_message=f"重新索引失败: {e}"
         )
+    finally:
+        _release_reindex(doc_id)
 
 
 # ----- 预览 -----

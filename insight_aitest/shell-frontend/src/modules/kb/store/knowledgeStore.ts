@@ -18,6 +18,8 @@ export interface Document {
   source_url?: string;
   external_id?: string;
   created_at: string;
+  /** 后台重解析进行中（后端内存标记，早于 status 变为 pending） */
+  reindexing?: boolean;
 }
 
 export interface FolderNode {
