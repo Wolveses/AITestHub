@@ -122,7 +122,10 @@ export function KnowledgeBase() {
     listFeishuSpaces,
     syncFeishuSpace,
   } = useKnowledgeStore();
-  const { currentProjectId, projects, loadProjects, setProject } = useProjectStore();
+  const { projects, loadProjects } = useProjectStore();
+  // 缺陷库使用独立项目上下文，不改全局项目，避免影响知识库文档列表
+  const defectProjectId = useKnowledgeStore((s) => s.defectProjectId);
+  const setDefectProjectId = useKnowledgeStore((s) => s.setDefectProjectId);
   const inputRef = useRef<HTMLInputElement>(null);
   const [searchInput, setSearchInput] = useState('');  // 输入框本地 state（防抖后同步到后端）
   const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
@@ -156,7 +159,7 @@ export function KnowledgeBase() {
       stopPolling();
       setForcePoll(false);
     };
-  }, [currentProjectId, activeTab]); // 项目切换或标签切换时重新加载
+  }, [defectProjectId, activeTab]); // 缺陷库项目切换或标签切换时重新加载
 
   // 根据当前 currentFolderId 查找面包屑路径
   const findFolderPath = (nodes: FolderNode[], targetId: number | null): FolderNode[] => {
@@ -440,10 +443,10 @@ export function KnowledgeBase() {
 
   useEffect(() => {
     if (activeTab !== 'defect' || projects.length === 0) return;
-    if (currentProjectId === null || !projects.some((p) => p.id === currentProjectId)) {
-      setProject(projects[0].id);
+    if (defectProjectId === null || !projects.some((p) => p.id === defectProjectId)) {
+      setDefectProjectId(projects[0].id);
     }
-  }, [activeTab, projects, currentProjectId, setProject]);
+  }, [activeTab, projects, defectProjectId, setDefectProjectId]);
 
   return (
     <div style={{ flex: 1, display: 'flex', height: '100%', overflow: 'hidden' }}>
@@ -472,9 +475,9 @@ export function KnowledgeBase() {
                 {/* 与用例管理一致：项目在页内下拉切换，进入后自动选中 */}
                 <span style={{ color: 'var(--text-muted)' }}>{t('kb.project', '项目')}</span>
                 <select
-                  value={currentProjectId ?? ''}
+                  value={defectProjectId ?? ''}
                   onChange={(e) => {
-                    if (e.target.value) setProject(Number(e.target.value));
+                    if (e.target.value) setDefectProjectId(Number(e.target.value));
                   }}
                   style={{
                     background: 'var(--bg-card)',

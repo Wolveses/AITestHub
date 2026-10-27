@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { AlertTriangle, Bug, RefreshCw, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useProjectStore } from '../../../shared/store/projectStore';
+import { useKnowledgeStore } from '../store/knowledgeStore';
 
 export interface TapdProgress {
   running: boolean;
@@ -74,7 +75,9 @@ function saveLastSync(workspaceId: string, backfillDays: number): void {
 export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalProps) {
   const { t } = useTranslation();
   // 绑定项目由缺陷库页面选定，弹窗不再单独选择项目
-  const { currentProjectId, projects, loadProjects } = useProjectStore();
+  // 缺陷库使用独立项目上下文，避免影响知识库文档列表的项目过滤
+  const { projects, loadProjects } = useProjectStore();
+  const currentProjectId = useKnowledgeStore((s) => s.defectProjectId);
 
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [loadingConfig, setLoadingConfig] = useState(false);

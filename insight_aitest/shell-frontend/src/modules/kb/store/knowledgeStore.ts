@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { useProjectStore } from '../../../shared/store/projectStore';
 
 export interface DefectMeta {
   defect_id: string;
@@ -83,6 +82,8 @@ interface KnowledgeState {
   filterTags: string[];
   // 内容实体类型筛选：doc | defect | case
   kindFilter: string;
+  // 缺陷库独立的项目上下文（不写入全局项目，避免污染知识库文档列表的项目过滤）
+  defectProjectId: number | null;
   folders: FolderNode[];
   currentFolderId: number | null; // null 表示当前根目录（本地文档/飞书文档根目录），0 表示未分类
   activeTab: 'local' | 'feishu' | 'defect';
@@ -93,6 +94,7 @@ interface KnowledgeState {
   pollTimer: number | null;
   tags: TagCount[];
   setActiveTab: (tab: 'local' | 'feishu' | 'defect') => void;
+  setDefectProjectId: (id: number | null) => void;
   setKindFilter: (v: string) => void;
   setFeishuModalOpen: (v: boolean) => void;
   loadDocuments: (opts?: {
@@ -138,11 +140,15 @@ const FOLDERS_BASE = '/api/modules/kb/folders';
 const NON_TERMINAL = ['pending', 'parsing', 'chunking', 'embedding'];
 export const isNonTerminal = (status: string) => NON_TERMINAL.includes(status);
 
-function projectQs(extraParams?: Record<string, any>): string {
-  const { currentProjectId, currentVersionId } = useProjectStore.getState();
+function projectQs(
+  extraParams?: Record<string, any>,
+  projectOverride?: { projectId: number | null },
+): string {
   const params = new URLSearchParams();
-  if (currentProjectId !== null) params.set('project_id', String(currentProjectId));
-  if (currentVersionId !== null) params.set('version_id', String(currentVersionId));
+  // 知识库不绑定全局项目：仅缺陷库按 defectProjectId 显式过滤，其余查询不带项目条件
+  if (projectOverride?.projectId != null) {
+    params.set('project_id', String(projectOverride.projectId));
+  }
   if (extraParams) {
     for (const [k, v] of Object.entries(extraParams)) {
       if (v === undefined || v === null || v === '') continue;
@@ -166,6 +172,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   filterDocType: '',
   filterTags: [],
   kindFilter: 'doc',
+  defectProjectId: null,
   folders: [],
   currentFolderId: null,
   activeTab: 'local',
@@ -194,6 +201,10 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
     set({ kindFilter: v, page: 1 });
   },
 
+  setDefectProjectId: (id) => {
+    set({ defectProjectId: id, page: 1 });
+  },
+
   setFeishuModalOpen: (v: boolean) => set({ feishuModalOpen: v }),
 
   loadDocuments: async (opts) => {
@@ -206,7 +217,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       const page = opts?.page ?? (opts?.resetPage ? 1 : s.page);
       const pageSize = opts?.page_size ?? s.pageSize;
 
-      const { currentFolderId, activeTab, kindFilter } = get();
+      const { currentFolderId, activeTab, kindFilter, defectProjectId } = get();
       const extra: Record<string, any> = {
         // 缺陷数据来自 TAPD，source_type 与 local/feishu 不同，按 kind 查询时不再按来源过滤
         source_type: kindFilter === 'defect' ? undefined : activeTab,
@@ -220,7 +231,10 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       if (currentFolderId !== null) {
         extra.folder_id = currentFolderId;
       }
-      const qs = projectQs(extra);
+      const qs = projectQs(
+        extra,
+        kindFilter === 'defect' ? { projectId: defectProjectId } : undefined,
+      );
       const r = await fetch(`${BASE}${qs}`);
       const data = await r.json();
       const items: Document[] = data.items || [];
@@ -267,15 +281,13 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
     get().loadDocuments({ page: 1 });
   },
 
-  createFolder: async (name: string, parentId?: number | null) => {
-    const { currentProjectId } = useProjectStore.getState();
+  createFolder: async (name, parentId) => {
     const r = await fetch(FOLDERS_BASE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name,
         parent_id: parentId ?? null,
-        project_id: currentProjectId ?? null,
       }),
     });
     if (!r.ok) throw new Error(await r.text());
@@ -472,11 +484,10 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   syncFeishuSpace: async (spaceId: string) => {
     set({ syncingFeishu: true });
     try {
-      const { currentProjectId } = useProjectStore.getState();
       const r = await fetch('/api/modules/kb/feishu/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ space_id: spaceId, project_id: currentProjectId }),
+        body: JSON.stringify({ space_id: spaceId }),
       });
       if (!r.ok) {
         const err = await r.text();

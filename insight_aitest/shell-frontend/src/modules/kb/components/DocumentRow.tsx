@@ -278,7 +278,8 @@ export function DocumentRow({
               本地
             </span>
           )}
-          {(doc.status === 'ready' || doc.status === 'not_vectorized') && <span>{t('kb.chunkCharCount', { chunks: doc.chunk_count, chars: doc.char_count })}</span>}
+          {/* 缺陷固定一条一个分块，无需展示分块数 */}
+          {!defect && (doc.status === 'ready' || doc.status === 'not_vectorized') && <span>{t('kb.chunkCharCount', { chunks: doc.chunk_count, chars: doc.char_count })}</span>}
           {typeLabel && <span style={{ background: 'var(--bg-card)', padding: '0 5px', borderRadius: 3 }}>{typeLabel}</span>}
           {doc.tags?.length > 0 && (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
@@ -314,7 +315,7 @@ export function DocumentRow({
         <button onClick={() => onPreview(doc)} title={t('kb.preview')} disabled={isParsing} style={actionStyle}>
           <Eye size={14} />
         </button>
-        {onPreviewChunks && (doc.status === 'ready' || doc.status === 'not_vectorized' || doc.status === 'embed_failed' || doc.status === 'embed_partial') && (
+        {!defect && onPreviewChunks && (doc.status === 'ready' || doc.status === 'not_vectorized' || doc.status === 'embed_failed' || doc.status === 'embed_partial') && (
           <button onClick={() => onPreviewChunks(doc)} title={t('kb.previewChunks', '预览分块')} disabled={isParsing} style={actionStyle}>
             <Scissors size={14} />
           </button>
