@@ -490,7 +490,13 @@ export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps)
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Files size={16} style={{ opacity: 0.8 }} />
-            <span>{useKnowledgeStore.getState().activeTab === 'feishu' ? '飞书知识库' : t('kb.allDocuments', '全部文档')}</span>
+            <span>
+              {useKnowledgeStore.getState().activeTab === 'feishu'
+                ? t('nav.kbFeishu', '飞书文档')
+                : useKnowledgeStore.getState().activeTab === 'defect'
+                  ? t('kb.allDefects', '全部缺陷')
+                  : t('kb.allDocuments', '全部文档')}
+            </span>
           </div>
 
           {/* 仅本地文档支持手动新建根目录；飞书目录结构由飞书空间决定 */}

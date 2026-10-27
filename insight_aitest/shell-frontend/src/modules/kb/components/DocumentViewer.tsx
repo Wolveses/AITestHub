@@ -106,7 +106,8 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
           {/* 标题栏 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--bg-card)' }}>
             <Dialog.Title style={{ flex: 1, fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {doc.filename}
+              {/* 缺陷正文首行已含标题，标题栏只显示缺陷号，避免标题重复出现 */}
+              {doc.kind === 'defect' && doc.defect ? `缺陷 #${doc.defect.defect_id}` : doc.filename}
             </Dialog.Title>
 
             {/* 工具按钮 */}
@@ -136,7 +137,7 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
                 href={doc.source_url}
                 target="_blank"
                 rel="noreferrer"
-                title="在飞书中打开"
+                title={doc.source_type === 'tapd' ? '在 TAPD 中打开' : '在飞书中打开'}
                 style={{
                   ...toolBtnStyle(false),
                   textDecoration: 'none',
@@ -147,7 +148,7 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
                   gap: 3,
                 }}
               >
-                飞书原链
+                {doc.source_type === 'tapd' ? 'TAPD 原链' : '飞书原链'}
               </a>
             )}
             <a href={rawUrl(doc.id)} download title={t('kb.download')} style={{ ...toolBtnStyle(false), textDecoration: 'none', display: 'inline-flex' }}>

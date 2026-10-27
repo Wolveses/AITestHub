@@ -122,7 +122,7 @@ export function KnowledgeBase() {
     listFeishuSpaces,
     syncFeishuSpace,
   } = useKnowledgeStore();
-  const { currentProjectId } = useProjectStore();
+  const { currentProjectId, projects, loadProjects, setProject } = useProjectStore();
   const inputRef = useRef<HTMLInputElement>(null);
   const [searchInput, setSearchInput] = useState('');  // 输入框本地 state（防抖后同步到后端）
   const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
@@ -430,10 +430,27 @@ export function KnowledgeBase() {
     }
   }, [feishuModalOpen, listFeishuSpaces]);
 
+  // 缺陷库与用例管理一致：进入后自动选中第一个项目（当前项目失效时也回落到第一个），
+  // 项目可在页内下拉切换，不做整页拦截。
+  useEffect(() => {
+    if (activeTab === 'defect' && projects.length === 0) {
+      loadProjects();
+    }
+  }, [activeTab, projects.length, loadProjects]);
+
+  useEffect(() => {
+    if (activeTab !== 'defect' || projects.length === 0) return;
+    if (currentProjectId === null || !projects.some((p) => p.id === currentProjectId)) {
+      setProject(projects[0].id);
+    }
+  }, [activeTab, projects, currentProjectId, setProject]);
+
   return (
     <div style={{ flex: 1, display: 'flex', height: '100%', overflow: 'hidden' }}>
-      {/* 左侧目录树 */}
-      <FolderTree currentFolderId={currentFolderId} onSelectFolder={setCurrentFolderId} />
+      {/* 左侧目录树：缺陷库不展示文档目录 */}
+      {activeTab !== 'defect' && (
+        <FolderTree currentFolderId={currentFolderId} onSelectFolder={setCurrentFolderId} />
+      )}
 
       {/* 右侧主工作区 */}
       <div style={{ flex: 1, overflow: 'auto', padding: 16, display: 'flex', flexDirection: 'column' }}>
@@ -450,38 +467,88 @@ export function KnowledgeBase() {
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span
-              onClick={() => setCurrentFolderId(null)}
-              style={{
-                cursor: 'pointer',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
-                color: currentFolderId === null ? 'var(--text-primary, #111)' : 'inherit',
-                fontWeight: currentFolderId === null ? 600 : 400,
-              }}
-            >
-              <Home size={14} /> {activeTab === 'feishu' ? '飞书知识库' : t('kb.allDocuments', '全部文档')}
-            </span>
-
-            {breadcrumbs.map((b) => (
-              <React.Fragment key={b.id}>
+            {activeTab === 'defect' ? (
+              <>
+                {/* 与用例管理一致：项目在页内下拉切换，进入后自动选中 */}
+                <span style={{ color: 'var(--text-muted)' }}>{t('kb.project', '项目')}</span>
+                <select
+                  value={currentProjectId ?? ''}
+                  onChange={(e) => {
+                    if (e.target.value) setProject(Number(e.target.value));
+                  }}
+                  style={{
+                    background: 'var(--bg-card)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text-primary)',
+                    padding: '4px 8px',
+                    borderRadius: 6,
+                    fontSize: 13,
+                    cursor: 'pointer',
+                    outline: 'none',
+                  }}
+                >
+                  {projects.length === 0 ? (
+                    <option value="">{t('testcase.noProjects', '暂无项目')}</option>
+                  ) : (
+                    projects.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))
+                  )}
+                </select>
                 <ChevronRight size={13} style={{ opacity: 0.5 }} />
                 <span
-                  onClick={() => setCurrentFolderId(b.id)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    color: 'var(--text-primary, #111)',
+                    fontWeight: 600,
+                  }}
+                >
+                  <Home size={14} /> {t('kb.allDefects', '全部缺陷')}
+                </span>
+              </>
+            ) : (
+              <>
+                <span
+                  onClick={() => setCurrentFolderId(null)}
                   style={{
                     cursor: 'pointer',
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: 4,
-                    color: currentFolderId === b.id ? 'var(--primary, #3b82f6)' : 'inherit',
-                    fontWeight: currentFolderId === b.id ? 600 : 400,
+                    color: currentFolderId === null ? 'var(--text-primary, #111)' : 'inherit',
+                    fontWeight: currentFolderId === null ? 600 : 400,
                   }}
                 >
-                  <Folder size={14} /> {b.name}
+                  <Home size={14} />{' '}
+                  {activeTab === 'feishu'
+                    ? t('nav.kbFeishu', '飞书文档')
+                    : t('kb.allDocuments', '全部文档')}
                 </span>
-              </React.Fragment>
-            ))}
+
+                {breadcrumbs.map((b) => (
+                  <React.Fragment key={b.id}>
+                    <ChevronRight size={13} style={{ opacity: 0.5 }} />
+                    <span
+                      onClick={() => setCurrentFolderId(b.id)}
+                      style={{
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        color: currentFolderId === b.id ? 'var(--primary, #3b82f6)' : 'inherit',
+                        fontWeight: currentFolderId === b.id ? 600 : 400,
+                      }}
+                    >
+                      <Folder size={14} /> {b.name}
+                    </span>
+                  </React.Fragment>
+                ))}
+              </>
+            )}
           </div>
 
           <button

@@ -22,11 +22,12 @@ from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from insight_aitest.platform.persistence import Base, get_engine, session_scope
 from insight_aitest.platform.services.kb.models import (
     Chunk,
+    DefectMeta,
     Document,
     DocumentStatus,
     DocumentVersion,
@@ -168,6 +169,9 @@ def _ensure_document_meta_columns(db_path: str) -> None:
             conn.execute("ALTER TABLE documents ADD COLUMN doc_type TEXT DEFAULT ''")
         if "description" not in cols:
             conn.execute("ALTER TABLE documents ADD COLUMN description TEXT DEFAULT ''")
+        if "kind" not in cols:
+            # 内容实体类型 doc/defect/case；旧数据全部视为普通文档
+            conn.execute("ALTER TABLE documents ADD COLUMN kind TEXT DEFAULT 'doc'")
         if "folder_id" not in cols:
             conn.execute("ALTER TABLE documents ADD COLUMN folder_id INTEGER")
         if "source_type" not in cols:
@@ -271,7 +275,13 @@ class KBDatabase:
                 if abs_path not in _schema_ready:  # double-check
                     Base.metadata.create_all(
                         get_engine(db_path),
-                        tables=[Document.__table__, Chunk.__table__, DocumentVersion.__table__, Folder.__table__],
+                        tables=[
+                            Document.__table__,
+                            Chunk.__table__,
+                            DocumentVersion.__table__,
+                            Folder.__table__,
+                            DefectMeta.__table__,
+                        ],
                     )
                     _ensure_project_columns(db_path)
                     _ensure_document_meta_columns(db_path)
@@ -385,6 +395,7 @@ class KBDatabase:
         source_url: str = "",
         external_id: str = "",
         source_modified_at: str | None = None,
+        kind: str = "doc",
     ) -> int:
         with session_scope(self.db_path) as s:
             d = Document(
@@ -399,6 +410,7 @@ class KBDatabase:
                 source_url=source_url,
                 external_id=external_id,
                 source_modified_at=source_modified_at,
+                kind=kind,
             )
             s.add(d)
             s.flush()
@@ -415,6 +427,7 @@ class KBDatabase:
         version_id: int | None = None,
         folder_id: int | None = None,
         source_type: str | None = None,
+        kind: str | None = None,
         search: str | None = None,
         doc_type: str | None = None,
         tags: list[str] | None = None,
@@ -443,6 +456,9 @@ class KBDatabase:
         if source_type is not None:
             stmt = stmt.where(Document.source_type == source_type)
             count_stmt = count_stmt.where(Document.source_type == source_type)
+        if kind is not None:
+            stmt = stmt.where(Document.kind == kind)
+            count_stmt = count_stmt.where(Document.kind == kind)
         if folder_id is not None:
             if folder_id == 0:  # 0 表示未分类/根目录
                 stmt = stmt.where(Document.folder_id.is_(None))
@@ -648,6 +664,72 @@ class KBDatabase:
         stmt = select(Document).where(Document.external_id == external_id)
         with session_scope(self.db_path) as s:
             return s.scalars(stmt).first()
+
+    def update_source_document(
+        self,
+        doc_id: int,
+        filename: str | None = None,
+        content_hash: str | None = None,
+        source_modified_at: str | None = None,
+        description: str | None = None,
+    ) -> None:
+        """外部源（TAPD 等）重新同步时更新来源元数据，仅更新非 None 字段。"""
+        with session_scope(self.db_path) as s:
+            d = s.get(Document, doc_id)
+            if d is None:
+                return
+            if filename is not None:
+                d.filename = filename
+            if content_hash is not None:
+                d.content_hash = content_hash
+            if source_modified_at is not None:
+                d.source_modified_at = source_modified_at
+            if description is not None:
+                d.description = description
+            d.updated_at = datetime.now()
+
+    # ===== 缺陷元数据（TAPD，与 documents 1:1）=====
+
+    _DEFECT_META_FIELDS = (
+        "workspace_id",
+        "defect_id",
+        "title",
+        "status",
+        "priority",
+        "severity",
+        "module",
+        "bugtype",
+        "owner",
+        "creator",
+        "iteration_id",
+        "found_version",
+        "fix_version",
+        "created_at_ext",
+        "modified_at_ext",
+        "comment_count",
+    )
+
+    def upsert_defect_meta(self, meta: DefectMeta) -> None:
+        """插入或覆盖缺陷元数据（document_id 主键）。"""
+        with session_scope(self.db_path) as s:
+            existing = s.get(DefectMeta, meta.document_id)
+            if existing is None:
+                s.add(meta)
+            else:
+                for f in self._DEFECT_META_FIELDS:
+                    setattr(existing, f, getattr(meta, f))
+
+    def get_defect_meta(self, document_id: int) -> DefectMeta | None:
+        with session_scope(self.db_path) as s:
+            return s.get(DefectMeta, document_id)
+
+    def list_defect_meta(self, document_ids: list[int]) -> dict[int, DefectMeta]:
+        """批量取缺陷元数据，返回 {document_id: DefectMeta}，便于列表页 join。"""
+        if not document_ids:
+            return {}
+        stmt = select(DefectMeta).where(DefectMeta.document_id.in_(document_ids))
+        with session_scope(self.db_path) as s:
+            return {m.document_id: m for m in s.scalars(stmt)}
 
     # ===== 文档元数据 / 内容 / 版本（KB 升级新增）=====
 
@@ -922,6 +1004,14 @@ class KBDatabase:
             pass  # FTS 同步不阻塞主摄取管线
 
         return ids
+
+    def delete_chunks(self, document_id: int) -> None:
+        """删除某文档的全部 chunk（重写内容前调用，保证幂等）。
+
+        注意：向量表不随 chunk 行级联，调用方需先用 VectorStore.delete_document 清向量。
+        """
+        with session_scope(self.db_path) as s:
+            s.execute(delete(Chunk).where(Chunk.document_id == document_id))
 
     def update_chunk_embed_status(self, chunk_id: int, status: EmbedStatus) -> None:
         """走 vec0 原生连接（非 ORM session）。

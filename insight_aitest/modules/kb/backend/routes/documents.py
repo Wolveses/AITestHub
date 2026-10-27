@@ -30,11 +30,32 @@ from insight_aitest.platform.services.kb.models import DocumentStatus
 from insight_aitest.platform.services.kb.loader import get_loader
 from insight_aitest.platform.services.kb.loader.base import UnsupportedFormatError
 from insight_aitest.platform.services.kb.ingest import process_document
+from insight_aitest.platform.services.tapd.labels import (
+    PRIORITY_LABELS,
+    SEVERITY_LABELS,
+    STATUS_LABELS,
+    label,
+)
 from insight_aitest.modules.ai.backend.deps import get_config, get_kb_db, get_llm, get_vector_store
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["kb-documents"])
+
+
+class DefectOut(BaseModel):
+    """缺陷结构化摘要（来自 kb_defect_meta，列表页直接展示，无需解析正文）。"""
+
+    defect_id: str = ""
+    workspace_id: str = ""
+    status: str = ""
+    priority: str = ""
+    severity: str = ""
+    module: str = ""
+    owner: str = ""
+    created_at: str = ""
+    modified_at: str = ""
+    comment_count: int = 0
 
 
 class DocumentOut(BaseModel):
@@ -53,12 +74,14 @@ class DocumentOut(BaseModel):
     source_type: str = "local"
     source_url: str = ""
     external_id: str = ""
+    kind: str = "doc"
+    defect: DefectOut | None = None
     created_at: str
     # 后台重解析进行中：内存标记，早于 status 变为 pending，供前端展示解析中并置灰操作
     reindexing: bool = False
 
     @classmethod
-    def from_doc(cls, doc) -> "DocumentOut":
+    def from_doc(cls, doc, defect: "DefectOut | None" = None) -> "DocumentOut":
         # tags 列存 JSON 数组字符串，解析为 list；解析失败降级空列表
         try:
             tags = json.loads(doc.tags) if getattr(doc, "tags", "") else []
@@ -82,14 +105,32 @@ class DocumentOut(BaseModel):
             source_type=getattr(doc, "source_type", "local") or "local",
             source_url=getattr(doc, "source_url", "") or "",
             external_id=getattr(doc, "external_id", "") or "",
+            kind=getattr(doc, "kind", "doc") or "doc",
+            defect=defect,
             created_at=doc.created_at.isoformat(),
         )
 
 
-def _doc_to_out(doc) -> DocumentOut:
-    out = DocumentOut.from_doc(doc)
+def _doc_to_out(doc, defect: "DefectOut | None" = None) -> DocumentOut:
+    out = DocumentOut.from_doc(doc, defect)
     out.reindexing = is_reindexing(doc.id)
     return out
+
+
+def _defect_to_out(meta) -> DefectOut:
+    return DefectOut(
+        defect_id=meta.defect_id,
+        workspace_id=meta.workspace_id,
+        # 库里存 TAPD 原始枚举值，展示层统一转中文
+        status=label(STATUS_LABELS, meta.status),
+        priority=label(PRIORITY_LABELS, meta.priority),
+        severity=label(SEVERITY_LABELS, meta.severity),
+        module=meta.module,
+        owner=meta.owner,
+        created_at=meta.created_at_ext,
+        modified_at=meta.modified_at_ext,
+        comment_count=meta.comment_count,
+    )
 
 
 def resolve_storage_path(storage_path_str: str) -> Path:
@@ -122,6 +163,7 @@ def list_documents(
     version_id: int | None = None,
     folder_id: int | None = None,
     source_type: str | None = None,
+    kind: str | None = None,
     search: str | None = None,
     doc_type: str | None = None,
     tags: list[str] | None = None,
@@ -134,6 +176,7 @@ def list_documents(
         version_id=version_id,
         folder_id=folder_id,
         source_type=source_type,
+        kind=kind,
         search=search,
         doc_type=doc_type,
         tags=tags,
@@ -141,8 +184,13 @@ def list_documents(
         page_size=page_size,
         return_total=True,
     )
+    # 缺陷行直接带上结构化摘要，列表页无需再解析正文
+    defect_map = db.list_defect_meta([d.id for d in items]) if items else {}
     return {
-        "items": [_doc_to_out(d) for d in items],
+        "items": [
+            _doc_to_out(d, _defect_to_out(defect_map[d.id]) if d.id in defect_map else None)
+            for d in items
+        ],
         "total": total,
         "page": page,
         "page_size": page_size,

@@ -74,7 +74,10 @@ class Document(MappedAsDataclass, Base):
     """
 
     __tablename__ = "documents"
-    __table_args__ = (Index("idx_documents_status", "status"),)
+    __table_args__ = (
+        Index("idx_documents_status", "status"),
+        Index("idx_documents_kind", "kind"),
+    )
 
     id: Mapped[int | None] = mapped_column(
         Integer, primary_key=True, autoincrement=True, default=None
@@ -95,6 +98,9 @@ class Document(MappedAsDataclass, Base):
     # KB 升级：标签与元数据（幂等补列，旧数据为空）
     tags: Mapped[str] = mapped_column(Text, default="")  # JSON 数组字符串
     doc_type: Mapped[str] = mapped_column(Text, default="")
+    # 内容实体类型：doc（文档）| defect（缺陷）| case（用例）。
+    # 与 source_type（数据来源 local/feishu/tapd）正交，幂等补列，旧数据默认 doc。
+    kind: Mapped[str] = mapped_column(Text, default="doc")
     description: Mapped[str] = mapped_column(Text, default="")
     # 飞书等外部数据源支持
     source_type: Mapped[str] = mapped_column(Text, default="local")  # local | feishu
@@ -105,6 +111,44 @@ class Document(MappedAsDataclass, Base):
     source_modified_at: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+
+
+class DefectMeta(MappedAsDataclass, Base):
+    """TAPD 缺陷结构化元数据（与 documents 1:1，``document_id`` 即主键）。
+
+    只放「需要筛选/排序/统计」的字段；复现步骤、期望/实际、根因、评论等叙述性内容
+    留在文档正文与 chunk 里，避免把 30+ 字段摊到通用 documents 表。
+    """
+
+    __tablename__ = "kb_defect_meta"
+    __table_args__ = (
+        Index("idx_defect_status", "status"),
+        Index("idx_defect_module", "module"),
+        Index("idx_defect_owner", "owner"),
+        Index("idx_defect_modified", "modified_at_ext"),
+        Index("idx_defect_external", "workspace_id", "defect_id", unique=True),
+    )
+
+    document_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True
+    )
+    workspace_id: Mapped[str] = mapped_column(Text, default="")
+    defect_id: Mapped[str] = mapped_column(Text, default="")
+    title: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(Text, default="")
+    priority: Mapped[str] = mapped_column(Text, default="")
+    severity: Mapped[str] = mapped_column(Text, default="")
+    module: Mapped[str] = mapped_column(Text, default="")
+    bugtype: Mapped[str] = mapped_column(Text, default="")
+    owner: Mapped[str] = mapped_column(Text, default="")
+    creator: Mapped[str] = mapped_column(Text, default="")
+    iteration_id: Mapped[str] = mapped_column(Text, default="")
+    found_version: Mapped[str] = mapped_column(Text, default="")
+    fix_version: Mapped[str] = mapped_column(Text, default="")
+    # 外部时间统一存字符串原文（如 2026-09-02 10:00:00），避免时区歧义
+    created_at_ext: Mapped[str] = mapped_column(Text, default="")
+    modified_at_ext: Mapped[str] = mapped_column(Text, default="")
+    comment_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Folder(MappedAsDataclass, Base):

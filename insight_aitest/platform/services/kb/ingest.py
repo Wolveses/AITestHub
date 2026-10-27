@@ -22,7 +22,7 @@ from insight_aitest.platform.services.kb.loader.base import (
     DocumentLoadError,
     UnsupportedFormatError,
 )
-from insight_aitest.platform.services.kb.models import DocumentStatus, EmbedStatus
+from insight_aitest.platform.services.kb.models import Chunk, DocumentStatus, EmbedStatus
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +129,11 @@ def process_document(
         return
 
     # 4. 判定终态
+    _finalize_embed_status(document_id, db)
+
+
+def _finalize_embed_status(document_id: int, db: "KBDatabase") -> None:
+    """根据各 chunk 的向量化结果写入文档终态（ready / embed_failed / embed_partial）。"""
     db_chunks = db.get_chunks_by_document(document_id)
     ok = sum(1 for c in db_chunks if c.embed_status == EmbedStatus.OK)
     failed = sum(1 for c in db_chunks if c.embed_status == EmbedStatus.FAILED)
@@ -142,3 +147,74 @@ def process_document(
         db.update_document_status(
             document_id, DocumentStatus.EMBED_PARTIAL, error_message=f"{ok} 块成功，{failed} 块失败"
         )
+
+
+def process_text(
+    document_id: int,
+    texts: list[str],
+    db: "KBDatabase",
+    vector_store: "VectorStore",
+    llm: "LLMClient",
+    config: "LLMConfig",
+) -> None:
+    """给定分块文本直接入库并向量化（跳过 loader/chunker）。
+
+    外部结构化条目（如 TAPD 缺陷：一条缺陷一块）使用——分块语义由调用方掌控，
+    避免通用 chunker 把一条缺陷切碎或多条合并。重复调用会先清空旧 chunk 与向量，
+    保证幂等（同步覆盖场景）。
+    """
+    doc = db.get_document(document_id)
+    if doc is None:
+        return
+
+    texts = [t for t in texts if t and t.strip()]
+    if not texts:
+        db.update_document_status(
+            document_id, DocumentStatus.PARSE_FAILED, error_message="没有可入库的文本内容"
+        )
+        return
+    if len(texts) > config.max_chunks_per_doc:
+        db.update_document_status(
+            document_id,
+            DocumentStatus.PARSE_FAILED,
+            error_message=f"分块数 {len(texts)} 超过上限 {config.max_chunks_per_doc}，请拆分条目。",
+        )
+        return
+
+    db.update_document_status(
+        document_id, DocumentStatus.CHUNKING, char_count=sum(len(t) for t in texts)
+    )
+
+    # 幂等清理：先清向量（需读旧 chunk id），再删 chunk 行（FTS 由删除触发器同步清理）
+    vector_store.delete_document(document_id)
+    db.delete_chunks(document_id)
+
+    chunks: list[Chunk] = []
+    offset = 0
+    for i, text in enumerate(texts):
+        chunks.append(
+            Chunk(
+                document_id=document_id,
+                chunk_index=i,
+                text=text,
+                char_start=offset,
+                char_end=offset + len(text),
+            )
+        )
+        offset += len(text)
+    db.insert_chunks(document_id, chunks)
+    db.update_document_status(document_id, DocumentStatus.EMBEDDING, chunk_count=len(chunks))
+
+    if not getattr(config, "vector_enabled", False):
+        db.update_document_status(document_id, DocumentStatus.NOT_VECTORIZED)
+        return
+
+    try:
+        vector_store.upsert_chunks(document_id, chunks)
+    except Exception as e:
+        db.update_document_status(
+            document_id, DocumentStatus.EMBED_FAILED, error_message=f"向量化失败: {e}"
+        )
+        return
+
+    _finalize_embed_status(document_id, db)

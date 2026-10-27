@@ -81,6 +81,13 @@ class LLMConfig:
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
 
+    # ===== TAPD 缺陷同步 =====
+    # 凭证同样拆成扁平字段并支持环境变量注入；不通过 /ai 配置接口回显，不支持前端修改。
+    tapd_auth_user: str = ""
+    tapd_auth_pwd: str = ""
+    tapd_base_url: str = "https://api.tapd.cn"
+    tapd_backfill_days: int = 90
+
     # ===== 多 Provider 管理（Cursor 风格灵活切换）=====
     # providers 是用户保存的所有 Provider 配置列表；active_provider_id 指向当前生效的那一个。
     # 每条 provider 形如：
@@ -138,6 +145,10 @@ _ENV_KEYS = {
     "embed_api_key": "INSIGHT_EYE_AI_EMBED_API_KEY",
     "feishu_app_id": "INSIGHT_EYE_AI_FEISHU_APP_ID",
     "feishu_app_secret": "INSIGHT_EYE_AI_FEISHU_APP_SECRET",
+    "tapd_auth_user": "INSIGHT_EYE_AI_TAPD_AUTH_USER",
+    "tapd_auth_pwd": "INSIGHT_EYE_AI_TAPD_AUTH_PWD",
+    "tapd_base_url": "INSIGHT_EYE_AI_TAPD_BASE_URL",
+    "tapd_backfill_days": "INSIGHT_EYE_AI_TAPD_BACKFILL_DAYS",
 }
 
 # 需要转 int 的字段
@@ -152,6 +163,7 @@ _INT_FIELDS = {
     "max_upload_mb",
     "max_chunks_per_doc",
     "rerank_fetch_k",
+    "tapd_backfill_days",
 }
 # 需要转 float 的字段
 _FLOAT_FIELDS = {"min_score", "semantic_breakpoint"}

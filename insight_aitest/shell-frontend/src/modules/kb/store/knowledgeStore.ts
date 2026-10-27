@@ -1,6 +1,19 @@
 import { create } from 'zustand';
 import { useProjectStore } from '../../../shared/store/projectStore';
 
+export interface DefectMeta {
+  defect_id: string;
+  workspace_id: string;
+  status: string;
+  priority: string;
+  severity: string;
+  module: string;
+  owner: string;
+  created_at: string;
+  modified_at: string;
+  comment_count: number;
+}
+
 export interface Document {
   id: number;
   filename: string;
@@ -17,6 +30,10 @@ export interface Document {
   source_type?: string;
   source_url?: string;
   external_id?: string;
+  /** 内容实体类型：文档 / 缺陷 / 用例 */
+  kind?: 'doc' | 'defect' | 'case';
+  /** kind=defect 时的 TAPD 结构化元数据 */
+  defect?: DefectMeta | null;
   created_at: string;
   /** 后台重解析进行中（后端内存标记，早于 status 变为 pending） */
   reindexing?: boolean;
@@ -64,16 +81,19 @@ interface KnowledgeState {
   filterSearch: string;
   filterDocType: string;
   filterTags: string[];
+  // 内容实体类型筛选：doc | defect | case
+  kindFilter: string;
   folders: FolderNode[];
   currentFolderId: number | null; // null 表示当前根目录（本地文档/飞书文档根目录），0 表示未分类
-  activeTab: 'local' | 'feishu';
+  activeTab: 'local' | 'feishu' | 'defect';
   uploading: boolean;
   saving: boolean;
   syncingFeishu: boolean;
   feishuModalOpen: boolean;
   pollTimer: number | null;
   tags: TagCount[];
-  setActiveTab: (tab: 'local' | 'feishu') => void;
+  setActiveTab: (tab: 'local' | 'feishu' | 'defect') => void;
+  setKindFilter: (v: string) => void;
   setFeishuModalOpen: (v: boolean) => void;
   loadDocuments: (opts?: {
     search?: string;
@@ -145,6 +165,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   filterSearch: '',
   filterDocType: '',
   filterTags: [],
+  kindFilter: 'doc',
   folders: [],
   currentFolderId: null,
   activeTab: 'local',
@@ -156,10 +177,21 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   forcePoll: false,
   tags: [],
 
-  setActiveTab: (tab: 'local' | 'feishu') => {
+  setActiveTab: (tab: 'local' | 'feishu' | 'defect') => {
     set({ activeTab: tab, currentFolderId: null, page: 1, filterSearch: '', filterDocType: '', filterTags: [] });
-    get().loadFolders();
+    // 缺陷 Tab 查询 kind=defect，其余 Tab 回到普通文档
+    get().setKindFilter(tab === 'defect' ? 'defect' : 'doc');
+    if (tab === 'defect') {
+      // 缺陷来自 TAPD，不使用本地/飞书目录树
+      set({ folders: [] });
+    } else {
+      get().loadFolders();
+    }
     get().loadDocuments();
+  },
+
+  setKindFilter: (v: string) => {
+    set({ kindFilter: v, page: 1 });
   },
 
   setFeishuModalOpen: (v: boolean) => set({ feishuModalOpen: v }),
@@ -174,9 +206,11 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       const page = opts?.page ?? (opts?.resetPage ? 1 : s.page);
       const pageSize = opts?.page_size ?? s.pageSize;
 
-      const { currentFolderId, activeTab } = get();
+      const { currentFolderId, activeTab, kindFilter } = get();
       const extra: Record<string, any> = {
-        source_type: activeTab,
+        // 缺陷数据来自 TAPD，source_type 与 local/feishu 不同，按 kind 查询时不再按来源过滤
+        source_type: kindFilter === 'defect' ? undefined : activeTab,
+        kind: kindFilter,
         search: filterSearch || undefined,
         doc_type: filterDocType || undefined,
         tags: filterTags.length > 0 ? filterTags : undefined,
@@ -213,6 +247,10 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   loadFolders: async () => {
     try {
       const { activeTab } = get();
+      if (activeTab === 'defect') {
+        set({ folders: [] });
+        return;
+      }
       const qs = projectQs({ source_type: activeTab });
       const r = await fetch(`${FOLDERS_BASE}${qs}`);
       if (r.ok) {

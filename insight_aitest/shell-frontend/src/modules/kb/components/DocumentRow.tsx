@@ -35,6 +35,34 @@ const DOC_TYPE_KEY: Record<string, string> = {
   other: 'kb.typeOther',
 };
 
+// TAPD 缺陷状态色（后端已把状态转成中文展示名），未匹配时使用次要文字色
+const DEFECT_STATUS_COLOR: Record<string, string> = {
+  新建: 'var(--accent)',
+  已确认: 'var(--accent)',
+  处理中: 'var(--chart-3)',
+  已解决: 'var(--success, #10b981)',
+  已修复: 'var(--success, #10b981)',
+  已验证: 'var(--success, #10b981)',
+  已关闭: 'var(--text-muted, #64748b)',
+  已拒绝: 'var(--error)',
+  重新打开: 'var(--error)',
+  已挂起: 'var(--text-muted, #64748b)',
+  已延期: 'var(--text-muted, #64748b)',
+  // 兼容未翻译的原始枚举值
+  new: 'var(--accent)',
+  acknowledged: 'var(--accent)',
+  in_progress: 'var(--chart-3)',
+  resolved: 'var(--success, #10b981)',
+  verified: 'var(--success, #10b981)',
+  closed: 'var(--text-muted, #64748b)',
+  rejected: 'var(--error)',
+  reopened: 'var(--error)',
+  suspended: 'var(--text-muted, #64748b)',
+};
+
+const defectStatusColor = (status: string): string =>
+  DEFECT_STATUS_COLOR[status] ?? DEFECT_STATUS_COLOR[status?.toLowerCase?.() ?? ''] ?? 'var(--text-secondary)';
+
 interface DocumentRowProps {
   doc: Document;
   vectorEnabled?: boolean;
@@ -65,6 +93,7 @@ export function DocumentRow({
   onPreviewChunks,
 }: DocumentRowProps) {
   const { t } = useTranslation();
+  const defect = doc.kind === 'defect' ? doc.defect : null;
   const statusKey = STATUS_KEY[doc.status];
   const statusColor = STATUS_COLOR[doc.status] ?? "var(--text-secondary)";
   const { confirm } = useConfirmStore();
@@ -91,9 +120,46 @@ export function DocumentRow({
         <div style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
           {doc.filename}
         </div>
+        {/* 缺陷摘要：缺陷号 · 状态 · 优先级 · 模块 · 处理人 · 评论数 */}
+        {defect && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              marginTop: 2,
+              fontSize: 11,
+              color: 'var(--text-secondary, #64748b)',
+              minWidth: 0,
+            }}
+          >
+            <span
+              title={defect.status}
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: 2,
+                background: defectStatusColor(defect.status),
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {[
+                `#${defect.defect_id}`,
+                defect.status,
+                defect.priority,
+                defect.module,
+                defect.owner,
+                t('kb.defectComments', '评论{{n}}', { n: defect.comment_count }),
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </span>
+          </div>
+        )}
         <div style={{ fontSize: 11, color: "var(--text-muted)", display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           {/* 仅在「全部文档」视图下展示所属目录面包屑或未归属标识 */}
-          {showFolderScope && (
+          {showFolderScope && !defect && (
             folderPath && folderPath.length > 0 && onSelectFolder ? (
               <span
                 style={{
@@ -157,7 +223,7 @@ export function DocumentRow({
               </span>
             )
           )}
-          {/* 来源标识（本地 / 飞书） */}
+          {/* 来源标识（本地 / 飞书 / TAPD） */}
           {doc.source_type === 'feishu' ? (
             <span
               style={{
@@ -175,6 +241,24 @@ export function DocumentRow({
               title="飞书知识库同步文档"
             >
               飞书
+            </span>
+          ) : defect || doc.source_type === 'tapd' ? (
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 2,
+                background: 'rgba(124, 58, 237, 0.1)',
+                color: '#7c3aed',
+                padding: '1px 5px',
+                borderRadius: 4,
+                fontSize: 10,
+                fontWeight: 600,
+                border: '1px solid rgba(124, 58, 237, 0.25)',
+              }}
+              title={t('kb.tapdSourceHint', '从 TAPD 同步的缺陷')}
+            >
+              {t('kb.sourceTapd', 'TAPD')}
             </span>
           ) : (
             <span
@@ -202,7 +286,8 @@ export function DocumentRow({
             </span>
           )}
           {doc.error_message ? ` · ${doc.error_message}` : ''}
-          {doc.description ? ` · ${doc.description}` : ''}
+          {/* 缺陷行的结构化摘要已含状态/优先级/处理人，不再重复展示 description */}
+          {!defect && doc.description ? ` · ${doc.description}` : ''}
         </div>
       </div>
       <span
