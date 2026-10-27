@@ -112,17 +112,6 @@ class Retriever:
             return self._fulltext_fallback(query, k, document_ids, project_id, exclude_document_ids=exclude_document_ids)
         return []
 
-    def keyword_search(
-        self,
-        query: str,
-        top_k: int = 4,
-        document_ids: list[int] | None = None,
-        project_id: int | None = None,
-        exclude_document_ids: list[int] | None = None,
-    ) -> list["ScoredChunk"]:
-        """直接关键词搜索（手动档专用，跳过向量）。"""
-        return self._keyword_retrieve(query, top_k, document_ids, project_id, exclude_document_ids)
-
     def document_content(
         self,
         document_ids: list[int],
@@ -697,15 +686,6 @@ class NullRetriever:
         self,
         query: str,
         top_k: int | None = None,
-        document_ids: list[int] | None = None,
-        project_id: int | None = None,
-    ) -> list["ScoredChunk"]:
-        return []
-
-    def keyword_search(
-        self,
-        query: str,
-        top_k: int = 4,
         document_ids: list[int] | None = None,
         project_id: int | None = None,
     ) -> list["ScoredChunk"]:
