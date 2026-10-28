@@ -978,6 +978,7 @@ export default {
       xlsxParseFailed: 'xlsx 解析失败',
       previewTooLarge: '文件过大，预览失败',
       openInFeishu: '在飞书中打开',
+      openInTapd: '在 TAPD 中打开',
       previewChunks: '预览分块',
       chunksViewerTitle: '分块预览',
       chunksTotal: '共 {{n}} 块',

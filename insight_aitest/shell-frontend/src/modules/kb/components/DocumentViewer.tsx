@@ -144,7 +144,11 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
                 href={doc.source_url}
                 target="_blank"
                 rel="noreferrer"
-                title={isTapdSource ? '在 TAPD 中打开' : '在飞书中打开'}
+                title={
+                  isTapdSource
+                    ? t('kb.openInTapd', '在 TAPD 中打开')
+                    : t('kb.openInFeishu', '在飞书中打开')
+                }
                 style={{
                   ...toolBtnStyle(false),
                   textDecoration: 'none',
@@ -155,7 +159,9 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
                   gap: 3,
                 }}
               >
-                {isTapdSource ? 'TAPD 原链' : '飞书原链'}
+                {isTapdSource
+                  ? t('kb.openInTapd', '在 TAPD 中打开')
+                  : t('kb.openInFeishu', '在飞书中打开')}
               </a>
             )}
             <a href={rawUrl(doc.id)} download title={t('kb.download')} style={{ ...toolBtnStyle(false), textDecoration: 'none', display: 'inline-flex' }}>

@@ -978,6 +978,7 @@ export default {
       xlsxParseFailed: 'Failed to parse xlsx',
       previewTooLarge: 'File too large to preview',
       openInFeishu: 'Open in Feishu',
+      openInTapd: 'Open in TAPD',
       previewChunks: 'Preview chunks',
       chunksViewerTitle: 'Chunk Preview',
       chunksTotal: '{{n}} chunks',
