@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useKnowledgeStore, type Document } from '../store/knowledgeStore';
 import { TextEditor } from './editors/TextEditor';
 import { VersionHistory } from './VersionHistory';
+import { displayDocTitle } from './DocumentRow';
 
 // 重型编辑器懒加载（避免撑大首屏 bundle）
 const PdfViewer = lazy(() => import('./editors/PdfViewer').then((m) => ({ default: m.PdfViewer })));
@@ -108,12 +109,12 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
           {/* 标题栏 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--bg-card)' }}>
             <Dialog.Title style={{ flex: 1, fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {/* 缺陷/用例正文首行已含标题，标题栏只显示编号，避免标题重复出现 */}
+              {/* 缺陷/用例正文首行已含标题，标题栏只显示统一文案，避免标题重复并暴露编号 */}
               {doc.kind === 'defect' && doc.defect
-                ? `缺陷 #${doc.defect.defect_id}`
+                ? t('kb.defectPreviewTitle', '缺陷预览')
                 : doc.kind === 'case' && doc.case
-                  ? t('kb.casePreviewTitle', '用例 #{{id}}', { id: doc.case.case_id })
-                  : doc.filename}
+                  ? t('kb.casePreviewTitle', '用例预览')
+                  : displayDocTitle(doc.filename)}
             </Dialog.Title>
 
             {/* 工具按钮 */}

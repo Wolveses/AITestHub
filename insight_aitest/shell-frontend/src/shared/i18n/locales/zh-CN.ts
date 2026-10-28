@@ -1013,7 +1013,8 @@ export default {
       // 用例（TAPD）
       allCases: '全部用例',
       caseSteps: '步骤{{n}}',
-      casePreviewTitle: '用例 #{{id}}',
+      casePreviewTitle: '用例预览',
+      defectPreviewTitle: '缺陷预览',
       tapdCaseSyncHint: '从 TAPD 工作空间同步用例',
       tapdCaseModalTitle: '从 TAPD 同步用例',
       tapdCaseSelectProject: '请先在用例库选择项目',

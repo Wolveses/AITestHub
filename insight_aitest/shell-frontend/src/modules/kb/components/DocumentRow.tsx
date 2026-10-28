@@ -63,6 +63,11 @@ const DEFECT_STATUS_COLOR: Record<string, string> = {
 const tapdStatusColor = (status: string): string =>
   DEFECT_STATUS_COLOR[status] ?? DEFECT_STATUS_COLOR[status?.toLowerCase?.() ?? ''] ?? 'var(--text-secondary)';
 
+/** 展示用文档标题：去掉扩展名，以及 TAPD 同步时写入的「编号_」前缀 */
+export function displayDocTitle(filename: string): string {
+  return (filename || '').replace(/\.(md|markdown)$/i, '').replace(/^\d+_/, '');
+}
+
 interface DocumentRowProps {
   doc: Document;
   vectorEnabled?: boolean;
@@ -121,9 +126,9 @@ export function DocumentRow({
       </span>
       <div style={{ flex: 1, minWidth: 0, cursor: isParsing ? 'default' : 'pointer' }} onClick={isParsing ? undefined : () => onPreview(doc)}>
         <div style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
-          {doc.filename}
+          {displayDocTitle(doc.filename)}
         </div>
-        {/* 缺陷摘要：缺陷号 · 状态 · 优先级 · 模块 · 处理人 · 评论数 */}
+        {/* 缺陷摘要：状态 · 优先级 · 模块 · 处理人 · 评论数 */}
         {defect && (
           <div
             style={{
@@ -148,7 +153,6 @@ export function DocumentRow({
             />
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {[
-                `#${defect.defect_id}`,
                 defect.status,
                 defect.priority,
                 defect.module,
@@ -160,7 +164,7 @@ export function DocumentRow({
             </span>
           </div>
         )}
-        {/* 用例摘要：用例号 · 状态 · 优先级 · 类型 · 维护人 · 步骤数 */}
+        {/* 用例摘要：状态 · 优先级 · 类型 · 维护人 · 步骤数 */}
         {caseMeta && (
           <div
             style={{
@@ -185,7 +189,6 @@ export function DocumentRow({
             />
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {[
-                `#${caseMeta.case_id}`,
                 caseMeta.status,
                 caseMeta.priority,
                 caseMeta.case_type,

@@ -1013,7 +1013,8 @@ export default {
       // Cases (TAPD)
       allCases: 'All Cases',
       caseSteps: '{{n}} steps',
-      casePreviewTitle: 'Case #{{id}}',
+      casePreviewTitle: 'Case preview',
+      defectPreviewTitle: 'Defect preview',
       tapdCaseSyncHint: 'Sync cases from a TAPD workspace',
       tapdCaseModalTitle: 'Sync Cases from TAPD',
       tapdCaseSelectProject: 'Select a project in Case Library first',
