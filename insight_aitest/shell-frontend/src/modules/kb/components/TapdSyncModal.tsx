@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import { AlertTriangle, Bug, RefreshCw, X } from 'lucide-react';
+import { AlertTriangle, Bug, ListChecks, RefreshCw, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useProjectStore } from '../../../shared/store/projectStore';
 import { useKnowledgeStore } from '../store/knowledgeStore';
@@ -24,7 +24,9 @@ interface TapdConfig {
 interface TapdSyncModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** 同步结束（running=false 且 total>0）后回调，用于刷新缺陷列表 */
+  /** 同步对象：缺陷（默认）或用例 */
+  mode?: 'bug' | 'case';
+  /** 同步结束（running=false 且 total>0）后回调，用于刷新缺陷/用例列表 */
   onSynced?: () => void;
 }
 
@@ -44,12 +46,14 @@ async function readError(r: Response): Promise<string> {
   return msg;
 }
 
-// 上次成功发起同步的参数：工作空间与回填天数，用于下次打开弹窗时默认回显
+// 上次成功发起同步的参数：工作空间与回填天数，用于下次打开弹窗时默认回显。
+// 缺陷与用例分开存储，避免互相覆盖。
 const LAST_SYNC_KEY = 'insight_aitest.tapd_last_sync';
+const LAST_SYNC_KEY_CASE = 'insight_aitest.tapd_last_sync.case';
 
-function loadLastSync(): { workspaceId: string; backfillDays: number } | null {
+function loadLastSync(key: string): { workspaceId: string; backfillDays: number } | null {
   try {
-    const raw = window.localStorage.getItem(LAST_SYNC_KEY);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return null;
     const data = JSON.parse(raw) as { workspace_id?: string; backfill_days?: number };
     const workspaceId = (data.workspace_id || '').trim();
@@ -61,10 +65,10 @@ function loadLastSync(): { workspaceId: string; backfillDays: number } | null {
   }
 }
 
-function saveLastSync(workspaceId: string, backfillDays: number): void {
+function saveLastSync(key: string, workspaceId: string, backfillDays: number): void {
   try {
     window.localStorage.setItem(
-      LAST_SYNC_KEY,
+      key,
       JSON.stringify({ workspace_id: workspaceId, backfill_days: backfillDays }),
     );
   } catch {
@@ -72,12 +76,19 @@ function saveLastSync(workspaceId: string, backfillDays: number): void {
   }
 }
 
-export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalProps) {
+export function TapdSyncModal({ open, onOpenChange, mode = 'bug', onSynced }: TapdSyncModalProps) {
   const { t } = useTranslation();
-  // 绑定项目由缺陷库页面选定，弹窗不再单独选择项目
-  // 缺陷库使用独立项目上下文，避免影响知识库文档列表的项目过滤
+  // 绑定项目由缺陷库/用例库页面选定，弹窗不再单独选择项目
+  // 两个库各自使用独立的项目上下文，避免影响知识库文档列表的项目过滤
+  const isCase = mode === 'case';
   const { projects, loadProjects } = useProjectStore();
-  const currentProjectId = useKnowledgeStore((s) => s.defectProjectId);
+  const currentProjectId = useKnowledgeStore((s) => (isCase ? s.caseProjectId : s.defectProjectId));
+
+  // 缺陷与用例使用不同的 TAPD 接口
+  const apiBase = isCase ? '/api/modules/kb/tapd/cases' : '/api/modules/kb/tapd';
+  const syncUrl = `${apiBase}/sync`;
+  const progressUrl = `${apiBase}/progress`;
+  const lastSyncKey = isCase ? LAST_SYNC_KEY_CASE : LAST_SYNC_KEY;
 
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [loadingConfig, setLoadingConfig] = useState(false);
@@ -104,14 +115,14 @@ export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalPro
     setError('');
     setProgress(null);
     loadProjects();
-    const last = loadLastSync();
+    const last = loadLastSync(lastSyncKey);
     if (last) {
       setWorkspaceId(last.workspaceId);
       setBackfillDays(last.backfillDays);
     }
 
     setLoadingConfig(true);
-    fetch('/api/modules/kb/tapd')
+    fetch(apiBase)
       .then(async (r) => {
         if (!r.ok) throw new Error(await readError(r));
         return (await r.json()) as TapdConfig;
@@ -141,7 +152,7 @@ export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalPro
     return () => {
       cancelled = true;
     };
-  }, [open, loadProjects, t]);
+  }, [open, loadProjects, t, apiBase, lastSyncKey]);
 
   // 每 2 秒轮询进度；关闭弹窗或轮询结束时清理定时器
   useEffect(() => {
@@ -149,7 +160,7 @@ export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalPro
     let stopped = false;
     const tick = async () => {
       try {
-        const r = await fetch('/api/modules/kb/tapd/progress');
+        const r = await fetch(progressUrl);
         if (!r.ok) return;
         const p = (await r.json()) as TapdProgress;
         if (stopped) return;
@@ -168,7 +179,7 @@ export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalPro
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [open, polling]);
+  }, [open, polling, progressUrl]);
 
   if (!open) return null;
 
@@ -183,13 +194,17 @@ export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalPro
       return;
     }
     if (currentProjectId === null) {
-      setError(t('kb.tapdSelectProject', '请先在缺陷库选择项目'));
+      setError(
+        isCase
+          ? t('kb.tapdCaseSelectProject', '请先在用例库选择项目')
+          : t('kb.tapdSelectProject', '请先在缺陷库选择项目'),
+      );
       return;
     }
     setSubmitting(true);
     setError('');
     try {
-      const r = await fetch('/api/modules/kb/tapd/sync', {
+      const r = await fetch(syncUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -204,7 +219,7 @@ export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalPro
         return;
       }
       // 仅在成功发起后记忆参数，下次打开弹窗默认回显
-      saveLastSync(workspaceId.trim(), backfillDays);
+      saveLastSync(lastSyncKey, workspaceId.trim(), backfillDays);
       setProgress(null);
       setPolling(true);
     } catch (e) {
@@ -254,8 +269,10 @@ export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalPro
           }}
         >
           <span style={{ fontSize: 14, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Bug size={16} style={{ color: 'var(--accent)' }} />
-            {t('kb.tapdModalTitle', '从 TAPD 同步缺陷')}
+            {isCase ? <ListChecks size={16} style={{ color: 'var(--accent)' }} /> : <Bug size={16} style={{ color: 'var(--accent)' }} />}
+            {isCase
+              ? t('kb.tapdCaseModalTitle', '从 TAPD 同步用例')
+              : t('kb.tapdModalTitle', '从 TAPD 同步缺陷')}
           </span>
           <button
             onClick={() => onOpenChange(false)}
@@ -319,7 +336,7 @@ export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalPro
             />
           </div>
 
-          {/* 绑定项目：由缺陷库页面选择，弹窗只读展示 */}
+          {/* 绑定项目：由缺陷库/用例库页面选择，弹窗只读展示 */}
           <div>
             <label style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
               {t('kb.tapdBindProject', '绑定项目')}
@@ -334,7 +351,9 @@ export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalPro
               }}
             >
               {currentProjectId === null
-                ? t('kb.tapdSelectProject', '请先在缺陷库选择项目')
+                ? isCase
+                  ? t('kb.tapdCaseSelectProject', '请先在用例库选择项目')
+                  : t('kb.tapdSelectProject', '请先在缺陷库选择项目')
                 : projects.find((p) => p.id === currentProjectId)?.name || `#${currentProjectId}`}
             </div>
           </div>
@@ -352,7 +371,9 @@ export function TapdSyncModal({ open, onOpenChange, onSynced }: TapdSyncModalPro
               style={inputStyle}
             />
             <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>
-              {t('kb.tapdBackfillHint', '仅同步最近 {{days}} 天内更新的缺陷', { days: backfillDays })}
+              {isCase
+                ? t('kb.tapdCaseBackfillHint', '仅同步最近 {{days}} 天内更新的用例', { days: backfillDays })
+                : t('kb.tapdBackfillHint', '仅同步最近 {{days}} 天内更新的缺陷', { days: backfillDays })}
             </span>
           </div>
 

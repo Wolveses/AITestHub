@@ -492,6 +492,7 @@ export default {
       kbFeishu: '飞书文档',
       kbDefect: '缺陷',
       defectLibrary: '缺陷库',
+      caseLibrary: '用例库',
       testcase: '用例管理',
       api: 'API 自动化',
       performance: '性能监控',
@@ -1009,6 +1010,14 @@ export default {
       metaInfo: '标签/信息',
       // 缺陷（TAPD）
       allDefects: '全部缺陷',
+      // 用例（TAPD）
+      allCases: '全部用例',
+      caseSteps: '步骤{{n}}',
+      casePreviewTitle: '用例 #{{id}}',
+      tapdCaseSyncHint: '从 TAPD 工作空间同步用例',
+      tapdCaseModalTitle: '从 TAPD 同步用例',
+      tapdCaseSelectProject: '请先在用例库选择项目',
+      tapdCaseBackfillHint: '仅同步最近 {{days}} 天内更新的用例',
       project: '项目',
       defectComments: '评论{{n}}',
       syncFeishu: '同步飞书',

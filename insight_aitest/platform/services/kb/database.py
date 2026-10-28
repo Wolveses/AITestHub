@@ -26,6 +26,7 @@ from sqlalchemy import delete, select
 
 from insight_aitest.platform.persistence import Base, get_engine, session_scope
 from insight_aitest.platform.services.kb.models import (
+    CaseMeta,
     Chunk,
     DefectMeta,
     Document,
@@ -33,6 +34,7 @@ from insight_aitest.platform.services.kb.models import (
     DocumentVersion,
     EmbedStatus,
     Folder,
+    TapdSyncState,
 )
 
 # 模块级：确保同一 db_path 的 schema 迁移只跑一次（防止并发 KBDatabase() 时
@@ -281,6 +283,8 @@ class KBDatabase:
                             DocumentVersion.__table__,
                             Folder.__table__,
                             DefectMeta.__table__,
+                            CaseMeta.__table__,
+                            TapdSyncState.__table__,
                         ],
                     )
                     _ensure_project_columns(db_path)
@@ -426,6 +430,7 @@ class KBDatabase:
         project_id: int | None = None,
         version_id: int | None = None,
         folder_id: int | None = None,
+        include_subfolders: bool = False,
         source_type: str | None = None,
         kind: str | None = None,
         search: str | None = None,
@@ -463,6 +468,11 @@ class KBDatabase:
             if folder_id == 0:  # 0 表示未分类/根目录
                 stmt = stmt.where(Document.folder_id.is_(None))
                 count_stmt = count_stmt.where(Document.folder_id.is_(None))
+            elif include_subfolders:
+                # 浏览目录时同时包含所有子目录下的文档
+                subtree = self.folder_subtree_ids(folder_id)
+                stmt = stmt.where(Document.folder_id.in_(subtree))
+                count_stmt = count_stmt.where(Document.folder_id.in_(subtree))
             else:
                 stmt = stmt.where(Document.folder_id == folder_id)
                 count_stmt = count_stmt.where(Document.folder_id == folder_id)
@@ -578,6 +588,21 @@ class KBDatabase:
                 )
                 for f in s.scalars(stmt)
             ]
+
+    def folder_subtree_ids(self, folder_id: int) -> list[int]:
+        """返回指定目录及其全部子孙目录的 id（含自身）。"""
+        if folder_id <= 0:
+            return [folder_id]
+        children: dict[int | None, list[int]] = {}
+        for f in self.list_folders():
+            children.setdefault(f.parent_id, []).append(f.id)
+        result: list[int] = []
+        stack = [folder_id]
+        while stack:
+            cur = stack.pop()
+            result.append(cur)
+            stack.extend(children.get(cur, []))
+        return result
 
     def update_folder(
         self,
@@ -730,6 +755,82 @@ class KBDatabase:
         stmt = select(DefectMeta).where(DefectMeta.document_id.in_(document_ids))
         with session_scope(self.db_path) as s:
             return {m.document_id: m for m in s.scalars(stmt)}
+
+    # ===== 用例元数据（TAPD，与 documents 1:1）=====
+
+    _CASE_META_FIELDS = (
+        "workspace_id",
+        "case_id",
+        "title",
+        "status",
+        "priority",
+        "case_type",
+        "category_id",
+        "category_path",
+        "owner",
+        "creator",
+        "step_count",
+        "created_at_ext",
+        "modified_at_ext",
+    )
+
+    def upsert_case_meta(self, meta: CaseMeta) -> None:
+        """插入或覆盖用例元数据（document_id 主键）。"""
+        with session_scope(self.db_path) as s:
+            existing = s.get(CaseMeta, meta.document_id)
+            if existing is None:
+                s.add(meta)
+            else:
+                for f in self._CASE_META_FIELDS:
+                    setattr(existing, f, getattr(meta, f))
+
+    def get_case_meta(self, document_id: int) -> CaseMeta | None:
+        with session_scope(self.db_path) as s:
+            return s.get(CaseMeta, document_id)
+
+    def list_case_meta(self, document_ids: list[int]) -> dict[int, CaseMeta]:
+        """批量取用例元数据，返回 {document_id: CaseMeta}，便于列表页 join。"""
+        if not document_ids:
+            return {}
+        stmt = select(CaseMeta).where(CaseMeta.document_id.in_(document_ids))
+        with session_scope(self.db_path) as s:
+            return {m.document_id: m for m in s.scalars(stmt)}
+
+    # ===== TAPD 同步水位 =====
+
+    def get_tapd_watermark(self, workspace_id: str, project_id: int, kind: str) -> str:
+        """读取上次同步水位（TAPD modified 原文），无记录返回空串。"""
+        stmt = select(TapdSyncState).where(
+            TapdSyncState.workspace_id == str(workspace_id),
+            TapdSyncState.project_id == int(project_id or 0),
+            TapdSyncState.kind == kind,
+        )
+        with session_scope(self.db_path) as s:
+            row = s.scalars(stmt).first()
+        return row.watermark if row is not None else ""
+
+    def upsert_tapd_watermark(self, workspace_id: str, project_id: int, kind: str, watermark: str) -> None:
+        """写入同步水位（同一 workspace/项目/类型 只保留一行）。"""
+        stmt = select(TapdSyncState).where(
+            TapdSyncState.workspace_id == str(workspace_id),
+            TapdSyncState.project_id == int(project_id or 0),
+            TapdSyncState.kind == kind,
+        )
+        with session_scope(self.db_path) as s:
+            row = s.scalars(stmt).first()
+            if row is None:
+                s.add(
+                    TapdSyncState(
+                        workspace_id=str(workspace_id),
+                        project_id=int(project_id or 0),
+                        kind=kind,
+                        watermark=watermark,
+                        last_sync_at=datetime.now(),
+                    )
+                )
+            else:
+                row.watermark = watermark
+                row.last_sync_at = datetime.now()
 
     # ===== 文档元数据 / 内容 / 版本（KB 升级新增）=====
 

@@ -37,6 +37,7 @@ export const childrenMap: Record<string, Record<string, ComponentType>> = {
     local: lazy(() => import('./modules/kb').then((m) => ({ default: m.LocalKnowledgeBaseApp }))),
     feishu: lazy(() => import('./modules/kb').then((m) => ({ default: m.FeishuKnowledgeBaseApp }))),
     defect: lazy(() => import('./modules/kb').then((m) => ({ default: m.DefectKnowledgeBaseApp }))),
+    case: lazy(() => import('./modules/kb').then((m) => ({ default: m.CaseKnowledgeBaseApp }))),
   },
   ai: {
     agent: lazy(() => import('./modules/ai').then((m) => ({ default: m.AgentWorkbench }))),

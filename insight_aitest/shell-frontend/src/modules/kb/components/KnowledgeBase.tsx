@@ -123,9 +123,11 @@ export function KnowledgeBase() {
     syncFeishuSpace,
   } = useKnowledgeStore();
   const { projects, loadProjects } = useProjectStore();
-  // 缺陷库使用独立项目上下文，不改全局项目，避免影响知识库文档列表
+  // 缺陷库、用例库使用独立项目上下文，不改全局项目，避免影响知识库文档列表
   const defectProjectId = useKnowledgeStore((s) => s.defectProjectId);
   const setDefectProjectId = useKnowledgeStore((s) => s.setDefectProjectId);
+  const caseProjectId = useKnowledgeStore((s) => s.caseProjectId);
+  const setCaseProjectId = useKnowledgeStore((s) => s.setCaseProjectId);
   const inputRef = useRef<HTMLInputElement>(null);
   const [searchInput, setSearchInput] = useState('');  // 输入框本地 state（防抖后同步到后端）
   const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
@@ -159,7 +161,7 @@ export function KnowledgeBase() {
       stopPolling();
       setForcePoll(false);
     };
-  }, [defectProjectId, activeTab]); // 缺陷库项目切换或标签切换时重新加载
+  }, [defectProjectId, caseProjectId, activeTab]); // 缺陷库/用例库项目切换或标签切换时重新加载
 
   // 根据当前 currentFolderId 查找面包屑路径
   const findFolderPath = (nodes: FolderNode[], targetId: number | null): FolderNode[] => {
@@ -436,7 +438,7 @@ export function KnowledgeBase() {
   // 缺陷库与用例管理一致：进入后自动选中第一个项目（当前项目失效时也回落到第一个），
   // 项目可在页内下拉切换，不做整页拦截。
   useEffect(() => {
-    if (activeTab === 'defect' && projects.length === 0) {
+    if ((activeTab === 'defect' || activeTab === 'case') && projects.length === 0) {
       loadProjects();
     }
   }, [activeTab, projects.length, loadProjects]);
@@ -447,6 +449,18 @@ export function KnowledgeBase() {
       setDefectProjectId(projects[0].id);
     }
   }, [activeTab, projects, defectProjectId, setDefectProjectId]);
+
+  useEffect(() => {
+    if (activeTab !== 'case' || projects.length === 0) return;
+    if (caseProjectId === null || !projects.some((p) => p.id === caseProjectId)) {
+      setCaseProjectId(projects[0].id);
+    }
+  }, [activeTab, projects, caseProjectId, setCaseProjectId]);
+
+  // 缺陷库与用例库共用页内项目下拉，仅项目上下文不同
+  const isEntityTab = activeTab === 'defect' || activeTab === 'case';
+  const entityProjectId = activeTab === 'case' ? caseProjectId : defectProjectId;
+  const setEntityProjectId = activeTab === 'case' ? setCaseProjectId : setDefectProjectId;
 
   return (
     <div style={{ flex: 1, display: 'flex', height: '100%', overflow: 'hidden' }}>
@@ -470,14 +484,14 @@ export function KnowledgeBase() {
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            {activeTab === 'defect' ? (
+            {isEntityTab ? (
               <>
                 {/* 与用例管理一致：项目在页内下拉切换，进入后自动选中 */}
                 <span style={{ color: 'var(--text-muted)' }}>{t('kb.project', '项目')}</span>
                 <select
-                  value={defectProjectId ?? ''}
+                  value={entityProjectId ?? ''}
                   onChange={(e) => {
-                    if (e.target.value) setDefectProjectId(Number(e.target.value));
+                    if (e.target.value) setEntityProjectId(Number(e.target.value));
                   }}
                   style={{
                     background: 'var(--bg-card)',
@@ -510,7 +524,10 @@ export function KnowledgeBase() {
                     fontWeight: 600,
                   }}
                 >
-                  <Home size={14} /> {t('kb.allDefects', '全部缺陷')}
+                  <Home size={14} />{' '}
+                  {activeTab === 'case'
+                    ? t('kb.allCases', '全部用例')
+                    : t('kb.allDefects', '全部缺陷')}
                 </span>
               </>
             ) : (

@@ -90,6 +90,29 @@ export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps)
     } catch {}
   }, [width]);
 
+  // 选中目录变化（含从文档行的归属目录面包屑跳转）时，自动展开其全部祖先节点，
+  // 否则目标目录被折叠在树里不可见
+  useEffect(() => {
+    if (currentFolderId === null) return;
+    const ancestors: number[] = [];
+    const walk = (nodes: FolderNode[], parents: number[]): boolean => {
+      for (const n of nodes) {
+        if (n.id === currentFolderId) {
+          ancestors.push(...parents);
+          return true;
+        }
+        if (n.children?.length && walk(n.children, [...parents, n.id])) return true;
+      }
+      return false;
+    };
+    if (!walk(folders, [])) return;
+    setExpanded((prev) => {
+      const next = { ...prev };
+      for (const id of ancestors) next[id] = true;
+      return next;
+    });
+  }, [currentFolderId, folders]);
+
   const toggleExpand = (id: number, e: React.MouseEvent) => {
     e.stopPropagation();
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -495,7 +518,9 @@ export function FolderTree({ currentFolderId, onSelectFolder }: FolderTreeProps)
                 ? t('nav.kbFeishu', '飞书文档')
                 : useKnowledgeStore.getState().activeTab === 'defect'
                   ? t('kb.allDefects', '全部缺陷')
-                  : t('kb.allDocuments', '全部文档')}
+                  : useKnowledgeStore.getState().activeTab === 'case'
+                    ? t('kb.allCases', '全部用例')
+                    : t('kb.allDocuments', '全部文档')}
             </span>
           </div>
 

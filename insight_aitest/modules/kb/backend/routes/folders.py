@@ -46,17 +46,41 @@ class FolderUpdateIn(BaseModel):
 def list_folders_tree(
     project_id: int | None = None,
     source_type: str | None = None,
+    kind: str | None = None,
     db: KBDatabase = Depends(get_kb_db),
 ) -> list[FolderNode]:
-    """获取指定项目（或全局）的文件夹目录树。"""
+    """获取指定项目（或全局）的文件夹目录树。
+
+    ``kind`` 用于按内容实体类型统计文档数：TAPD 用例目录的 source_type 是
+    ``tapd_case``，而用例文档的 source_type 是 ``tapd``，两者不一致，
+    因此用例库统计时必须按 kind=case 而不是按 source_type 过滤文档。
+    """
     folders = db.list_folders(project_id=project_id, source_type=source_type)
-    documents = db.list_documents(project_id=project_id, source_type=source_type)
+    if kind:
+        documents = db.list_documents(project_id=project_id, kind=kind)
+    else:
+        documents = db.list_documents(project_id=project_id, source_type=source_type)
 
     # 统计每个文件夹直接持有的文档数
-    counts: dict[int, int] = {}
+    direct: dict[int, int] = {}
     for d in documents:
         if d.folder_id:
-            counts[d.folder_id] = counts.get(d.folder_id, 0) + 1
+            direct[d.folder_id] = direct.get(d.folder_id, 0) + 1
+
+    # 目录节点的气泡数为「当前目录 + 全部子目录」文档数合计
+    children: dict[int | None, list[int]] = {}
+    for f in folders:
+        children.setdefault(f.parent_id, []).append(f.id)
+    subtree_total: dict[int, int] = {}
+
+    def total_of(fid: int) -> int:
+        if fid in subtree_total:
+            return subtree_total[fid]
+        value = direct.get(fid, 0)
+        for child in children.get(fid, []):
+            value += total_of(child)
+        subtree_total[fid] = value
+        return value
 
     # 构造节点字典
     node_map: dict[int, FolderNode] = {}
@@ -69,7 +93,7 @@ def list_folders_tree(
             source_type=getattr(f, "source_type", "local") or "local",
             external_id=getattr(f, "external_id", "") or "",
             children=[],
-            doc_count=counts.get(f.id, 0),
+            doc_count=total_of(f.id),
         )
 
     # 组装树结构

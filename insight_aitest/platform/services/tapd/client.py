@@ -83,6 +83,19 @@ class TapdClient:
                     type(exc).__name__,
                 )
             else:
+                if res.status_code == 429:
+                    # TAPD 按分钟限流：退避后重试，仍失败则上报
+                    if attempt < _MAX_RETRIES:
+                        wait = 20 * (attempt + 1)
+                        logger.warning(
+                            "TAPD 请求被限流 path=%s attempt=%d，%ds 后重试",
+                            path,
+                            attempt + 1,
+                            wait,
+                        )
+                        time.sleep(wait)
+                        continue
+                    raise TapdError(f"TAPD 请求被限流 path={path} HTTP 429")
                 if res.status_code < 400:
                     return res
                 if res.status_code < 500:
@@ -190,3 +203,77 @@ class TapdClient:
             len(comments),
         )
         return comments
+
+    def list_tcase_categories(self, workspace_id: str, page_size: int = 200) -> list[dict]:
+        """拉取测试用例目录（自动翻页），返回扁平后的 TcaseCategory dict 列表。"""
+        categories: list[dict] = []
+        page = 1
+        while True:
+            payload = self._get_json(
+                "/tcase_categories",
+                {
+                    "workspace_id": workspace_id,
+                    "limit": page_size,
+                    "page": page,
+                },
+            )
+            items = payload.get("data") or []
+            if not isinstance(items, list):
+                items = []
+            for item in items:
+                cat = item.get("TcaseCategory") if isinstance(item, dict) else None
+                if isinstance(cat, dict):
+                    categories.append(cat)
+            if len(items) < page_size:
+                break
+            page += 1
+        logger.info("TAPD 用例目录拉取完成 workspace_id=%s count=%d", workspace_id, len(categories))
+        return categories
+
+    def list_tcases(
+        self,
+        workspace_id: str,
+        created_from: str | None = None,
+        created_to: str | None = None,
+        modified_from: str | None = None,
+        modified_to: str | None = None,
+        page_size: int = 200,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """拉取测试用例（自动翻页），返回扁平后的 Tcase dict 列表。
+
+        ``created`` 与 ``modified`` 二选一：首次回填按创建时间，增量按修改时间；
+        ``limit`` 为本次最多拉取的条数（用于首次小批量验证）。
+        """
+        cases: list[dict] = []
+        page = 1
+        while True:
+            params: dict[str, Any] = {
+                "workspace_id": workspace_id,
+                "limit": page_size,
+                "page": page,
+                "order": "created desc",
+            }
+            if created_from and created_to:
+                params["created"] = f"{created_from}~{created_to}"
+            elif modified_from and modified_to:
+                params["modified"] = f"{modified_from}~{modified_to}"
+            payload = self._get_json("/tcases", params)
+            items = payload.get("data") or []
+            if not isinstance(items, list):
+                items = []
+            for item in items:
+                case = item.get("Tcase") if isinstance(item, dict) else None
+                if isinstance(case, dict):
+                    cases.append(case)
+                    if limit is not None and len(cases) >= limit:
+                        break
+            if len(items) < page_size:
+                break
+            if limit is not None and len(cases) >= limit:
+                break
+            page += 1
+            # 主动节流，避免触发 TAPD 每分钟调用上限
+            time.sleep(0.4)
+        logger.info("TAPD 用例拉取完成 workspace_id=%s count=%d", workspace_id, len(cases))
+        return cases

@@ -1,1 +1,1 @@
-export { KnowledgeBaseApp, LocalKnowledgeBaseApp, FeishuKnowledgeBaseApp, DefectKnowledgeBaseApp } from './KnowledgeBaseApp';
+export { KnowledgeBaseApp, LocalKnowledgeBaseApp, FeishuKnowledgeBaseApp, DefectKnowledgeBaseApp, CaseKnowledgeBaseApp } from './KnowledgeBaseApp';

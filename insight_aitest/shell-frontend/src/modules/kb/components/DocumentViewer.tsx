@@ -51,6 +51,8 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
 
   const kind = doc ? fileKind(doc.filename) : 'unknown';
   const canEdit = TEXT_KINDS.has(kind) || kind === 'docx' || kind === 'xlsx';
+  // TAPD 来源（缺陷/用例或 TAPD 同步文档）跳转原链
+  const isTapdSource = !!doc && (doc.kind === 'defect' || doc.kind === 'case' || (doc.source_type || '').startsWith('tapd'));
 
   // 对话框打开/切换文档时重置查看状态——统一在 effect 里做，避免渲染期 setState 触发多余 commit
   const viewKey = open && doc ? doc.id : null;
@@ -106,8 +108,12 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
           {/* 标题栏 */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--bg-card)' }}>
             <Dialog.Title style={{ flex: 1, fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {/* 缺陷正文首行已含标题，标题栏只显示缺陷号，避免标题重复出现 */}
-              {doc.kind === 'defect' && doc.defect ? `缺陷 #${doc.defect.defect_id}` : doc.filename}
+              {/* 缺陷/用例正文首行已含标题，标题栏只显示编号，避免标题重复出现 */}
+              {doc.kind === 'defect' && doc.defect
+                ? `缺陷 #${doc.defect.defect_id}`
+                : doc.kind === 'case' && doc.case
+                  ? t('kb.casePreviewTitle', '用例 #{{id}}', { id: doc.case.case_id })
+                  : doc.filename}
             </Dialog.Title>
 
             {/* 工具按钮 */}
@@ -137,7 +143,7 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
                 href={doc.source_url}
                 target="_blank"
                 rel="noreferrer"
-                title={doc.source_type === 'tapd' ? '在 TAPD 中打开' : '在飞书中打开'}
+                title={isTapdSource ? '在 TAPD 中打开' : '在飞书中打开'}
                 style={{
                   ...toolBtnStyle(false),
                   textDecoration: 'none',
@@ -148,7 +154,7 @@ export function DocumentViewer({ doc, open, onOpenChange }: DocumentViewerProps)
                   gap: 3,
                 }}
               >
-                {doc.source_type === 'tapd' ? 'TAPD 原链' : '飞书原链'}
+                {isTapdSource ? 'TAPD 原链' : '飞书原链'}
               </a>
             )}
             <a href={rawUrl(doc.id)} download title={t('kb.download')} style={{ ...toolBtnStyle(false), textDecoration: 'none', display: 'inline-flex' }}>

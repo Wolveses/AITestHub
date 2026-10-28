@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { ChevronDown, ChevronRight, FileText, Globe, Bug } from 'lucide-react';
+import { ChevronDown, ChevronRight, FileText, Globe, Bug, ListChecks } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { moduleIcons, platformIcons } from './icons';
 import type { ModuleManifest } from './types';
@@ -127,10 +127,11 @@ export function SideNav({ modules, collapsed, isMobile, onNavigate }: SideNavPro
 
                     // 针对知识库模块：渲染可展开/收起的二级子菜单（本地文档、飞书文档）
                     if (m.id === 'kb') {
-                      // 缺陷库已提升为与知识库同级的一级入口，知识库不再高亮 /kb/defect
+                      // 缺陷库、用例库已提升为与知识库同级的一级入口，知识库不再高亮 /kb/defect 与 /kb/case
                       const isKbActive =
                         location.pathname.startsWith('/kb') &&
-                        !location.pathname.startsWith('/kb/defect');
+                        !location.pathname.startsWith('/kb/defect') &&
+                        !location.pathname.startsWith('/kb/case');
                       return (
                         <div key={m.id}>
                           <div
@@ -181,6 +182,15 @@ export function SideNav({ modules, collapsed, isMobile, onNavigate }: SideNavPro
                             to="/kb/defect"
                             icon={Bug}
                             label={t('nav.defectLibrary', '缺陷库')}
+                            isMobile={isMobile}
+                            onNavigate={onNavigate}
+                          />
+
+                          {/* 用例库：与知识库同级的一级入口 */}
+                          <NavItem
+                            to="/kb/case"
+                            icon={ListChecks}
+                            label={t('nav.caseLibrary', '用例库')}
                             isMobile={isMobile}
                             onNavigate={onNavigate}
                           />

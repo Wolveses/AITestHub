@@ -34,6 +34,7 @@ from insight_aitest.platform.services.tapd.labels import (
     PRIORITY_LABELS,
     SEVERITY_LABELS,
     STATUS_LABELS,
+    TCASE_STATUS_LABELS,
     label,
 )
 from insight_aitest.modules.ai.backend.deps import get_config, get_kb_db, get_llm, get_vector_store
@@ -58,6 +59,22 @@ class DefectOut(BaseModel):
     comment_count: int = 0
 
 
+class CaseOut(BaseModel):
+    """TAPD 用例结构化摘要（来自 kb_case_meta，列表页直接展示）。"""
+
+    case_id: str = ""
+    workspace_id: str = ""
+    status: str = ""
+    priority: str = ""
+    case_type: str = ""
+    category_path: str = ""
+    owner: str = ""
+    creator: str = ""
+    step_count: int = 0
+    created_at: str = ""
+    modified_at: str = ""
+
+
 class DocumentOut(BaseModel):
     id: int
     filename: str
@@ -76,12 +93,18 @@ class DocumentOut(BaseModel):
     external_id: str = ""
     kind: str = "doc"
     defect: DefectOut | None = None
+    case: CaseOut | None = None
     created_at: str
     # 后台重解析进行中：内存标记，早于 status 变为 pending，供前端展示解析中并置灰操作
     reindexing: bool = False
 
     @classmethod
-    def from_doc(cls, doc, defect: "DefectOut | None" = None) -> "DocumentOut":
+    def from_doc(
+        cls,
+        doc,
+        defect: "DefectOut | None" = None,
+        case: "CaseOut | None" = None,
+    ) -> "DocumentOut":
         # tags 列存 JSON 数组字符串，解析为 list；解析失败降级空列表
         try:
             tags = json.loads(doc.tags) if getattr(doc, "tags", "") else []
@@ -107,12 +130,17 @@ class DocumentOut(BaseModel):
             external_id=getattr(doc, "external_id", "") or "",
             kind=getattr(doc, "kind", "doc") or "doc",
             defect=defect,
+            case=case,
             created_at=doc.created_at.isoformat(),
         )
 
 
-def _doc_to_out(doc, defect: "DefectOut | None" = None) -> DocumentOut:
-    out = DocumentOut.from_doc(doc, defect)
+def _doc_to_out(
+    doc,
+    defect: "DefectOut | None" = None,
+    case: "CaseOut | None" = None,
+) -> DocumentOut:
+    out = DocumentOut.from_doc(doc, defect, case)
     out.reindexing = is_reindexing(doc.id)
     return out
 
@@ -130,6 +158,22 @@ def _defect_to_out(meta) -> DefectOut:
         created_at=meta.created_at_ext,
         modified_at=meta.modified_at_ext,
         comment_count=meta.comment_count,
+    )
+
+
+def _case_to_out(meta) -> CaseOut:
+    return CaseOut(
+        case_id=meta.case_id,
+        workspace_id=meta.workspace_id,
+        status=label(TCASE_STATUS_LABELS, meta.status),
+        priority=meta.priority,
+        case_type=meta.case_type,
+        category_path=meta.category_path,
+        owner=meta.owner,
+        creator=meta.creator,
+        step_count=meta.step_count,
+        created_at=meta.created_at_ext,
+        modified_at=meta.modified_at_ext,
     )
 
 
@@ -162,6 +206,7 @@ def list_documents(
     project_id: int | None = None,
     version_id: int | None = None,
     folder_id: int | None = None,
+    include_subfolders: bool = False,
     source_type: str | None = None,
     kind: str | None = None,
     search: str | None = None,
@@ -175,6 +220,7 @@ def list_documents(
         project_id=project_id,
         version_id=version_id,
         folder_id=folder_id,
+        include_subfolders=include_subfolders,
         source_type=source_type,
         kind=kind,
         search=search,
@@ -184,11 +230,17 @@ def list_documents(
         page_size=page_size,
         return_total=True,
     )
-    # 缺陷行直接带上结构化摘要，列表页无需再解析正文
-    defect_map = db.list_defect_meta([d.id for d in items]) if items else {}
+    # 缺陷/用例行直接带上结构化摘要，列表页无需再解析正文
+    ids = [d.id for d in items]
+    defect_map = db.list_defect_meta(ids) if items else {}
+    case_map = db.list_case_meta(ids) if items else {}
     return {
         "items": [
-            _doc_to_out(d, _defect_to_out(defect_map[d.id]) if d.id in defect_map else None)
+            _doc_to_out(
+                d,
+                _defect_to_out(defect_map[d.id]) if d.id in defect_map else None,
+                _case_to_out(case_map[d.id]) if d.id in case_map else None,
+            )
             for d in items
         ],
         "total": total,
@@ -276,7 +328,13 @@ def get_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOu
     doc = db.get_document(doc_id)
     if not doc:
         raise HTTPException(404, "文档不存在")
-    return _doc_to_out(doc)
+    defect = db.get_defect_meta(doc_id)
+    case = db.get_case_meta(doc_id)
+    return _doc_to_out(
+        doc,
+        _defect_to_out(defect) if defect else None,
+        _case_to_out(case) if case else None,
+    )
 
 
 @router.delete("/{doc_id}")

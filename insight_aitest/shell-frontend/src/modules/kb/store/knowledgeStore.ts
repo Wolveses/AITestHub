@@ -13,6 +13,20 @@ export interface DefectMeta {
   comment_count: number;
 }
 
+export interface CaseMeta {
+  case_id: string;
+  workspace_id: string;
+  status: string;
+  priority: string;
+  case_type: string;
+  category_path: string;
+  owner: string;
+  creator: string;
+  step_count: number;
+  created_at: string;
+  modified_at: string;
+}
+
 export interface Document {
   id: number;
   filename: string;
@@ -33,6 +47,8 @@ export interface Document {
   kind?: 'doc' | 'defect' | 'case';
   /** kind=defect 时的 TAPD 结构化元数据 */
   defect?: DefectMeta | null;
+  /** kind=case 时的 TAPD 结构化元数据 */
+  case?: CaseMeta | null;
   created_at: string;
   /** 后台重解析进行中（后端内存标记，早于 status 变为 pending） */
   reindexing?: boolean;
@@ -81,21 +97,24 @@ interface KnowledgeState {
   filterDocType: string;
   filterTags: string[];
   // 内容实体类型筛选：doc | defect | case
-  kindFilter: string;
+  kindFilter: 'doc' | 'defect' | 'case';
   // 缺陷库独立的项目上下文（不写入全局项目，避免污染知识库文档列表的项目过滤）
   defectProjectId: number | null;
+  // 用例库独立的项目上下文，与缺陷库互不影响
+  caseProjectId: number | null;
   folders: FolderNode[];
   currentFolderId: number | null; // null 表示当前根目录（本地文档/飞书文档根目录），0 表示未分类
-  activeTab: 'local' | 'feishu' | 'defect';
+  activeTab: 'local' | 'feishu' | 'defect' | 'case';
   uploading: boolean;
   saving: boolean;
   syncingFeishu: boolean;
   feishuModalOpen: boolean;
   pollTimer: number | null;
   tags: TagCount[];
-  setActiveTab: (tab: 'local' | 'feishu' | 'defect') => void;
+  setActiveTab: (tab: 'local' | 'feishu' | 'defect' | 'case') => void;
   setDefectProjectId: (id: number | null) => void;
-  setKindFilter: (v: string) => void;
+  setCaseProjectId: (id: number | null) => void;
+  setKindFilter: (v: 'doc' | 'defect' | 'case') => void;
   setFeishuModalOpen: (v: boolean) => void;
   loadDocuments: (opts?: {
     search?: string;
@@ -173,6 +192,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   filterTags: [],
   kindFilter: 'doc',
   defectProjectId: null,
+  caseProjectId: null,
   folders: [],
   currentFolderId: null,
   activeTab: 'local',
@@ -184,25 +204,30 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   forcePoll: false,
   tags: [],
 
-  setActiveTab: (tab: 'local' | 'feishu' | 'defect') => {
+  setActiveTab: (tab: 'local' | 'feishu' | 'defect' | 'case') => {
     set({ activeTab: tab, currentFolderId: null, page: 1, filterSearch: '', filterDocType: '', filterTags: [] });
-    // 缺陷 Tab 查询 kind=defect，其余 Tab 回到普通文档
-    get().setKindFilter(tab === 'defect' ? 'defect' : 'doc');
+    // 缺陷/用例 Tab 分别查询 kind=defect / kind=case，其余 Tab 回到普通文档
+    get().setKindFilter(tab === 'defect' ? 'defect' : tab === 'case' ? 'case' : 'doc');
     if (tab === 'defect') {
-      // 缺陷来自 TAPD，不使用本地/飞书目录树
+      // 缺陷来自 TAPD，不使用目录树
       set({ folders: [] });
     } else {
+      // 用例库使用 TAPD 目录（与本地目录同树混排）
       get().loadFolders();
     }
     get().loadDocuments();
   },
 
-  setKindFilter: (v: string) => {
+  setKindFilter: (v: 'doc' | 'defect' | 'case') => {
     set({ kindFilter: v, page: 1 });
   },
 
   setDefectProjectId: (id) => {
     set({ defectProjectId: id, page: 1 });
+  },
+
+  setCaseProjectId: (id) => {
+    set({ caseProjectId: id, page: 1 });
   },
 
   setFeishuModalOpen: (v: boolean) => set({ feishuModalOpen: v }),
@@ -217,10 +242,15 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       const page = opts?.page ?? (opts?.resetPage ? 1 : s.page);
       const pageSize = opts?.page_size ?? s.pageSize;
 
-      const { currentFolderId, activeTab, kindFilter, defectProjectId } = get();
+      const { currentFolderId, activeTab, kindFilter, defectProjectId, caseProjectId } = get();
+      // 用例库尚未选定项目时不查询，避免把其他项目的用例混进列表
+      if (kindFilter === 'case' && caseProjectId == null) {
+        set({ documents: [], docTotal: 0 });
+        return;
+      }
       const extra: Record<string, any> = {
-        // 缺陷数据来自 TAPD，source_type 与 local/feishu 不同，按 kind 查询时不再按来源过滤
-        source_type: kindFilter === 'defect' ? undefined : activeTab,
+        // 缺陷/用例数据来自 TAPD，source_type 与 local/feishu 不同，按 kind 查询时不再按来源过滤
+        source_type: kindFilter === 'defect' || kindFilter === 'case' ? undefined : activeTab,
         kind: kindFilter,
         search: filterSearch || undefined,
         doc_type: filterDocType || undefined,
@@ -230,11 +260,16 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
       };
       if (currentFolderId !== null) {
         extra.folder_id = currentFolderId;
+        // 浏览某个目录时，列表同时展示其所有子目录下的文档
+        extra.include_subfolders = true;
       }
-      const qs = projectQs(
-        extra,
-        kindFilter === 'defect' ? { projectId: defectProjectId } : undefined,
-      );
+      const projectOverride =
+        kindFilter === 'defect'
+          ? { projectId: defectProjectId }
+          : kindFilter === 'case'
+            ? { projectId: caseProjectId }
+            : undefined;
+      const qs = projectQs(extra, projectOverride);
       const r = await fetch(`${BASE}${qs}`);
       const data = await r.json();
       const items: Document[] = data.items || [];
@@ -260,12 +295,21 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
 
   loadFolders: async () => {
     try {
-      const { activeTab } = get();
-      if (activeTab === 'defect') {
+      const { activeTab, kindFilter, caseProjectId } = get();
+      if (activeTab === 'defect' || kindFilter === 'defect') {
         set({ folders: [] });
         return;
       }
-      const qs = projectQs({ source_type: activeTab });
+      // 用例库按项目加载 TAPD 目录（与本地目录同树混排）
+      const isCase = kindFilter === 'case';
+      // 项目未就绪时不请求：不带 project_id 会拿到全局（飞书）目录，导致用例全部显示未归属
+      if (isCase && caseProjectId == null) {
+        set({ folders: [] });
+        return;
+      }
+      const qs = isCase
+        ? projectQs({ source_type: 'tapd_case', kind: 'case' }, { projectId: caseProjectId })
+        : projectQs({ source_type: activeTab });
       const r = await fetch(`${FOLDERS_BASE}${qs}`);
       if (r.ok) {
         const folders = await r.json();

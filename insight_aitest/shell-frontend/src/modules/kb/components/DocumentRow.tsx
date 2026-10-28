@@ -60,7 +60,7 @@ const DEFECT_STATUS_COLOR: Record<string, string> = {
   suspended: 'var(--text-muted, #64748b)',
 };
 
-const defectStatusColor = (status: string): string =>
+const tapdStatusColor = (status: string): string =>
   DEFECT_STATUS_COLOR[status] ?? DEFECT_STATUS_COLOR[status?.toLowerCase?.() ?? ''] ?? 'var(--text-secondary)';
 
 interface DocumentRowProps {
@@ -94,6 +94,9 @@ export function DocumentRow({
 }: DocumentRowProps) {
   const { t } = useTranslation();
   const defect = doc.kind === 'defect' ? doc.defect : null;
+  const caseMeta = doc.kind === 'case' ? doc.case : null;
+  // 缺陷/用例来自 TAPD 结构化数据，不展示分块信息与分块预览
+  const isStructured = doc.kind === 'defect' || doc.kind === 'case';
   const statusKey = STATUS_KEY[doc.status];
   const statusColor = STATUS_COLOR[doc.status] ?? "var(--text-secondary)";
   const { confirm } = useConfirmStore();
@@ -139,7 +142,7 @@ export function DocumentRow({
                 width: 6,
                 height: 6,
                 borderRadius: 2,
-                background: defectStatusColor(defect.status),
+                background: tapdStatusColor(defect.status),
                 flexShrink: 0,
               }}
             />
@@ -151,6 +154,43 @@ export function DocumentRow({
                 defect.module,
                 defect.owner,
                 t('kb.defectComments', '评论{{n}}', { n: defect.comment_count }),
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </span>
+          </div>
+        )}
+        {/* 用例摘要：用例号 · 状态 · 优先级 · 类型 · 维护人 · 步骤数 */}
+        {caseMeta && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              marginTop: 2,
+              fontSize: 11,
+              color: 'var(--text-secondary, #64748b)',
+              minWidth: 0,
+            }}
+          >
+            <span
+              title={caseMeta.status}
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: 2,
+                background: tapdStatusColor(caseMeta.status),
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {[
+                `#${caseMeta.case_id}`,
+                caseMeta.status,
+                caseMeta.priority,
+                caseMeta.case_type,
+                caseMeta.owner,
+                caseMeta.step_count ? t('kb.caseSteps', '步骤{{n}}', { n: caseMeta.step_count }) : '',
               ]
                 .filter(Boolean)
                 .join(' · ')}
@@ -242,7 +282,7 @@ export function DocumentRow({
             >
               飞书
             </span>
-          ) : defect || doc.source_type === 'tapd' ? (
+          ) : defect || caseMeta || doc.source_type === 'tapd' || doc.source_type === 'tapd_case' ? (
             <span
               style={{
                 display: 'inline-flex',
@@ -278,8 +318,8 @@ export function DocumentRow({
               本地
             </span>
           )}
-          {/* 缺陷固定一条一个分块，无需展示分块数 */}
-          {!defect && (doc.status === 'ready' || doc.status === 'not_vectorized') && <span>{t('kb.chunkCharCount', { chunks: doc.chunk_count, chars: doc.char_count })}</span>}
+          {/* 缺陷/用例为结构化数据，固定一条，无需展示分块数 */}
+          {!isStructured && (doc.status === 'ready' || doc.status === 'not_vectorized') && <span>{t('kb.chunkCharCount', { chunks: doc.chunk_count, chars: doc.char_count })}</span>}
           {typeLabel && <span style={{ background: 'var(--bg-card)', padding: '0 5px', borderRadius: 3 }}>{typeLabel}</span>}
           {doc.tags?.length > 0 && (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
@@ -315,7 +355,7 @@ export function DocumentRow({
         <button onClick={() => onPreview(doc)} title={t('kb.preview')} disabled={isParsing} style={actionStyle}>
           <Eye size={14} />
         </button>
-        {!defect && onPreviewChunks && (doc.status === 'ready' || doc.status === 'not_vectorized' || doc.status === 'embed_failed' || doc.status === 'embed_partial') && (
+        {!isStructured && onPreviewChunks && (doc.status === 'ready' || doc.status === 'not_vectorized' || doc.status === 'embed_failed' || doc.status === 'embed_partial') && (
           <button onClick={() => onPreviewChunks(doc)} title={t('kb.previewChunks', '预览分块')} disabled={isParsing} style={actionStyle}>
             <Scissors size={14} />
           </button>

@@ -492,6 +492,7 @@ export default {
       kbFeishu: 'Feishu Docs',
       kbDefect: 'Defects',
       defectLibrary: 'Defect Library',
+      caseLibrary: 'Case Library',
       testcase: 'Test Case Management',
       api: 'API Automation',
       performance: 'Performance',
@@ -1009,6 +1010,14 @@ export default {
       metaInfo: 'Tags / info',
       // Defects (TAPD)
       allDefects: 'All Defects',
+      // Cases (TAPD)
+      allCases: 'All Cases',
+      caseSteps: '{{n}} steps',
+      casePreviewTitle: 'Case #{{id}}',
+      tapdCaseSyncHint: 'Sync cases from a TAPD workspace',
+      tapdCaseModalTitle: 'Sync Cases from TAPD',
+      tapdCaseSelectProject: 'Select a project in Case Library first',
+      tapdCaseBackfillHint: 'Only sync cases updated in the last {{days}} days',
       project: 'Project',
       defectComments: 'Comments {{n}}',
       syncFeishu: 'Sync Feishu',

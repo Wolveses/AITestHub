@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { BookOpen, RefreshCw, Cloud, Bug } from 'lucide-react';
+import { BookOpen, RefreshCw, Cloud, Bug, ListChecks } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { KnowledgeBase } from './components/KnowledgeBase';
 import { TapdSyncModal } from './components/TapdSyncModal';
 import { ModuleHelpButton } from '../../shared/components/ModuleHelpButton';
 import { useKnowledgeStore } from './store/knowledgeStore';
 
-type KbTab = 'local' | 'feishu' | 'defect';
+type KbTab = 'local' | 'feishu' | 'defect' | 'case';
 
 export function KnowledgeBaseApp() {
   const { t } = useTranslation();
@@ -15,9 +15,9 @@ export function KnowledgeBaseApp() {
   const { activeTab, setActiveTab, loadDocuments, syncingFeishu, setFeishuModalOpen } = useKnowledgeStore();
   const [tapdOpen, setTapdOpen] = useState(false);
 
-  // 根据 URL 末段派生当前子路由：/kb/local、/kb/feishu 或 /kb/defect，默认为 local
+  // 根据 URL 末段派生当前子路由：/kb/local、/kb/feishu、/kb/defect 或 /kb/case，默认为 local
   const seg = location.pathname.split('/').filter(Boolean).pop() ?? 'local';
-  const currentTab: KbTab = seg === 'feishu' || seg === 'defect' ? seg : 'local';
+  const currentTab: KbTab = seg === 'feishu' || seg === 'defect' || seg === 'case' ? seg : 'local';
 
   useEffect(() => {
     if (activeTab !== currentTab) {
@@ -30,7 +30,9 @@ export function KnowledgeBaseApp() {
       ? t('nav.kbFeishu', '飞书文档')
       : currentTab === 'defect'
         ? t('nav.defectLibrary', '缺陷库')
-        : t('nav.kbLocal', '本地文档');
+        : currentTab === 'case'
+          ? t('nav.caseLibrary', '用例库')
+          : t('nav.kbLocal', '本地文档');
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: "var(--bg-base)", color: "var(--text-primary)" }}>
@@ -46,8 +48,8 @@ export function KnowledgeBaseApp() {
       >
         <span style={{ fontSize: 13, color: "var(--text-secondary)", display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 500 }}>
           <BookOpen size={15} strokeWidth={1.5} />
-          {/* 缺陷库为一级入口，不再挂在「知识库 /」下 */}
-          {currentTab === 'defect' ? tabTitle : `${t('kb.title', '知识库')} / ${tabTitle}`}
+          {/* 缺陷库、用例库为一级入口，不再挂在「知识库 /」下 */}
+          {currentTab === 'defect' || currentTab === 'case' ? tabTitle : `${t('kb.title', '知识库')} / ${tabTitle}`}
         </span>
 
         {syncingFeishu && currentTab === 'feishu' && (
@@ -82,7 +84,7 @@ export function KnowledgeBaseApp() {
             {t('kb.syncFeishu', '同步飞书')}
           </button>
         )}
-        {currentTab === 'defect' && (
+        {(currentTab === 'defect' || currentTab === 'case') && (
           <button
             onClick={() => setTapdOpen(true)}
             style={{
@@ -99,9 +101,13 @@ export function KnowledgeBaseApp() {
               cursor: 'pointer',
               transition: 'all 0.15s ease',
             }}
-            title={t('kb.tapdSyncHint', '从 TAPD 工作空间同步缺陷')}
+            title={
+              currentTab === 'case'
+                ? t('kb.tapdCaseSyncHint', '从 TAPD 工作空间同步用例')
+                : t('kb.tapdSyncHint', '从 TAPD 工作空间同步缺陷')
+            }
           >
-            <Bug size={13} />
+            {currentTab === 'case' ? <ListChecks size={13} /> : <Bug size={13} />}
             {t('kb.tapdSync', 'TAPD 同步')}
           </button>
         )}
@@ -112,6 +118,7 @@ export function KnowledgeBaseApp() {
       <TapdSyncModal
         open={tapdOpen}
         onOpenChange={setTapdOpen}
+        mode={currentTab === 'case' ? 'case' : 'bug'}
         onSynced={() => loadDocuments({ resetPage: true })}
       />
     </div>
@@ -121,5 +128,6 @@ export function KnowledgeBaseApp() {
 export const LocalKnowledgeBaseApp = () => <KnowledgeBaseApp />;
 export const FeishuKnowledgeBaseApp = () => <KnowledgeBaseApp />;
 export const DefectKnowledgeBaseApp = () => <KnowledgeBaseApp />;
+export const CaseKnowledgeBaseApp = () => <KnowledgeBaseApp />;
 
 export default KnowledgeBaseApp;

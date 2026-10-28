@@ -39,6 +39,13 @@ SEVERITY_LABELS = {
     "suggest": "建议",
 }
 
+# 测试用例状态（/tcases 的 status 枚举，与缺陷状态不共用）
+TCASE_STATUS_LABELS = {
+    "normal": "正常",
+    "updating": "待更新",
+    "abandon": "已废弃",
+}
+
 
 def label(mapping: dict[str, str], value: str) -> str:
     """按原始值取中文展示名；空值返回空串，未知值原样返回。"""

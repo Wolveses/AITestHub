@@ -151,6 +151,57 @@ class DefectMeta(MappedAsDataclass, Base):
     comment_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class CaseMeta(MappedAsDataclass, Base):
+    """TAPD 测试用例结构化元数据（与 documents 1:1）。
+
+    与 DefectMeta 同一思路：只放列表页要展示/筛选的字段，步骤与前置条件留在正文。
+    不设 (workspace_id, case_id) 唯一约束——同一用例可分别同步进不同项目。
+    """
+
+    __tablename__ = "kb_case_meta"
+    __table_args__ = (
+        Index("idx_case_status", "status"),
+        Index("idx_case_priority", "priority"),
+        Index("idx_case_owner", "owner"),
+        Index("idx_case_modified", "modified_at_ext"),
+        Index("idx_case_external", "workspace_id", "case_id"),
+    )
+
+    document_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True
+    )
+    workspace_id: Mapped[str] = mapped_column(Text, default="")
+    case_id: Mapped[str] = mapped_column(Text, default="")
+    title: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(Text, default="")
+    priority: Mapped[str] = mapped_column(Text, default="")
+    case_type: Mapped[str] = mapped_column(Text, default="")
+    category_id: Mapped[str] = mapped_column(Text, default="")
+    # TAPD 目录全路径（"用户中心 / 登录 / 异常场景"），便于不打目录树也能定位
+    category_path: Mapped[str] = mapped_column(Text, default="")
+    owner: Mapped[str] = mapped_column(Text, default="")
+    creator: Mapped[str] = mapped_column(Text, default="")
+    step_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at_ext: Mapped[str] = mapped_column(Text, default="")
+    modified_at_ext: Mapped[str] = mapped_column(Text, default="")
+
+
+class TapdSyncState(MappedAsDataclass, Base):
+    """TAPD 同步水位（L1 增量），按 workspace + 项目 + 对象类型隔离。"""
+
+    __tablename__ = "kb_tapd_sync_state"
+    __table_args__ = (
+        Index("idx_tapd_state_key", "workspace_id", "project_id", "kind", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, init=False)
+    workspace_id: Mapped[str] = mapped_column(Text, default="")
+    project_id: Mapped[int] = mapped_column(Integer, default=0)
+    kind: Mapped[str] = mapped_column(Text, default="")  # defect | case
+    watermark: Mapped[str] = mapped_column(Text, default="")
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+
+
 class Folder(MappedAsDataclass, Base):
     """知识库逻辑目录（文件夹）。
     
