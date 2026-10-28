@@ -440,7 +440,7 @@ def sync_tcase_workspace(
                 os.replace(tmp_path, path)
 
                 source_url = (
-                    f"https://www.tapd.cn/{workspace_id}/prong/testcases/view/{case_id}"
+                    f"https://www.tapd.cn/{workspace_id}/sparrow/tcase/view/{case_id}"
                 )
                 folder_id = folder_map.get(category_id)
 
