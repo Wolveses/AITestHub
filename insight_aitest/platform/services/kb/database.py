@@ -672,6 +672,18 @@ class KBDatabase:
             if chunk_count is not None:
                 d.chunk_count = chunk_count
 
+    def list_abandoned_case_doc_ids(self, workspace_id: str, project_id: int) -> list[int]:
+        """列出该项目下已标记为废弃（abandon）的 TAPD 用例文档 id。"""
+        stmt = (
+            select(CaseMeta.document_id)
+            .join(Document, Document.id == CaseMeta.document_id)
+            .where(CaseMeta.workspace_id == workspace_id)
+            .where(CaseMeta.status == "abandon")
+            .where(Document.project_id == project_id)
+        )
+        with session_scope(self.db_path) as s:
+            return list(s.scalars(stmt).all())
+
     def delete_document(self, doc_id: int) -> bool:
         with session_scope(self.db_path) as s:
             d = s.get(Document, doc_id)

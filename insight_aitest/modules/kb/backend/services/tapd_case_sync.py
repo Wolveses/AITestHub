@@ -312,6 +312,15 @@ def sync_tcase_workspace(
         cat_map = {_s(c.get("id")): c for c in categories if _s(c.get("id"))}
         folder_map = _sync_folders(db, workspace_id, project_id, categories)
 
+        # 1.5 清理历史上已废弃的用例文档：水位增量同步不会回看旧用例，
+        #     若不主动清理，早前入库的废弃用例会一直留在库里
+        for doc_id in db.list_abandoned_case_doc_ids(workspace_id, project_id):
+            try:
+                vector_store.delete_document(doc_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("清理已废弃用例向量失败 doc_id=%s", doc_id)
+            db.delete_document(doc_id)
+
         # 2. 用例拉取（有水位走 modified 窗口，否则按创建时间回填）
         _set(phase="cases")
         end = date.today()
@@ -376,6 +385,22 @@ def sync_tcase_workspace(
                 external_id = f"tapd:{workspace_id}:{project_id}:{case_id}"
                 seen_external.add(external_id)
                 doc = db.find_by_external_id(external_id)
+
+                # 已废弃用例不入库；此前已同步过的旧文档一并清理，避免继续被检索命中
+                if _s(case.get("status")) == "abandon":
+                    if doc is not None:
+                        try:
+                            vector_store.delete_document(doc.id)
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "清理已废弃用例向量失败 doc_id=%s case_id=%s",
+                                doc.id,
+                                case_id,
+                            )
+                        db.delete_document(doc.id)
+                    _inc("skipped")
+                    continue
+
                 modified = _s(case.get("modified"))
                 if modified > max_modified:
                     max_modified = modified
@@ -487,12 +512,11 @@ def sync_tcase_workspace(
             finally:
                 _inc("done")
 
-        # 4. 删除差集（仅全量未截断时）
-        if not truncated:
+        # 4. 删除差集（仅首次全量且未截断时）
+        # 水位增量只拉最近修改过的用例，seen_external 天然不全，不能据此判定删除
+        if not truncated and not watermark:
             try:
-                local_items, _ = db.list_documents(
-                    project_id=project_id, kind="case", page_size=10000
-                )
+                local_items = db.list_documents(project_id=project_id, kind="case")
                 for item in local_items:
                     ext = _s(getattr(item, "external_id", ""))
                     if not ext.startswith(f"tapd:{workspace_id}:{project_id}:"):
