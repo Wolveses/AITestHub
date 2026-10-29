@@ -79,14 +79,26 @@ interface CaseState {
 
 const BASE = '/api/modules/testcase';
 
+// 项目选择做前端记忆：刷新后恢复上次选中的项目，避免每次回落到第一个项目
+const LS_PROJECT = 'insight.caseProjectId';
+
+function readStoredProjectId(): number | null {
+  const raw = localStorage.getItem(LS_PROJECT);
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 export const useCaseStore = create<CaseState>((set, get) => ({
   cases: [],
   activeId: null,
   loading: false,
   folders: [],
   currentFolderId: null,
-  selectedProjectId: null,
+  selectedProjectId: readStoredProjectId(),
   setSelectedProjectId: (id) => {
+    if (id === null) localStorage.removeItem(LS_PROJECT);
+    else localStorage.setItem(LS_PROJECT, String(id));
     set({ selectedProjectId: id });
   },
   analyzeLoading: false,

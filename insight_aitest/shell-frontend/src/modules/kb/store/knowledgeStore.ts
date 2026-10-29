@@ -154,6 +154,19 @@ interface KnowledgeState {
 }
 
 const BASE = '/api/modules/kb/documents';
+
+// 缺陷库/用例库的项目选择做前端记忆：刷新后恢复上次选中的项目
+function readStoredProjectId(key: string): number | null {
+  const raw = localStorage.getItem(key);
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+function writeStoredProjectId(key: string, value: number | null): void {
+  if (value === null) localStorage.removeItem(key);
+  else localStorage.setItem(key, String(value));
+}
 const FOLDERS_BASE = '/api/modules/kb/folders';
 
 const NON_TERMINAL = ['pending', 'parsing', 'chunking', 'embedding'];
@@ -191,8 +204,8 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   filterDocType: '',
   filterTags: [],
   kindFilter: 'doc',
-  defectProjectId: null,
-  caseProjectId: null,
+  defectProjectId: readStoredProjectId('insight.kbDefectProjectId'),
+  caseProjectId: readStoredProjectId('insight.kbCaseProjectId'),
   folders: [],
   currentFolderId: null,
   activeTab: 'local',
@@ -223,10 +236,12 @@ export const useKnowledgeStore = create<KnowledgeState>((set, get) => ({
   },
 
   setDefectProjectId: (id) => {
+    writeStoredProjectId('insight.kbDefectProjectId', id);
     set({ defectProjectId: id, page: 1 });
   },
 
   setCaseProjectId: (id) => {
+    writeStoredProjectId('insight.kbCaseProjectId', id);
     set({ caseProjectId: id, page: 1 });
   },
 

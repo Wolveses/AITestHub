@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { ChevronDown, ChevronRight, Circle, CircleDot, X } from 'lucide-react';
 import { useConfirmStore } from '../shared/store/confirmStore';
+import { useProjectStore } from '../shared/store/projectStore';
 
 interface Project {
   id: number;
@@ -59,6 +60,8 @@ export function ProjectsPage() {
     }
     setEditing(null);
     await loadProjects();
+    // 同步全局项目列表，顶栏与各模块的项目下拉立即刷新
+    useProjectStore.getState().loadProjects();
   };
 
   const deleteProject = (p: Project) => {
@@ -70,6 +73,7 @@ export function ProjectsPage() {
         const r = await fetch(`${BASE}/projects/${p.id}`, { method: 'DELETE' });
         if (r.ok) {
           await loadProjects();
+          useProjectStore.getState().loadProjects();
           setExpandedId(null);
         } else {
           const err = await r.json();
@@ -90,6 +94,7 @@ export function ProjectsPage() {
     setEditingVer(null);
     if (expandedId) await loadVersions(expandedId);
     await loadProjects();
+    useProjectStore.getState().loadProjects();
   };
 
   const deleteVersion = (v: Version) => {
@@ -102,6 +107,7 @@ export function ProjectsPage() {
         if (r.ok) {
           if (expandedId) await loadVersions(expandedId);
           await loadProjects();
+          useProjectStore.getState().loadProjects();
         }
       },
     });
