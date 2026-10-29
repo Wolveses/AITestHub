@@ -81,7 +81,7 @@ export function KnowledgeBaseApp() {
             title={t('kb.feishuSyncHint', '配置并同步飞书知识库空间')}
           >
             <Cloud size={13} />
-            {t('kb.syncFeishu', '同步飞书')}
+            {t('kb.syncFeishu', '从飞书同步')}
           </button>
         )}
         {(currentTab === 'defect' || currentTab === 'case') && (
@@ -108,7 +108,7 @@ export function KnowledgeBaseApp() {
             }
           >
             {currentTab === 'case' ? <ListChecks size={13} /> : <Bug size={13} />}
-            {t('kb.tapdSync', 'TAPD 同步')}
+            {t('kb.tapdSync', '从 TAPD 同步')}
           </button>
         )}
         <ModuleHelpButton namespace="kb" />
