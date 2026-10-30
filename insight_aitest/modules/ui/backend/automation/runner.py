@@ -155,9 +155,11 @@ def run_script(
             "PYTHONUTF8": "1",
         }
     )
-    # 子进程 cwd 在用例目录，需显式补上仓库根目录才能 import 脚手架插件
+    # 子进程 cwd 在用例目录，需显式补仓库根目录（import 脚手架插件）与项目脚本目录（import pages 页面对象）
     existing = child_env.get("PYTHONPATH") or ""
-    child_env["PYTHONPATH"] = os.pathsep.join(p for p in (str(REPO_ROOT), existing) if p)
+    child_env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(REPO_ROOT), str(paths.project_scripts_dir(project_id)), existing) if p
+    )
 
     started = time.time()
     status = RunStatus.PASSED
@@ -272,5 +274,9 @@ def record_run(case, env, result: dict) -> int:
     if status is not RunStatus.PASSED:
         fields["last_error_category"] = result.get("error_category")
         fields["last_error_message"] = (result.get("error_message") or "")[:4000]
+    else:
+        # 最后一次执行通过后，不再展示历史脚本缺陷
+        fields["last_error_category"] = None
+        fields["last_error_message"] = ""
     get_automation_db().update_case(int(case.id), **fields)
     return run_id

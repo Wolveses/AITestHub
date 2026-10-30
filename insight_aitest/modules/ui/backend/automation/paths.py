@@ -5,6 +5,7 @@
 
     scripts/<project_id>/<case_id>/case.py
     scripts/<project_id>/<case_id>/history/case_v<n>.py
+    scripts/<project_id>/pages/*.py  （项目级页面对象，跨用例复用）
     artifacts/<project_id>/<case_id>/<run_key>/{junit.xml,result.json,*.png,trace.zip}
     generations/<case_id>/<gen_id>.jsonl
     auth/<project_id>/<env_id>/storage.json
@@ -51,6 +52,16 @@ def project_scripts_dir(project_id: int) -> Path:
 
 def case_dir(project_id: int, case_id: int) -> Path:
     return project_scripts_dir(project_id) / str(case_id)
+
+
+def pages_dir(project_id: int) -> Path:
+    """项目级页面对象目录（跨用例复用的业务公共代码）。"""
+    d = project_scripts_dir(project_id) / "pages"
+    d.mkdir(parents=True, exist_ok=True)
+    init = d / "__init__.py"
+    if not init.exists():
+        init.write_text("# -*- coding: utf-8 -*-\n", encoding="utf-8")
+    return d
 
 
 def case_script(project_id: int, case_id: int) -> Path:

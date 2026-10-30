@@ -56,8 +56,8 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
 1. 同步 API：from playwright.sync_api import expect；禁止 async/await。
 2. 只定义测试函数（一个或多个 def test_xxx(page):），不要写 main、不要自己 launch 浏览器；
    page fixture 由运行脚手架提供，已注入登录态（Cookie/localStorage 或请求头）。
-3. 站点地址必须从环境变量读取：BASE_URL = os.environ["INSIGHT_UI_BASE_URL"].rstrip("/")，
-   所有跳转都用 BASE_URL + 路径，禁止硬编码主机名/IP。
+3. 跳转统一用公共库 open_route(page, route)，内部已读取环境变量 INSIGHT_UI_BASE_URL；
+   禁止硬编码主机名/IP，也不要自己拼 BASE_URL 字符串。
 4. 断言用 expect(...)，覆盖「预期结果」中的关键校验；不要只截图不校验。
 5. 禁止使用 ai_assert / midscene / 视觉模型相关接口；只用标准 playwright 定位（get_by_role、
    get_by_label、get_by_text、locator），定位优先用可读的 role/label/testid。
@@ -79,38 +79,56 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     （快照是「新增」就写「新增」，不要凭用例描述创造成「新增用户」）。
 13. 浏览器工具参数必须严格按 schema：点击是 {"target": "快照里的 ref，如 e125"}（可附 "element"），
     输入是 {"target": "e125", "text": "..."}，快照是 {}。ref 只用于探索，不能写进脚本。
-14. 探索时留意地址栏的 hash 路由（例如点击菜单后变成 #/usm/users）。脚本里可直接用
-    page.goto(BASE_URL + "/#/usm/users") 直达目标页面，再 expect 目标页关键元素可见；
-    这样比逐级点菜单稳定。首次 goto 后建议 page.wait_for_load_state() 或 expect 可见元素。
+14. 探索时留意地址栏的 hash 路由（例如点击菜单后变成 #/usm/users）。脚本里直接用
+    open_route(page, "#/usm/users") 直达目标页面，再 expect 目标页关键元素可见；
+    这样比逐级点菜单稳定。
 15. 按钮文案干净，必须用 exact=True 避免歧义，例如 get_by_role("button", name="新增", exact=True)；
     否则「新增」会同时命中「新增API用户」触发 strict mode violation。菜单项/树节点反过来，
     不要 exact=True（可访问名带图标字符）。
 16. Playwright 的 first / last 是属性不是方法：写 btn.first.click()，不要写 btn.first()。
 17. 断言的文案以浏览器里真实看到的为准：用例写「有效期为永久」，但界面该列可能显示为「--」
     （无限制即永久）。不要把用例文字硬编码进 to_have_text，改用真实界面文案或校验行存在。
-18. 新增类用例的输入数据要唯一，用 import time 生成，例如
-    user = f"testuser{int(time.time()) % 100000}"，避免重复创建同名数据导致提交失败。
+18. 新增类用例的输入数据要唯一，用公共库 unique_name("testuser") 生成账号，
+    避免重复创建同名数据导致提交失败。
 19. 该后台弹窗（role=dialog，class ui-modal）的输入框没有 id/name/placeholder，label 也未关联 input，
     所以 get_by_label、placeholder 定位、get_by_role("textbox") 的顺序猜测都会超时。
     实测 DOM 顺序固定为：input[type=text] 第 0 个 = 用户名、第 1 个 = 显示名称（第 2 个是 PIN，第 3 个是邮箱），
-    联系方式是 input[type=tel]，「使用默认密码」是 checkbox，密码框存在 disabled 项不要填。脚本写法：
-    dialog = page.get_by_role("dialog")
-    dialog.locator('input[type="text"]').nth(0).fill(username)
-    dialog.locator('input[type="text"]').nth(1).fill(display_name)
-    禁止编造 placeholder（如 "请输入用户名"），该页面不存在。提交用
-    dialog.get_by_role("button", name="确定", exact=True)，提交后 expect(dialog).to_be_hidden()。
+    联系方式是 input[type=tel]，「使用默认密码」是 checkbox，密码框存在 disabled 项不要填。
+    禁止编造 placeholder（如 "请输入用户名"），该页面不存在。
 20. 「使用默认密码」默认勾选时密码框是 disabled，不要填密码；也不要重复点击「新增」。
 21. MCP 的 ref 只在当次快照内有效：每次点击/输入后重新 browser_snapshot 取新 ref 再操作，
     不要复用上一张快照里的 ref。
 22. browser_fill_form 的 fields 必须是数组（[{"target","name","type","value"}]），上传对象会报错；
     逐字段用 browser_type 更稳。
-23. 断言表格内容别猜 td 序号：表格首列往往是勾选框，序号会整体偏移。优先断言整行文本
-    （row = page.get_by_role("row").filter(has_text=username); expect(row).to_contain_text("默认部门")），
+23. 断言表格内容别猜 td 序号：表格首列往往是勾选框，序号会整体偏移。优先用公共库
+    assert_row_contains(page, username, "默认部门")（按整行文本断言），
     或先用 browser_evaluate 读表头 [...document.querySelectorAll('table thead th')].map(t=>t.textContent)
     核对列顺序后再写 nth 索引。
 24. MCP 的 target 只接受「快照里的 ref」（如 "e346"）或标准 Playwright CSS，
     不支持 "dialog >> textbox"、"dialog >> textbox >> nth=0" 这类 role 组合写法（会报 does not match any elements）。
     填输入框前先 browser_snapshot，找到 dialog 内 textbox 的 ref 再填；同一参数连续失败两次就换思路，不要原地重复重试。
+25. 必须复用公共函数库（随代码发布、签名稳定），禁止在脚本里重复实现等价逻辑：
+    from insight_aitest.modules.ui.backend.automation.helpers import (
+        open_route, dialog_of, fill_text_fields, confirm_dialog, cancel_dialog,
+        row_by_text, assert_row_contains, unique_name,
+    )
+    - open_route(page, "#/usm/users")：直达页面并等待加载
+    - dialog = dialog_of(page)：等待弹窗出现
+    - fill_text_fields(dialog, 用户名, 显示名称)：按顺序填 input[type=text]
+    - confirm_dialog(dialog) / cancel_dialog(dialog)：点击并等待弹窗关闭
+    - assert_row_contains(page, 用户名, "默认部门")：整行文本断言
+    - unique_name("testuser")：唯一测试数据名
+    自己拼 BASE_URL、自己 get_by_role("dialog") 再逐个 nth 填空、自己拼时间戳造唯一名，都视为不合格。
+26. 若「项目已有页面对象」一节列出可用的类/方法，优先直接 import 调用（如
+    from pages.users_page import UsersPage），不要重复其流程。
+27. 代码落位三档（先判断语义再写代码，不要混淆）：
+    - 机制类能力（跳转、弹窗、输入框、表格行、唯一数据）→ 仓库 helpers（规则 25），脚本内禁止重写
+    - 项目内通用但非业务的能力（等 toast 消失、轮询刷新、通用格式化）→ pages/_utils.py，
+      该文件允许覆盖（系统会自动备份到 pages/history/），import 方式 from pages._utils import xxx
+    - 被测系统业务操作（菜单、字段顺序、按钮文案、断言列）→ pages/<模块>_page.py，只能新增不可覆盖
+    需要新增或更新上述 pages 文件时，在 finish 里附带：
+    {"script": "...", "pages": [{"path": "pages/_utils.py", "content": "完整源码"}]}
+    path 必须是 pages/ 下单层 .py 文件，content 需能通过 py_compile。
 """
 
 
@@ -280,6 +298,83 @@ def _case_brief(case) -> str:
     )
 
 
+PAGES_CATALOG_LIMIT = 4000
+# 项目级通用扩展文件：允许生成期覆盖（覆盖前自动备份到 pages/history/）
+UTILS_FILE = "_utils.py"
+
+
+def _signature(node) -> str:
+    """函数签名参数列表（去掉 self/cls）。"""
+    args = [a.arg for a in node.args.args if a.arg not in ("self", "cls")]
+    if node.args.vararg is not None:
+        args.append("*" + node.args.vararg.arg)
+    return ", ".join(args)
+
+
+def pages_catalog(project_id: int) -> str:
+    """项目已有页面对象的类/方法签名，供模型直接复用。"""
+    import ast
+
+    root = paths.pages_dir(project_id)
+    lines: list[str] = []
+    for file in sorted(root.glob("*.py")):
+        if file.name == "__init__.py":
+            continue
+        try:
+            tree = ast.parse(file.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        module = f"pages.{file.stem}"
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                doc = (ast.get_docstring(node) or "").split("\n")[0].strip()
+                lines.append(f"- {module}.{node.name}" + (f"：{doc}" if doc else ""))
+                for sub in node.body:
+                    if isinstance(sub, ast.FunctionDef) and not sub.name.startswith("_"):
+                        sub_doc = (ast.get_docstring(sub) or "").split("\n")[0].strip()
+                        lines.append(
+                            f"    · {sub.name}({_signature(sub)})" + (f"  # {sub_doc}" if sub_doc else "")
+                        )
+            elif isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
+                doc = (ast.get_docstring(node) or "").split("\n")[0].strip()
+                lines.append(
+                    f"- {module}.{node.name}({_signature(node)})" + (f"  # {doc}" if doc else "")
+                )
+    return "\n".join(lines)[:PAGES_CATALOG_LIMIT]
+
+
+def write_pages(project_id: int, payload) -> str:
+    """把模型提交的页面对象写入项目 pages/，返回错误信息（空串为成功）。
+
+    落位规则：
+    - ``pages/_utils.py``（项目级通用扩展）允许覆盖，覆盖前备份到 pages/history/；
+    - 其余页面对象只允许新增，避免一次生成破坏既有复用资产。
+    """
+    if not isinstance(payload, list) or not payload:
+        return ""
+    root = paths.pages_dir(project_id)
+    for item in payload:
+        if not isinstance(item, dict):
+            return "pages 必须是对象数组：[{\"path\": \"pages/x.py\", \"content\": \"...\"}]"
+        rel = str(item.get("path") or "").strip().replace("\\", "/")
+        content = str(item.get("content") or "")
+        if rel.count("/") != 1 or not rel.startswith("pages/") or not rel.endswith(".py"):
+            return f"页面对象路径必须形如 pages/xxx.py（单层文件），收到：{rel}"
+        name = rel.split("/", 1)[1]
+        target = root / name
+        if target.exists() and name != UTILS_FILE:
+            return f"页面对象 {rel} 已存在，不能覆盖；请直接复用它的方法或换新文件名"
+        problem = _compile(content)
+        if problem:
+            return f"页面对象 {rel} 编译失败：{problem}"
+        if target.exists():
+            backup = root / "history" / f"{target.stem}_{datetime.now():%Y%m%d-%H%M%S-%f}.py"
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        target.write_text(content, encoding="utf-8")
+    return ""
+
+
 class GenerationJob:
     """一次生成/修复任务（后台线程执行）。"""
 
@@ -434,6 +529,15 @@ class GenerationJob:
             "可用工具：\n" + catalog,
             "用例信息：\n" + _case_brief(case),
         ]
+        catalog_pages = pages_catalog(int(case.project_id))
+        if catalog_pages:
+            user_parts.append(
+                "项目已有页面对象（优先复用，import 路径 pages.xxx）：\n" + catalog_pages
+            )
+        else:
+            user_parts.append(
+                "项目暂无页面对象；如本用例确实需要沉淀公共流程，可按规则 27 在 finish 中提交新的 pages 文件。"
+            )
         if is_fix:
             current = paths.case_script(int(case.project_id), int(case.id))
             if current.exists():
@@ -452,6 +556,7 @@ class GenerationJob:
         rounds = 0
         bad_json = 0
         early_finish = 0
+        pages_rounds = 0
         last_sig = ""
         repeat = 0
         while True:
@@ -544,6 +649,32 @@ class GenerationJob:
                         }
                     )
                     continue
+
+                pages_problem = write_pages(int(case.project_id), args.get("pages"))
+                if pages_problem:
+                    pages_rounds += 1
+                    self._write_log({"type": "pages_invalid", "message": pages_problem})
+                    if pages_rounds > MAX_FIX_ROUNDS:
+                        return {
+                            "status": GenerationStatus.FAILED,
+                            "error_category": ErrorCategory.SCRIPT,
+                            "message": f"页面对象写入失败：{pages_problem}",
+                        }
+                    messages.append({"role": "assistant", "content": reply})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"页面对象未通过校验：{pages_problem}\n"
+                                "请修正后重新输出完整 finish JSON（script + pages）。"
+                            ),
+                        }
+                    )
+                    continue
+                if args.get("pages"):
+                    self._write_log(
+                        {"type": "pages_saved", "count": len(args.get("pages") or [])}
+                    )
 
                 concurrency.set_progress(self.case_id, "首跑验证", "本地执行脚本验证")
                 result = self._validate(source, auth)
