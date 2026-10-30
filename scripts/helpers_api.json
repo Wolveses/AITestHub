@@ -8,7 +8,6 @@
   "data_path": "(*parts: 'str') -> 'Path'",
   "dialog_of": "(page, timeout: 'int' = 15000)",
   "download_file": "(page, trigger, name: 'str', timeout: 'int' = 15000) -> 'Path'",
-  "fill_text_fields": "(dialog, *values: 'str')",
   "frame_of": "(page, name=None, url=None)",
   "new_tab": "(page, trigger, timeout: 'int' = 15000)",
   "open_route": "(page, route: 'str' = '', wait: 'bool' = True, timeout: 'int' = 20000)",

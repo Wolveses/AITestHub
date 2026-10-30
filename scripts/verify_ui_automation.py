@@ -38,7 +38,7 @@ REQUIRED_HELPERS = (
     "base_url",
     "open_route",
     "dialog_of",
-    "fill_text_fields",
+    "text_inputs",
     "confirm_dialog",
     "cancel_dialog",
     "row_by_text",

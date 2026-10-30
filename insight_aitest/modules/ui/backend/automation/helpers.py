@@ -65,19 +65,8 @@ def dialog_of(page, timeout: int = DEFAULT_TIMEOUT):
 
 
 def text_inputs(container):
-    """容器内的文本输入框：该后台弹窗的 input 没有 id/name/placeholder，只能按顺序取。"""
+    """容器内的文本输入框集合（表单字段没有 label/placeholder 时按顺序取用）。"""
     return container.locator('input[type="text"]')
-
-
-def fill_text_fields(dialog, *values: str):
-    """按顺序填弹窗内的文本输入框，返回已填充的输入框 locator 列表。"""
-    inputs = text_inputs(dialog)
-    filled = []
-    for index, value in enumerate(values):
-        box = inputs.nth(index)
-        box.fill(value)
-        filled.append(box)
-    return filled
 
 
 def confirm_dialog(dialog, name: str = "确定"):

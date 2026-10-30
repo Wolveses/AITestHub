@@ -95,6 +95,8 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     实测 DOM 顺序固定为：input[type=text] 第 0 个 = 用户名、第 1 个 = 显示名称（第 2 个是 PIN，第 3 个是邮箱），
     联系方式是 input[type=tel]，「使用默认密码」是 checkbox，密码框存在 disabled 项不要填。
     禁止编造 placeholder（如 "请输入用户名"），该页面不存在。
+    字段顺序属于业务语义，必须写在页面对象（pages/<模块>_page.py）里；仓库 helpers 只提供
+    text_inputs(container) 这类原语，不提供「按第几个字段填什么」的封装。
 20. 「使用默认密码」默认勾选时密码框是 disabled，不要填密码；也不要重复点击「新增」。
 21. MCP 的 ref 只在当次快照内有效：每次点击/输入后重新 browser_snapshot 取新 ref 再操作，
     不要复用上一张快照里的 ref。
@@ -109,7 +111,7 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     填输入框前先 browser_snapshot，找到 dialog 内 textbox 的 ref 再填；同一参数连续失败两次就换思路，不要原地重复重试。
 25. 必须复用公共函数库（随代码发布、签名稳定），禁止在脚本里重复实现等价逻辑：
     from insight_aitest.modules.ui.backend.automation.helpers import (
-        open_route, dialog_of, fill_text_fields, confirm_dialog, cancel_dialog,
+        open_route, dialog_of, text_inputs, confirm_dialog, cancel_dialog,
         row_by_text, assert_row_contains, unique_name,
         wait_visible, wait_hidden, wait_row, wait_toast,
         choose_option, upload_files, frame_of, new_tab, download_file,
@@ -117,7 +119,7 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     )
     - open_route(page, "#/usm/users")：直达页面并等待加载
     - dialog = dialog_of(page)：等待弹窗出现
-    - fill_text_fields(dialog, 用户名, 显示名称)：按顺序填 input[type=text]
+    - text_inputs(dialog)：弹窗内文本输入框集合，业务代码里按字段顺序取值填写
     - confirm_dialog(dialog) / cancel_dialog(dialog)：点击并等待弹窗关闭
     - assert_row_contains(page, 用户名, "默认部门")：整行文本断言
     - unique_name("testuser")：唯一测试数据名
@@ -128,7 +130,7 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     - upload_files(dialog, data_path("样例.xlsx"))：上传项目测试数据
     - frame_of(page, name=...) / new_tab(page, 触发控件) / download_file(...)：iframe、新窗口、下载
     - artifact_path("x.png")：本次执行的产物路径（下载或截图落盘用）
-    自己拼 BASE_URL、自己 get_by_role("dialog") 再逐个 nth 填空、自己拼时间戳造唯一名，都视为不合格。
+    自己拼 BASE_URL、在页面对象之外逐个 nth 填写业务字段、自己拼时间戳造唯一名，都视为不合格。
 26. 若「项目已有页面对象」一节列出可用的类/方法，优先直接 import 调用（如
     from pages.users_page import UsersPage），不要重复其流程。
 27. 代码落位三档（先判断语义再写代码，不要混淆）：
