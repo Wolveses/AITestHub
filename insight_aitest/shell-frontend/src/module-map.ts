@@ -49,15 +49,6 @@ export const childrenMap: Record<string, Record<string, ComponentType>> = {
     dashboard: lazy(() => import('./modules/api').then((m) => ({ default: m.Dashboard }))),
     schedules: lazy(() => import('./modules/api').then((m) => ({ default: m.SchedulePanel }))),
   },
-  ui: {
-    exec: lazy(() => import('./modules/ui').then((m) => ({ default: m.ExecTab }))),
-    edit: lazy(() => import('./modules/ui').then((m) => ({ default: m.EditTab }))),
-    dashboard: lazy(() => import('./modules/ui').then((m) => ({ default: m.Dashboard }))),
-    batch: lazy(() => import('./modules/ui').then((m) => ({ default: m.BatchExec }))),
-    schedules: lazy(() => import('./modules/ui').then((m) => ({ default: m.SchedulePanel }))),
-    settings: lazy(() => import('./modules/ui').then((m) => ({ default: m.VisionConfig }))),
-    mobile: lazy(() => import('./modules/ui').then((m) => ({ default: m.MobilePlaceholder }))),
-  },
   testcase: {
     list: lazy(() => import('./modules/testcase').then((m) => ({ default: m.CaseList }))),
     generate: lazy(() => import('./modules/testcase').then((m) => ({ default: m.GenerateWizard }))),

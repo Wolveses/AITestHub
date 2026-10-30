@@ -79,3 +79,11 @@ class RunRecord(MappedAsDataclass, Base, kw_only=True):
     project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     error: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+
+    # ===== AI 脚本链路扩展（与 Midscene 执行记录同表，用 runner 区分）=====
+    # runner='midscene'（旧视觉驱动）| 'script'（pytest + playwright 固化脚本）
+    runner: Mapped[str] = mapped_column(Text, nullable=False, default="midscene")
+    env_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    script_version: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    artifacts_rel_path: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    trace_rel_path: Mapped[str] = mapped_column(Text, nullable=False, default="")

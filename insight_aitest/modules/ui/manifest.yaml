@@ -7,8 +7,8 @@ category: testing
 icon: MonitorSmartphone
 order: 5
 description:
-  zh: Web UI 自动化（Midscene 视觉驱动浏览器）+ 移动端（预留）
-  en: Web UI automation (Midscene vision-driven browser) + Mobile (reserved)
+  zh: 用例快照 → AI 生成 Playwright 脚本 → 固化后本地执行与自动修复
+  en: Case snapshots → AI-generated Playwright scripts → local runs and auto repair
 backend:
   router: ui.backend.routes:router
   dependencies: []

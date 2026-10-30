@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -38,7 +40,16 @@ def _make_engine(db_path: str):
     @event.listens_for(engine, "connect")
     def _set_pragma(dbapi_conn, _record):  # noqa: ANN001
         cur = dbapi_conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
+        # journal_mode 是持久化属性；多进程争用 -shm 时可能返回 disk I/O error，
+        # 此时 DB 已是 WAL 模式，重试后仍失败就跳过，无需让整个进程启动失败
+        for _ in range(3):
+            try:
+                cur.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as e:
+                if "disk i/o error" not in str(e).lower():
+                    raise
+                time.sleep(0.3)
         cur.execute("PRAGMA foreign_keys=ON")
         cur.close()
 

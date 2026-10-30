@@ -6,11 +6,14 @@ from .runs import router as runs_router
 from .batch import router as batch_router
 from .schedules_proxy import router as schedules_router
 from .config import router as config_router
+from insight_aitest.modules.ui.backend.automation.routes import router as automation_router
 
 router = APIRouter()
 router.include_router(runs_router)
 router.include_router(batch_router)
 router.include_router(schedules_router)
 router.include_router(config_router)
+# AI 脚本链路（旧 Midscene 页面前端雪藏，后端接口保留）
+router.include_router(automation_router)
 
 __all__ = ["router"]
