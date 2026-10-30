@@ -110,7 +110,8 @@ def run_script(
     """执行一个固化脚本，返回结果摘要（不写 ui_runs，由调用方决定是否落库）。
 
     retries: 失败后额外重试次数（仅用于吸收 UI 抖动，默认 0）。
-    pages_root: 覆盖 ``pages`` 包的搜索根目录（生成期首跑用暂存目录，避免污染正式资产）。
+    pages_root: 覆盖项目资产根目录（含 common/ 与 pages/ 包）。生成期首跑传暂存目录，
+        避免未验证的资产污染正式目录；不传时默认 ``scripts/<project_id>``。
     """
     if env is None:
         raise EnvMissingError("项目未配置环境，请先在环境管理中新增并测试通过")
@@ -162,7 +163,7 @@ def run_script(
             "PYTHONUTF8": "1",
         }
     )
-    # 子进程 cwd 在用例目录，需显式补仓库根目录（import 脚手架插件）与 pages 根目录（import 页面对象）
+    # 子进程 cwd 在用例目录，需显式补仓库根目录（import 脚手架插件）与资产根目录（import common/pages）
     existing = child_env.get("PYTHONPATH") or ""
     child_env["PYTHONPATH"] = os.pathsep.join(
         p

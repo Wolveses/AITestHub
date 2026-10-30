@@ -56,8 +56,8 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
 1. 同步 API：from playwright.sync_api import expect；禁止 async/await。
 2. 只定义测试函数（一个或多个 def test_xxx(page):），不要写 main、不要自己 launch 浏览器；
    page fixture 由运行脚手架提供，已注入登录态（Cookie/localStorage 或请求头）。
-3. 跳转统一用公共库 open_route(page, route)，内部已读取环境变量 INSIGHT_UI_BASE_URL；
-   禁止硬编码主机名/IP，也不要自己拼 BASE_URL 字符串。
+3. 站点地址从环境契约读取：from insight_aitest.modules.ui.backend.automation.env import base_url，
+   跳转写 page.goto(base_url() + "/#/usm/users")；禁止硬编码主机名/IP，也不要 import os 读环境变量。
 4. 断言用 expect(...)，覆盖「预期结果」中的关键校验；不要只截图不校验。
 5. 禁止使用 ai_assert / midscene / 视觉模型相关接口；只用标准 playwright 定位（get_by_role、
    get_by_label、get_by_text、locator），定位优先用可读的 role/label/testid。
@@ -73,14 +73,14 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
    不要用 .first + filter 猜测父子菜单，也不要对同一 locator 追加 not_to_contain_text 断言。
 10. 断言只用正向校验（to_be_visible / to_have_text / to_contain_text / to_have_value 等），
     不要用否定断言来“筛选”元素。
-11. BASE_URL 就是当前端入口（后台已带 /manage），跳转只写 BASE_URL + 路由路径，
+11. base_url() 就是当前端入口（后台已带 /manage），跳转只写 base_url() + 路由路径，
     严禁再拼 "/manage"，否则会得到 /manage/manage。
 12. 用例文字里的按钮名可能与实际界面不一致，以浏览器快照中的真实 accessible name 为准
     （快照是「新增」就写「新增」，不要凭用例描述创造成「新增用户」）。
 13. 浏览器工具参数必须严格按 schema：点击是 {"target": "快照里的 ref，如 e125"}（可附 "element"），
     输入是 {"target": "e125", "text": "..."}，快照是 {}。ref 只用于探索，不能写进脚本。
 14. 探索时留意地址栏的 hash 路由（例如点击菜单后变成 #/usm/users）。脚本里直接用
-    open_route(page, "#/usm/users") 直达目标页面，再 expect 目标页关键元素可见；
+    page.goto(base_url() + "/#/usm/users") 直达目标页面，再 expect 目标页关键元素可见；
     这样比逐级点菜单稳定。
 15. 按钮文案干净，必须用 exact=True 避免歧义，例如 get_by_role("button", name="新增", exact=True)；
     否则「新增」会同时命中「新增API用户」触发 strict mode violation。菜单项/树节点反过来，
@@ -88,68 +88,57 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
 16. Playwright 的 first / last 是属性不是方法：写 btn.first.click()，不要写 btn.first()。
 17. 断言的文案以浏览器里真实看到的为准：用例写「有效期为永久」，但界面该列可能显示为「--」
     （无限制即永久）。不要把用例文字硬编码进 to_have_text，改用真实界面文案或校验行存在。
-18. 新增类用例的输入数据要唯一，用公共库 unique_name("testuser") 生成账号，
-    避免重复创建同名数据导致提交失败。
+18. 新增类用例的输入数据必须唯一：优先调用项目已有 common 里的 unique_name(prefix)，
+    没有时用 import time 拼时间戳，禁止写死固定账号，否则重复创建会提交失败。
 19. 该后台弹窗（role=dialog，class ui-modal）的输入框没有 id/name/placeholder，label 也未关联 input，
     所以 get_by_label、placeholder 定位、get_by_role("textbox") 的顺序猜测都会超时。
     实测 DOM 顺序固定为：input[type=text] 第 0 个 = 用户名、第 1 个 = 显示名称（第 2 个是 PIN，第 3 个是邮箱），
     联系方式是 input[type=tel]，「使用默认密码」是 checkbox，密码框存在 disabled 项不要填。
     禁止编造 placeholder（如 "请输入用户名"），该页面不存在。
-    字段顺序属于业务语义，必须写在页面对象（pages/<模块>_page.py）里；仓库 helpers 只提供
-    text_inputs(container) 这类原语，不提供「按第几个字段填什么」的封装。
+    字段顺序属于业务语义，必须写在页面对象（pages/<模块>_page.py）里；仓库只提供 env 契约，
+    不含任何这类原语，可复用的弹窗/输入框定位逻辑应沉淀到 common/。
 20. 「使用默认密码」默认勾选时密码框是 disabled，不要填密码；也不要重复点击「新增」。
 21. MCP 的 ref 只在当次快照内有效：每次点击/输入后重新 browser_snapshot 取新 ref 再操作，
     不要复用上一张快照里的 ref。
 22. browser_fill_form 的 fields 必须是数组（[{"target","name","type","value"}]），上传对象会报错；
     逐字段用 browser_type 更稳。
-23. 断言表格内容别猜 td 序号：表格首列往往是勾选框，序号会整体偏移。优先用公共库
-    assert_row_contains(page, username, "默认部门")（按整行文本断言），
+23. 断言表格内容别猜 td 序号：表格首列往往是勾选框，序号会整体偏移。优先断言整行文本
+    （row = page.get_by_role("row").filter(has_text=username); expect(row).to_contain_text("默认部门")），
     或先用 browser_evaluate 读表头 [...document.querySelectorAll('table thead th')].map(t=>t.textContent)
     核对列顺序后再写 nth 索引。
 24. MCP 的 target 只接受「快照里的 ref」（如 "e346"）或标准 Playwright CSS，
     不支持 "dialog >> textbox"、"dialog >> textbox >> nth=0" 这类 role 组合写法（会报 does not match any elements）。
     填输入框前先 browser_snapshot，找到 dialog 内 textbox 的 ref 再填；同一参数连续失败两次就换思路，不要原地重复重试。
-25. 必须复用公共函数库（随代码发布、签名稳定），禁止在脚本里重复实现等价逻辑：
-    from insight_aitest.modules.ui.backend.automation.helpers import (
-        open_route, dialog_of, text_inputs, confirm_dialog, cancel_dialog,
-        row_by_text, assert_row_contains, unique_name,
-        wait_visible, wait_hidden, wait_row, wait_toast,
-        choose_option, upload_files, frame_of, new_tab, download_file,
-        data_path, artifact_path,
-    )
-    - open_route(page, "#/usm/users")：直达页面并等待加载
-    - dialog = dialog_of(page)：等待弹窗出现
-    - text_inputs(dialog)：弹窗内文本输入框集合，业务代码里按字段顺序取值填写
-    - confirm_dialog(dialog) / cancel_dialog(dialog)：点击并等待弹窗关闭
-    - assert_row_contains(page, 用户名, "默认部门")：整行文本断言
-    - unique_name("testuser")：唯一测试数据名
-    - wait_visible(locator) / wait_hidden(locator)：显式等待元素出现/消失
-    - wait_row(page, 用户名)：等待目标表格行出现
-    - wait_toast(page, "添加成功")：等待提示条出现并消失
-    - choose_option(page, 下拉控件, "选项文案")：下拉/combobox 选择
-    - upload_files(dialog, data_path("样例.xlsx"))：上传项目测试数据
-    - frame_of(page, name=...) / new_tab(page, 触发控件) / download_file(...)：iframe、新窗口、下载
-    - artifact_path("x.png")：本次执行的产物路径（下载或截图落盘用）
-    自己拼 BASE_URL、在页面对象之外逐个 nth 填写业务字段、自己拼时间戳造唯一名，都视为不合格。
-26. 若「项目已有页面对象」一节列出可用的类/方法，优先直接 import 调用（如
-    from pages.users_page import UsersPage），不要重复其流程。
-27. 代码落位三档（先判断语义再写代码，不要混淆）：
-    - 机制类能力（跳转、弹窗、输入框、表格行、唯一数据、等待、下拉、上传、下载、iframe、新窗口）→ 仓库 helpers（规则 25），脚本内禁止重写
-    - 项目内通用但非业务、helpers 未覆盖的能力（特定轮询刷新、通用格式化）→ pages/_utils.py，
-      该文件允许覆盖（系统会自动备份到 pages/history/），import 方式 from pages._utils import xxx
-    - 被测系统业务操作（菜单、字段顺序、按钮文案、断言列）→ pages/<模块>_page.py，只能新增不可覆盖
-    需要新增或更新上述 pages 文件时，在 finish 里附带：
-    {"script": "...", "pages": [{"path": "pages/_utils.py", "content": "完整源码"}]}
-    path 必须是 pages/ 下单层 .py 文件，content 需能通过 py_compile。
-    页面对象会先写入生成期暂存区，首跑通过后才并入正式资产；失败自动丢弃，不会污染既有复用代码。
+25. 仓库只提供环境契约（无任何 UI 结构假设），脚本里用它取地址与路径：
+    from insight_aitest.modules.ui.backend.automation.env import base_url, data_path, artifact_path
+    - base_url()：当前端入口（后台已含 /manage）
+    - data_path("样例.xlsx")：项目 data/ 目录的只读样例文件
+    - artifact_path("x.png")：本次执行的产物路径（下载/截图落盘）
+    跳转、点击、输入、等待一律直接用 Playwright 原生写法：
+    page.goto(base_url() + "/#/usm/users")、expect(locator).to_be_visible()、l.click()、l.fill(...)。
+    不要写 click(locator)/fill(locator) 这类通用薄封装，也不要在帮助函数里做「页面级流程」。
+26. 若「项目已有资产」一节列出可复用的 common 函数或页面对象类/方法，优先直接 import 调用
+    （如 from common.ui import dialog_of、from pages.users_page import UsersPage），不要重复其流程。
+27. 代码落位四档（先判断语义再写代码，不要混淆）：
+    - Playwright 原生动作/断言/等待 → 直接写在脚本或页面对象里，不额外包装
+    - 项目级通用能力（弹窗定位、输入框顺序原语、表格整行断言、toast 等待、下拉/上传/下载封装）
+      → common/<主题>.py（可覆盖，系统自动备份到 common/history/），import 方式 from common.ui import xxx
+    - 被测系统业务操作（页面路由、字段顺序、按钮文案、断言列）→ pages/<模块>_page.py（只增不覆盖）
+    - 单用例步骤与断言 → case 脚本本身
+    归属判定：同一逻辑被 ≥2 处（页面对象或用例）复用时才进 common，只服务单一页面就留在页面对象里；
+    依赖方向必须单向：case → pages → common，common 不得 import pages，pages 不得 import 另一个 pages。
+    需要新增或更新上述文件时，在 finish 里附带：
+    {"script": "...", "pages": [{"path": "common/ui.py", "content": "完整源码"}]}
+    path 必须是 pages/ 或 common/ 下的单层 .py 文件，content 需能通过 py_compile。
+    这些文件会先写入生成期暂存区，首跑通过后才并入正式资产；失败自动丢弃，不会污染既有复用代码。
 28. 禁止任何固定睡眠：不要写 page.wait_for_timeout / time.sleep / asyncio.sleep。
-    等待一律用 helpers 的 wait_visible / wait_hidden / wait_row / wait_toast，
-    或 expect(...) 自动轮询（to_be_visible / to_be_hidden / to_contain_text 等）。
+    等待一律用 expect(...) 自动轮询（to_be_visible / to_be_hidden / to_contain_text），
+    或用 common 里已有的 wait_* 封装。
 29. 安全边界（违反会被静态校验直接拒绝）：
-    - 只允许 import：playwright、pytest、pages.*、helpers、以及 time/json/re/tempfile/datetime/random/string/uuid/typing
+    - 只允许 import：playwright、pytest、pages.*、common.*、env，以及 time/json/re/tempfile/datetime/random/string/uuid/typing
     - 禁止 import os/sys/subprocess/pathlib/shutil/requests 等，禁止读取配置文件与环境凭证
     - 禁止调用 open/eval/exec/compile/getattr/setattr
-    - 上传样例文件用 data_path("文件名")（项目 data/ 目录只读资产）；产物落盘用 artifact_path("文件名")
+    - 上传样例文件用 data_path("文件名")；产物落盘用 artifact_path("文件名")
 """
 
 
@@ -239,16 +228,17 @@ def _check_script(source: str) -> str:
     if "page" not in low:
         return "脚本未使用 page fixture"
     # BASE_URL 已是当前端入口（后台已含 /manage），再拼接会造成 /manage/manage
-    if re.search(r"BASE_URL[^\n]{0,16}/manage", source):
-        return "BASE_URL 已包含端入口（后台为 /manage），不要再拼接 /manage"
+    if re.search(r"(BASE_URL|base_url\(\))[^\n]{0,20}/manage", source):
+        return "base_url() 已包含端入口（后台为 /manage），不要再拼接 /manage"
     return _check_sandbox(source, kind="脚本")
 
 
-# 允许导入的模块白名单：playwright / pytest / 公共函数库 / 项目页面对象 / 少量纯计算标准库
+# 允许导入的模块白名单：playwright / pytest / 环境契约 / 项目资产（pages、common）/ 少量纯计算标准库
 _ALLOWED_IMPORTS = {
     "playwright",
     "pytest",
     "pages",
+    "common",
     "time",
     "json",
     "re",
@@ -259,7 +249,7 @@ _ALLOWED_IMPORTS = {
     "uuid",
     "typing",
 }
-_ALLOWED_HELPERS_PREFIX = "insight_aitest.modules.ui.backend.automation.helpers"
+_ALLOWED_ENV_PREFIX = "insight_aitest.modules.ui.backend.automation.env"
 # 禁止调用的危险函数（防止脚本读密钥文件或绕过静态检查）
 _BANNED_CALLS = {"open", "eval", "exec", "compile", "__import__", "getattr", "setattr", "execfile"}
 
@@ -277,13 +267,13 @@ def _check_sandbox(source: str, kind: str) -> str:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".")[0]
-                if root not in _ALLOWED_IMPORTS and not alias.name.startswith(_ALLOWED_HELPERS_PREFIX):
-                    return f"{kind}禁止导入 {alias.name}（仅允许 playwright/pytest/pages/helpers 与少量标准库）"
+                if root not in _ALLOWED_IMPORTS and not alias.name.startswith(_ALLOWED_ENV_PREFIX):
+                    return f"{kind}禁止导入 {alias.name}（仅允许 playwright/pytest/env/pages/common 与少量标准库）"
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             root = module.split(".")[0]
-            if root not in _ALLOWED_IMPORTS and not module.startswith(_ALLOWED_HELPERS_PREFIX):
-                return f"{kind}禁止导入 {module or '相对模块'}（仅允许 playwright/pytest/pages/helpers 与少量标准库）"
+            if root not in _ALLOWED_IMPORTS and not module.startswith(_ALLOWED_ENV_PREFIX):
+                return f"{kind}禁止导入 {module or '相对模块'}（仅允许 playwright/pytest/env/pages/common 与少量标准库）"
         elif isinstance(node, ast.Call):
             func = node.func
             # 只拦截直接调用（open/eval/exec...），避免误伤页面对象里同名的合法方法
@@ -291,7 +281,7 @@ def _check_sandbox(source: str, kind: str) -> str:
                 return f"{kind}禁止调用 {func.id}（脚本不得读写任意文件或动态执行代码）"
             attr = getattr(func, "attr", "")
             if attr == "wait_for_timeout" or attr == "sleep":
-                return f"{kind}禁止固定睡眠（{attr}），请改用 helpers 的 wait_* 或 expect"
+                return f"{kind}禁止固定睡眠（{attr}），请改用 expect 轮询或 common 里的 wait_*"
     return ""
 
 
@@ -371,8 +361,8 @@ def _case_brief(case) -> str:
 
 
 PAGES_CATALOG_LIMIT = 8000
-# 项目级通用扩展文件：允许生成期覆盖（覆盖前自动备份到 pages/history/）
-UTILS_FILE = "_utils.py"
+# 项目级资产目录：common 可覆盖（写前备份），pages 只增不覆盖
+ASSET_DIRS = ("common", "pages")
 
 
 def _signature(node) -> str:
@@ -383,11 +373,14 @@ def _signature(node) -> str:
     return ", ".join(args)
 
 
-def pages_catalog(project_id: int) -> str:
-    """项目已有页面对象的类/方法签名，供模型直接复用。"""
+def _asset_root(project_id: int, package: str) -> Path:
+    return paths.common_dir(project_id) if package == "common" else paths.pages_dir(project_id)
+
+
+def _catalog_section(root: Path, package: str) -> list[str]:
+    """扫描单个资产目录的类/函数签名。"""
     import ast
 
-    root = paths.pages_dir(project_id)
     lines: list[str] = []
     for file in sorted(root.glob("*.py")):
         if file.name == "__init__.py":
@@ -396,7 +389,7 @@ def pages_catalog(project_id: int) -> str:
             tree = ast.parse(file.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):
             continue
-        module = f"pages.{file.stem}"
+        module = f"{package}.{file.stem}"
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
                 doc = (ast.get_docstring(node) or "").split("\n")[0].strip()
@@ -409,80 +402,104 @@ def pages_catalog(project_id: int) -> str:
                         )
             elif isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
                 doc = (ast.get_docstring(node) or "").split("\n")[0].strip()
-                lines.append(
-                    f"- {module}.{node.name}({_signature(node)})" + (f"  # {doc}" if doc else "")
-                )
-    text = "\n".join(lines)
+                lines.append(f"- {module}.{node.name}({_signature(node)})" + (f"  # {doc}" if doc else ""))
+    return lines
+
+
+def pages_catalog(project_id: int) -> str:
+    """项目已有资产（common 通用能力 + pages 页面对象）的签名，供模型直接复用。"""
+    sections: list[str] = []
+    for package, title in (
+        ("common", "项目通用能力（common/，被 ≥2 处复用的非业务逻辑）"),
+        ("pages", "页面对象（pages/，业务操作）"),
+    ):
+        lines = _catalog_section(_asset_root(project_id, package), package)
+        if lines:
+            sections.append(f"【{title}】\n" + "\n".join(lines))
+    text = "\n\n".join(sections)
     if len(text) <= PAGES_CATALOG_LIMIT:
         return text
     return (
         text[:PAGES_CATALOG_LIMIT]
-        + "\n…（页面对象清单已截断，其余文件请按需复用：先看 pages/ 目录，再决定是否新建）"
+        + "\n…（资产清单已截断，其余文件请按需复用：先看 common/ 与 pages/ 目录，再决定是否新建）"
     )
 
 
-def stage_pages(project_id: int, case_id: int, payload) -> tuple[str, Path | None]:
-    """校验页面对象并写入生成期暂存目录，返回 (错误信息, 暂存根目录)。
+def _copy_assets(src: Path, dst: Path) -> None:
+    """把正式资产目录复制进暂存目录（目录不存在时补空包）。"""
+    dst.mkdir(parents=True, exist_ok=True)
+    if src.exists():
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    init = dst / "__init__.py"
+    if not init.exists():
+        init.write_text("# -*- coding: utf-8 -*-\n", encoding="utf-8")
 
-    暂存目录里是正式 pages/ 的副本 + 本次提交内容，首跑使用它，
-    避免未验证的页面对象污染正式资产；通过后由 adopt_pages 并入正式目录。
+
+def stage_pages(project_id: int, case_id: int, payload) -> tuple[str, Path | None]:
+    """校验资产提交并写入生成期暂存目录，返回 (错误信息, 暂存根目录)。
+
+    暂存目录是正式 common/ + pages/ 的副本，首跑用它，
+    避免未验证的资产污染正式目录；通过后由 adopt_pages 并入。
 
     落位规则：
-    - ``pages/_utils.py``（项目级通用扩展）允许覆盖，并入时备份旧版到 pages/history/；
-    - 其余页面对象只允许新增，避免一次生成破坏既有复用资产。
+    - ``common/xxx.py``：项目级通用代码，允许覆盖，并入时备份旧版到 common/history/；
+    - ``pages/xxx.py``：页面对象，只允许新增，避免一次生成破坏既有复用资产。
     """
     if not isinstance(payload, list) or not payload:
         return "", None
     staging = paths.staging_root(project_id, case_id)
     if staging.exists():
         shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(paths.pages_dir(project_id), staging / "pages")
+    for package in ASSET_DIRS:
+        _copy_assets(_asset_root(project_id, package), staging / package)
+
     for item in payload:
         if not isinstance(item, dict):
-            return "pages 必须是对象数组：[{\"path\": \"pages/x.py\", \"content\": \"...\"}]", None
+            return "pages 必须是对象数组：[{\"path\": \"common/x.py\" 或 \"pages/x.py\", \"content\": \"...\"}]", None
         rel = str(item.get("path") or "").strip().replace("\\", "/")
         content = str(item.get("content") or "")
-        if rel.count("/") != 1 or not rel.startswith("pages/") or not rel.endswith(".py"):
-            return f"页面对象路径必须形如 pages/xxx.py（单层文件），收到：{rel}", None
-        name = rel.split("/", 1)[1]
+        parts = rel.split("/")
+        if len(parts) != 2 or parts[0] not in ASSET_DIRS or not parts[1].endswith(".py"):
+            return f"资产路径必须形如 common/xxx.py 或 pages/xxx.py（单层文件），收到：{rel}", None
+        package, name = parts
         if name == "__init__.py":
-            return f"页面对象文件名不合法：{rel}", None
-        if (paths.pages_dir(project_id) / name).exists() and name != UTILS_FILE:
+            return f"资产文件名不合法：{rel}", None
+        if package == "pages" and (_asset_root(project_id, "pages") / name).exists():
             return f"页面对象 {rel} 已存在，不能覆盖；请直接复用它的方法或换新文件名", None
         problem = _compile(content)
         if not problem:
-            problem = _check_sandbox(content, kind=f"页面对象 {rel} ")
+            problem = _check_sandbox(content, kind=f"资产 {rel} ")
         if problem:
-            return f"页面对象 {rel} 校验失败：{problem}", None
+            return f"资产 {rel} 校验失败：{problem}", None
         (staging / rel).write_text(content, encoding="utf-8")
     return "", staging
 
 
 def adopt_pages(project_id: int, staging: Path | None) -> None:
-    """首跑通过后，把暂存页面对象并入正式 pages/（_utils.py 覆盖前备份）。"""
+    """首跑通过后，把暂存资产并入正式目录（common 覆盖前备份，pages 只增）。"""
     if staging is None:
         return
-    staged = staging / "pages"
-    if not staged.exists():
-        return
-    real = paths.pages_dir(project_id)
-    for file in sorted(staged.glob("*.py")):
-        name = file.name
-        if name == "__init__.py":
+    for package in ASSET_DIRS:
+        staged = staging / package
+        if not staged.exists():
             continue
-        content = file.read_text(encoding="utf-8")
-        target = real / name
-        if target.exists():
-            if target.read_text(encoding="utf-8") == content:
+        real = _asset_root(project_id, package)
+        for file in sorted(staged.glob("*.py")):
+            name = file.name
+            if name == "__init__.py":
                 continue
-            if name != UTILS_FILE:
-                # 非 _utils 文件不覆盖（生成期已校验存在性，这里兜底）
-                continue
-            backup = real / "history" / f"{target.stem}_{datetime.now():%Y%m%d-%H%M%S-%f}.py"
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
-        target.write_text(content, encoding="utf-8")
+            content = file.read_text(encoding="utf-8")
+            target = real / name
+            if target.exists():
+                if target.read_text(encoding="utf-8") == content:
+                    continue
+                if package == "pages":
+                    # 页面对象不覆盖（生成期已校验存在性，这里兜底）
+                    continue
+                backup = real / "history" / f"{target.stem}_{datetime.now():%Y%m%d-%H%M%S-%f}.py"
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+            target.write_text(content, encoding="utf-8")
 
 
 def discard_pages(staging: Path | None) -> None:
@@ -652,11 +669,12 @@ class GenerationJob:
         catalog_pages = pages_catalog(int(case.project_id))
         if catalog_pages:
             user_parts.append(
-                "项目已有页面对象（优先复用，import 路径 pages.xxx）：\n" + catalog_pages
+                "项目已有资产（优先复用，通用能力 import common.xxx、页面对象 import pages.xxx）：\n"
+                + catalog_pages
             )
         else:
             user_parts.append(
-                "项目暂无页面对象；如本用例确实需要沉淀公共流程，可按规则 27 在 finish 中提交新的 pages 文件。"
+                "项目暂无公共资产；如本用例确实需要沉淀可复用代码，按规则 27 在 finish 中提交 common/ 或 pages/ 文件。"
             )
         if is_fix:
             current = paths.case_script(int(case.project_id), int(case.id))
@@ -781,14 +799,14 @@ class GenerationJob:
                         return {
                             "status": GenerationStatus.FAILED,
                             "error_category": ErrorCategory.SCRIPT,
-                            "message": f"页面对象写入失败：{pages_problem}",
+                            "message": f"资产写入失败：{pages_problem}",
                         }
                     messages.append({"role": "assistant", "content": reply})
                     messages.append(
                         {
                             "role": "user",
                             "content": (
-                                f"页面对象未通过校验：{pages_problem}\n"
+                                f"资产未通过校验：{pages_problem}\n"
                                 "请修正后重新输出完整 finish JSON（script + pages）。"
                             ),
                         }

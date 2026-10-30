@@ -110,7 +110,7 @@ interface AutomationState {
   getScript: (caseId: number) => Promise<{
     content: string;
     version: number;
-    pages: { name: string; content: string }[];
+    pages: { name: string; path?: string; content: string }[];
   }>;
   listRuns: (caseId: number) => Promise<ScriptRun[]>;
   listGenerations: (caseId: number) => Promise<GenerationRecord[]>;

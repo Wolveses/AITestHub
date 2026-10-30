@@ -1571,7 +1571,7 @@ export default {
         copy: 'Copy',
         copied: 'Copied',
         noScript: 'No script generated yet',
-        relatedPages: 'Related page objects',
+        relatedPages: 'Related shared code',
         noRuns: 'No runs yet',
         pass: 'Passed',
         fail: 'Failed',

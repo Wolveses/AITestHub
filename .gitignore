@@ -129,9 +129,13 @@ E2E-TEST-*.md
 *_icon.png
 
 # ==================== Development Scripts ====================
-scripts/
-# 例外：保留版本化的测试/工具脚本
+scripts/*
+# 例外：保留版本化的测试/工具脚本（忽略的是目录内容而非目录本身，否则例外规则不生效）
+!scripts/mock_llm_server.py
+!scripts/run_ai_mock.bat
 !scripts/smoke_test.py
+!scripts/verify_ui_automation.py
+!scripts/contract_api.json
 # 例外：前端 scripts/（token 迁移、hex lint 等版本化工具）
 !insight_aitest/shell-frontend/scripts/
 *.sh

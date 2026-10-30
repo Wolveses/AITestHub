@@ -8,7 +8,7 @@ import { Btn, ErrorCategoryTag, Field, StatusBadge, inputStyle, STATUS_META } fr
 const BASE = '/api/modules/ui/automation';
 const ACTIVE = new Set(['generating', 'fixing', 'running']);
 type Tab = 'snapshot' | 'script' | 'runs' | 'generations';
-type ScriptPreview = { content: string; version: number; pages: { name: string; content: string }[] };
+type ScriptPreview = { content: string; version: number; pages: { name: string; path?: string; content: string }[] };
 
 export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; onClose: () => void }) {
   const { t } = useTranslation();
@@ -319,11 +319,11 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
               {script.pages.length > 0 && (
                 <div style={{ marginTop: 12 }}>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
-                    {t('ui.auto.relatedPages', '相关页面对象')} · {script.pages.length}
+                    {t('ui.auto.relatedPages', '相关公共代码')} · {script.pages.length}
                   </div>
                   {script.pages.map((pg) => (
                     <details
-                      key={pg.name}
+                      key={pg.path || pg.name}
                       style={{
                         border: '1px solid var(--border)',
                         borderRadius: 8,
@@ -335,7 +335,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                         style={{ cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}
                       >
                         <FileCode size={12} />
-                        <span style={{ flex: 1 }}>pages/{pg.name}</span>
+                        <span style={{ flex: 1 }}>{pg.path || `pages/${pg.name}`}</span>
                         <Btn
                           size="sm"
                           onClick={(e) => {

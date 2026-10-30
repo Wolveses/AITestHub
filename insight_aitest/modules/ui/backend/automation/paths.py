@@ -64,6 +64,16 @@ def pages_dir(project_id: int) -> Path:
     return d
 
 
+def common_dir(project_id: int) -> Path:
+    """项目级通用代码目录（被 ≥2 处复用的非业务逻辑，可覆盖并备份）。"""
+    d = project_scripts_dir(project_id) / "common"
+    d.mkdir(parents=True, exist_ok=True)
+    init = d / "__init__.py"
+    if not init.exists():
+        init.write_text("# -*- coding: utf-8 -*-\n", encoding="utf-8")
+    return d
+
+
 def data_dir(project_id: int) -> Path:
     """项目级测试数据目录（上传样例、外部数据），脚本只读。"""
     d = project_scripts_dir(project_id) / "data"

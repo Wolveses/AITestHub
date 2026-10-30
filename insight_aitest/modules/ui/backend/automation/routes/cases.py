@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from insight_aitest.modules.ui.backend.automation import concurrency, paths
 from insight_aitest.modules.ui.backend.automation.database import UIAutomationDatabase
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
-from insight_aitest.modules.ui.backend.automation.generator import start_job
+from insight_aitest.modules.ui.backend.automation.generator import ASSET_DIRS, start_job
 from insight_aitest.modules.ui.backend.automation.importer import import_cases, list_importable
 from insight_aitest.modules.ui.backend.automation.models import (
     CaseStatus,
@@ -178,38 +178,52 @@ def get_script(
 
 
 def _referenced_pages(project_id: int, source: str) -> list[dict]:
-    """返回脚本实际 import 的项目页面对象源码（按 import 语句反查，不返回无关文件）。"""
+    """返回脚本实际 import 的项目资产源码（pages/ 与 common/，含一层传递依赖）。
+
+    按 import 语句反查，不返回无关文件；页面对象 import 的 common 也会一并带出，
+    否则预览只看到页面对象、看不到它依赖的通用能力。
+    """
     import ast
 
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            parts = node.module.split(".")
-            if parts[0] != "pages":
-                continue
-            if len(parts) >= 2:
-                names.add(parts[1])
-            else:
-                names.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                parts = alias.name.split(".")
-                if parts[0] == "pages" and len(parts) >= 2:
-                    names.add(parts[1])
-    root = paths.pages_dir(project_id)
+    def scan(src: str) -> set[tuple[str, str]]:
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            return set()
+        refs: set[tuple[str, str]] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                parts = node.module.split(".")
+                if parts[0] not in ASSET_DIRS:
+                    continue
+                if len(parts) >= 2:
+                    refs.add((parts[0], parts[1]))
+                else:
+                    refs.update((parts[0], alias.name.split(".")[0]) for alias in node.names)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    parts = alias.name.split(".")
+                    if parts[0] in ASSET_DIRS and len(parts) >= 2:
+                        refs.add((parts[0], parts[1]))
+        return refs
+
+    seen: set[tuple[str, str]] = set()
     out: list[dict] = []
-    for name in sorted(names):
-        if name in ("", "__init__"):
-            continue
-        f = root / f"{name}.py"
-        if not f.exists():
-            continue
-        out.append({"name": f.name, "content": f.read_text(encoding="utf-8")})
-    return out
+    queue = [source]
+    while queue:
+        src = queue.pop(0)
+        for package, stem in sorted(scan(src)):
+            if (package, stem) in seen or stem in ("", "__init__"):
+                continue
+            seen.add((package, stem))
+            root = paths.common_dir(project_id) if package == "common" else paths.pages_dir(project_id)
+            f = root / f"{stem}.py"
+            if not f.exists():
+                continue
+            content = f.read_text(encoding="utf-8")
+            out.append({"name": f.name, "path": f"{package}/{f.name}", "content": content})
+            queue.append(content)
+    return sorted(out, key=lambda x: x["path"])
 
 
 def _start_generate(case_id: int, kind: str, db: UIAutomationDatabase) -> dict:

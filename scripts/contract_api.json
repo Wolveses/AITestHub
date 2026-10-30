@@ -1,0 +1,5 @@
+{
+  "artifact_path": "(name: 'str') -> 'Path'",
+  "base_url": "() -> 'str'",
+  "data_path": "(*parts: 'str') -> 'Path'"
+}
