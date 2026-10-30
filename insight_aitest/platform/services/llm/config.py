@@ -63,8 +63,8 @@ class LLMConfig:
     db_path: str = "~/.insight_eye/kb.db"
     docs_dir: str = "~/.insight_eye/ai_docs"
     config_file: str = "~/.insight_eye/llm_config.json"
-    # UI 自动化脚本/产物根目录（默认与其它数据同级，DB 只存相对路径便于迁移）
-    ui_workspace_dir: str = "~/.insight_eye"
+    # UI 自动化脚本/产物根目录（UI 相关文件统一收纳，DB 只存相对路径便于迁移）
+    ui_workspace_dir: str = "~/.insight_eye/ui"
 
     # ReAct 大脑层配置（Agent Brain 2.0）：嵌套 dict，由 load_config 自动从
     # llm_config.json 的 "react" 节加载（load_config 的 hasattr 循环已覆盖）。

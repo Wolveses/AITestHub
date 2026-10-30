@@ -390,7 +390,7 @@ class GenerationJob:
 
         client = PlaywrightMCPClient(
             storage_state=auth.storage_state_path,
-            output_dir=str(paths.workspace_root() / "ui_mcp"),
+            output_dir=str(paths.mcp_dir()),
         )
         concurrency.set_progress(self.case_id, "启动 MCP", "拉起 playwright MCP（首次较慢）")
         try:

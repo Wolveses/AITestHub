@@ -2,7 +2,7 @@
 """环境配置服务：CRUD 辅助 + 登录换 token + storageState 生成。
 
 安全约定：
-- 密码存 ``~/.insight_eye/ui_envs.json``（与数据库分离），DB 只存 ``password_ref``；
+- 密码存 ``~/.insight_eye/ui/envs.json``（与数据库分离），DB 只存 ``password_ref``；
 - 接口/日志/异常消息都不输出密码与 token 明文。
 
 token 注入三态：

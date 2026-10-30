@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """自动化脚本的文件布局（DB 只存相对路径，根目录可配，保证跨服务器迁移）。
 
-布局（相对 ``ui_workspace_dir``，默认 ~/.insight_eye）::
+布局（相对 ``ui_workspace_dir``，默认 ``~/.insight_eye/ui``）::
 
-    ui_scripts/<project_id>/<case_id>/case.py
-    ui_scripts/<project_id>/<case_id>/history/case_v<n>.py
-    ui_scripts/<project_id>/conftest.py
-    ui_artifacts/<project_id>/<case_id>/<run_key>/{junit.xml,result.json,*.png,trace.zip}
-    ui_generations/<case_id>/<gen_id>.jsonl
-    ui_auth/<project_id>/<env_id>/storage.json
-    ui_envs.json  （环境密码，独立文件，接口永不返回明文）
+    scripts/<project_id>/<case_id>/case.py
+    scripts/<project_id>/<case_id>/history/case_v<n>.py
+    artifacts/<project_id>/<case_id>/<run_key>/{junit.xml,result.json,*.png,trace.zip}
+    generations/<case_id>/<gen_id>.jsonl
+    auth/<project_id>/<env_id>/storage.json
+    envs.json  （环境密码，独立文件，接口永不返回明文）
+    mcp/       （playwright MCP 探索时的临时输出）
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 def workspace_root() -> Path:
-    """脚本/产物的存储根目录（默认 ~/.insight_eye）。"""
+    """脚本/产物的存储根目录（默认 ~/.insight_eye/ui）。"""
     raw = ""
     try:
         from insight_aitest.platform.services.kb.deps import get_llm_config
@@ -28,7 +28,7 @@ def workspace_root() -> Path:
         raw = getattr(get_llm_config(), "ui_workspace_dir", "") or ""
     except Exception:
         raw = ""
-    return Path(os.path.expanduser(raw or "~/.insight_eye"))
+    return Path(os.path.expanduser(raw or "~/.insight_eye/ui"))
 
 
 def resolve_rel(rel: str) -> Path:
@@ -46,7 +46,7 @@ def to_rel(path: Path) -> str:
 
 
 def project_scripts_dir(project_id: int) -> Path:
-    return workspace_root() / "ui_scripts" / str(project_id)
+    return workspace_root() / "scripts" / str(project_id)
 
 
 def case_dir(project_id: int, case_id: int) -> Path:
@@ -63,22 +63,28 @@ def case_history_path(project_id: int, case_id: int, version: int) -> Path:
 
 def new_run_dir(project_id: int, case_id: int) -> Path:
     key = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    d = workspace_root() / "ui_artifacts" / str(project_id) / str(case_id) / key
+    d = workspace_root() / "artifacts" / str(project_id) / str(case_id) / key
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def generation_log(ui_case_id: int, gen_id: int) -> Path:
-    d = workspace_root() / "ui_generations" / str(ui_case_id)
+    d = workspace_root() / "generations" / str(ui_case_id)
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{gen_id}.jsonl"
 
 
 def storage_state_path(project_id: int, env_id: int) -> Path:
-    d = workspace_root() / "ui_auth" / str(project_id) / str(env_id)
+    d = workspace_root() / "auth" / str(project_id) / str(env_id)
     d.mkdir(parents=True, exist_ok=True)
     return d / "storage.json"
 
 
 def env_secrets_path() -> Path:
-    return workspace_root() / "ui_envs.json"
+    return workspace_root() / "envs.json"
+
+
+def mcp_dir() -> Path:
+    d = workspace_root() / "mcp"
+    d.mkdir(parents=True, exist_ok=True)
+    return d

@@ -3,8 +3,9 @@
 
 每次执行：
 1. 用环境配置请求登录接口，拿 token 并转换成 storageState / 请求头（本地网络请求）；
-2. subprocess 跑 ``python -m pytest case.py``，注入 INSIGHT_UI_* 环境变量；
-3. conftest 负责失败截图 + trace，runner 解析 junit 生成 result.json；
+2. subprocess 跑 ``python -m pytest case.py``，注入 INSIGHT_UI_* 环境变量，
+   并以 ``-p`` 加载仓库内脚手架插件（scaffold.py，提供 page fixture 与截图/trace）；
+3. 解析 junit 生成 result.json；
 4. 写入 ui_runs（runner='script'）并记录产物目录（相对路径，可迁移）。
 """
 
@@ -29,95 +30,24 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SEC = 600
 
-# 每个项目目录一份 conftest：提供 page fixture、登录态注入、失败截图与 trace。
-# 由脚本生成器写入项目目录，历史脚本复用；用户无需感知。
-CONFTEST_CONTENT = '''# -*- coding: utf-8 -*-
-"""Insight-AITest 自动化脚本运行脚手架（自动生成，请勿手改）。"""
-
-import json
-import os
-from pathlib import Path
-
-import pytest
-from playwright.sync_api import sync_playwright
-
-_ARTIFACTS = Path(os.environ.get("INSIGHT_UI_ARTIFACTS", ".") or ".")
-
-
-@pytest.fixture(scope="session")
-def _insight_playwright():
-    with sync_playwright() as p:
-        yield p
-
-
-@pytest.fixture(scope="session")
-def _insight_browser(_insight_playwright):
-    browser = _insight_playwright.chromium.launch(headless=True)
-    yield browser
-    browser.close()
-
-
-@pytest.fixture
-def page(_insight_browser, request):
-    kwargs = {"ignore_https_errors": True}
-    headers = os.environ.get("INSIGHT_UI_HEADERS") or ""
-    if headers:
-        try:
-            kwargs["extra_http_headers"] = json.loads(headers)
-        except ValueError:
-            pass
-    state = os.environ.get("INSIGHT_UI_STORAGE_STATE") or ""
-    if state and os.path.exists(state):
-        kwargs["storage_state"] = state
-    ctx = _insight_browser.new_context(**kwargs)
-    ctx.set_default_timeout(int(os.environ.get("INSIGHT_UI_TIMEOUT_MS") or 15000))
-    try:
-        ctx.tracing.start(screenshots=True, snapshots=True, sources=True)
-    except Exception:
-        pass
-    page = ctx.new_page()
-    yield page
-    try:
-        rep = getattr(request.node, "rep_call", None)
-        failed = rep is not None and rep.failed
-        if failed:
-            try:
-                page.screenshot(path=str(_ARTIFACTS / "failure.png"), full_page=True)
-            except Exception:
-                pass
-        # 终态截图：每次执行都留一张，便于回看页面最后状态
-        try:
-            page.screenshot(path=str(_ARTIFACTS / "final.png"), full_page=True)
-        except Exception:
-            pass
-        try:
-            ctx.tracing.stop(path=str(_ARTIFACTS / "trace.zip"))
-        except Exception:
-            pass
-    finally:
-        ctx.close()
-
-
-@pytest.hookimpl(wrapper=True)
-def pytest_runtest_makereport(item, call):
-    rep = yield
-    if rep.when == "call":
-        item.rep_call = rep
-    return rep
-'''
+# 运行脚手架在仓库内实现（scaffold.py），通过 `-p` 以 pytest 插件加载，
+# 用户目录只保留用例脚本与产物，不落地 conftest 副本。
+SCAFFOLD_PLUGIN = "insight_aitest.modules.ui.backend.automation.scaffold"
+# 仓库根目录：注入 PYTHONPATH，保证子进程能 import 脚手架插件
+REPO_ROOT = Path(__file__).resolve().parents[5]
 
 
 class EnvMissingError(RuntimeError):
     """项目未配置可用环境。"""
 
 
-def ensure_conftest(project_id: int) -> Path:
-    """按项目写 conftest（幂等覆盖，保证脚手架升级立即生效）。"""
-    d = paths.project_scripts_dir(project_id)
-    d.mkdir(parents=True, exist_ok=True)
-    p = d / "conftest.py"
-    p.write_text(CONFTEST_CONTENT, encoding="utf-8")
-    return p
+def drop_legacy_conftest(project_id: int) -> None:
+    """清理旧版落在用户目录的 conftest 副本（脚手架已改为仓库内插件）。"""
+    p = paths.project_scripts_dir(project_id) / "conftest.py"
+    try:
+        p.unlink()
+    except OSError:
+        pass
 
 
 def classify_failure(text: str) -> str:
@@ -193,7 +123,7 @@ def run_script(
             "screenshots": [],
         }
 
-    ensure_conftest(project_id)
+    drop_legacy_conftest(project_id)
     if auth is None:
         auth = prepare_auth(env)
     if not auth.ok:
@@ -225,6 +155,9 @@ def run_script(
             "PYTHONUTF8": "1",
         }
     )
+    # 子进程 cwd 在用例目录，需显式补上仓库根目录才能 import 脚手架插件
+    existing = child_env.get("PYTHONPATH") or ""
+    child_env["PYTHONPATH"] = os.pathsep.join(p for p in (str(REPO_ROOT), existing) if p)
 
     started = time.time()
     status = RunStatus.PASSED
@@ -239,7 +172,10 @@ def run_script(
                 "-q",
                 "-p",
                 "no:cacheprovider",
-                # 固定 rootdir 到项目脚本目录，确保祖先 conftest.py 被加载
+                # 脚手架以插件形式加载（不在用例目录写 conftest）
+                "-p",
+                SCAFFOLD_PLUGIN,
+                # 固定 rootdir 到项目脚本目录，避免继承仓库的 pytest 配置
                 "--rootdir",
                 str(paths.project_scripts_dir(project_id)),
                 f"--junit-xml={junit}",

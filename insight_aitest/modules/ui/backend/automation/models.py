@@ -101,7 +101,7 @@ class UiCase(MappedAsDataclass, Base, kw_only=True):
 class UiEnv(MappedAsDataclass, Base, kw_only=True):
     """环境配置：被测系统地址 + 登录接口 + token 注入方式。
 
-    password_ref 指向 ~/.insight_eye/ui_envs.json 里的密码键；
+    password_ref 指向 ~/.insight_eye/ui/envs.json 里的密码键；
     接口只回 password_set 布尔值，任何场景都不返回明文密码。
     """
 
