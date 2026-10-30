@@ -165,11 +165,51 @@ def get_script(
 ) -> dict:
     case = _get_or_404(case_id, db)
     if not case.script_rel_path:
-        return {"content": "", "version": 0}
+        return {"content": "", "version": 0, "pages": []}
     p = paths.resolve_rel(case.script_rel_path)
     if not p.exists():
         raise HTTPException(404, "脚本文件不存在（可能未同步到本机）")
-    return {"content": p.read_text(encoding="utf-8"), "version": case.script_version}
+    source = p.read_text(encoding="utf-8")
+    return {
+        "content": source,
+        "version": case.script_version,
+        "pages": _referenced_pages(int(case.project_id), source),
+    }
+
+
+def _referenced_pages(project_id: int, source: str) -> list[dict]:
+    """返回脚本实际 import 的项目页面对象源码（按 import 语句反查，不返回无关文件）。"""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            parts = node.module.split(".")
+            if parts[0] != "pages":
+                continue
+            if len(parts) >= 2:
+                names.add(parts[1])
+            else:
+                names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                if parts[0] == "pages" and len(parts) >= 2:
+                    names.add(parts[1])
+    root = paths.pages_dir(project_id)
+    out: list[dict] = []
+    for name in sorted(names):
+        if name in ("", "__init__"):
+            continue
+        f = root / f"{name}.py"
+        if not f.exists():
+            continue
+        out.append({"name": f.name, "content": f.read_text(encoding="utf-8")})
+    return out
 
 
 def _start_generate(case_id: int, kind: str, db: UIAutomationDatabase) -> dict:

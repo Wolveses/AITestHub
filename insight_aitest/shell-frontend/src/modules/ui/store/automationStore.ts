@@ -107,7 +107,11 @@ interface AutomationState {
   getCase: (caseId: number) => Promise<AutomationCase>;
   updateCase: (caseId: number, data: Partial<AutomationCase>) => Promise<AutomationCase>;
   deleteCase: (caseId: number) => Promise<void>;
-  getScript: (caseId: number) => Promise<{ content: string; version: number }>;
+  getScript: (caseId: number) => Promise<{
+    content: string;
+    version: number;
+    pages: { name: string; content: string }[];
+  }>;
   listRuns: (caseId: number) => Promise<ScriptRun[]>;
   listGenerations: (caseId: number) => Promise<GenerationRecord[]>;
   saveEnv: (data: Record<string, unknown>, envId?: number) => Promise<UIEnv>;

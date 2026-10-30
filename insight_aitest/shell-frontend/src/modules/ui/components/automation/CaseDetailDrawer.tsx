@@ -1,19 +1,20 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Play, Sparkles, Wrench, X, Copy } from 'lucide-react';
+import { Play, Sparkles, Wrench, X, Copy, FileCode } from 'lucide-react';
 import { useAutomationStore, type AutomationCase, type GenerationRecord, type ScriptRun } from '../../store/automationStore';
 import { Btn, ErrorCategoryTag, Field, StatusBadge, inputStyle, STATUS_META } from './common';
 
 const BASE = '/api/modules/ui/automation';
 const ACTIVE = new Set(['generating', 'fixing', 'running']);
 type Tab = 'snapshot' | 'script' | 'runs' | 'generations';
+type ScriptPreview = { content: string; version: number; pages: { name: string; content: string }[] };
 
 export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; onClose: () => void }) {
   const { t } = useTranslation();
   const { getCase, getScript, listRuns, listGenerations, updateCase, generate, fix, run } = useAutomationStore();
   const [detail, setDetail] = useState<AutomationCase | null>(null);
-  const [script, setScript] = useState<{ content: string; version: number }>({ content: '', version: 0 });
+  const [script, setScript] = useState<ScriptPreview>({ content: '', version: 0, pages: [] });
   const [runs, setRuns] = useState<ScriptRun[]>([]);
   const [gens, setGens] = useState<GenerationRecord[]>([]);
   const [tab, setTab] = useState<Tab>('snapshot');
@@ -31,7 +32,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
       steps: (c.steps || []).join('\n'),
       expected: c.expected,
     });
-    setScript(await getScript(id).catch(() => ({ content: '', version: 0 })));
+    setScript(await getScript(id).catch(() => ({ content: '', version: 0, pages: [] })));
     setRuns(await listRuns(id).catch(() => []));
     setGens(await listGenerations(id).catch(() => []));
   };
@@ -314,6 +315,42 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                 <pre style={{ ...preStyle, maxHeight: 'none' }}>{script.content}</pre>
               ) : (
                 <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('ui.auto.noScript', '尚未生成脚本')}</div>
+              )}
+              {script.pages.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
+                    {t('ui.auto.relatedPages', '相关页面对象')} · {script.pages.length}
+                  </div>
+                  {script.pages.map((pg) => (
+                    <details
+                      key={pg.name}
+                      style={{
+                        border: '1px solid var(--border)',
+                        borderRadius: 8,
+                        padding: '6px 10px',
+                        marginBottom: 8,
+                      }}
+                    >
+                      <summary
+                        style={{ cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}
+                      >
+                        <FileCode size={12} />
+                        <span style={{ flex: 1 }}>pages/{pg.name}</span>
+                        <Btn
+                          size="sm"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            navigator.clipboard.writeText(pg.content);
+                            toast.success(t('ui.auto.copied', '已复制'));
+                          }}
+                        >
+                          <Copy size={12} /> {t('ui.auto.copy', '复制')}
+                        </Btn>
+                      </summary>
+                      <pre style={{ ...preStyle, marginTop: 8 }}>{pg.content}</pre>
+                    </details>
+                  ))}
+                </div>
               )}
             </div>
           )}

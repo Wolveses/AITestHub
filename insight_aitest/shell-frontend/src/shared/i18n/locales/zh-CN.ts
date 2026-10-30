@@ -1571,6 +1571,7 @@ export default {
         copy: '复制',
         copied: '已复制',
         noScript: '尚未生成脚本',
+        relatedPages: '相关页面对象',
         noRuns: '暂无执行记录',
         pass: '通过',
         fail: '失败',
