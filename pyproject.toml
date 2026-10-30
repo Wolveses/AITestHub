@@ -70,6 +70,7 @@ dependencies = [
 ui = [
     "playwright>=1.40.0",
     "pymidscene>=0.1.0",
+    "Pillow>=10.0",  # 截图时间水印（scaffold 运行脚手架）
 ]
 dev = [
     "pytest>=8.0.0",

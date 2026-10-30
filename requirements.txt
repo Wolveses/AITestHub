@@ -39,6 +39,7 @@ pyyaml>=6.0                # 模块 manifest.yaml 解析（平台内核必需）
 # ==================== UI Automation (F) ====================
 playwright>=1.40.0         # 浏览器驱动（pip install + playwright install chromium）
 pymidscene>=0.1.0          # Midscene.js Python 移植（ai_action/ai_assert/ai_query）
+Pillow>=10.0               # 截图时间水印（运行脚手架 scaffold）
 
 # ==================== Logging ====================
 logzero>=1.7.0

@@ -1576,6 +1576,7 @@ export default {
         fail: 'Failed',
         finalScreenshot: 'Final screenshot',
         failureScreenshot: 'Failure screenshot',
+        openOriginal: 'Open in new tab',
         noGenerations: 'No generation records',
         kindFix: 'Auto fix',
         kindGenerate: 'Generate script',
@@ -1587,9 +1588,7 @@ export default {
         site: 'Site',
         siteFrontend: 'Frontend',
         siteBackend: 'Backend',
-        switchSite: 'Switch site',
-        switchSiteConfirm:
-          'Switching the site changes the entry URL. The old script will be archived and must be regenerated. Continue?',
+        siteLocked: 'Site cannot be switched once a script has been generated',
         switchSiteHint: 'Click to switch frontend/backend',
         siteSwitched: 'Switched to {{site}}',
         nextStep: 'Next',

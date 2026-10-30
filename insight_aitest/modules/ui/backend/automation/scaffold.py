@@ -7,6 +7,7 @@
 提供：
 - ``page`` fixture：注入登录态（storageState / 请求头），默认超时取自环境变量；
 - 每次执行结束时写终态截图 ``final.png``；失败时额外写 ``failure.png``；
+  截图右下角烧入毫秒级时间水印（40% 不透明，不铺底色）；
 - 整段执行录制 ``trace.zip``；
 - 记录 ``rep_call`` 供截图判断成败。
 
@@ -18,12 +19,72 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import sync_playwright
 
 _ARTIFACTS = Path(os.environ.get("INSIGHT_UI_ARTIFACTS", ".") or ".")
+
+# 水印字体优先级：Windows 微软雅黑 → macOS/Linux 常见中文字体 → PIL 默认位图字体
+_FONT_CANDIDATES = (
+    r"C:\Windows\Fonts\msyh.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+)
+
+
+def _timestamp() -> str:
+    """截图时间戳，精确到毫秒。"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def _load_font(size: int):
+    from PIL import ImageFont
+
+    for path in _FONT_CANDIDATES:
+        try:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _watermark(path: Path, text: str) -> None:
+    """把时间戳烧进截图右下角（40% 不透明白字 + 淡阴影，不铺底色以免遮挡主体）。"""
+    try:
+        from PIL import Image, ImageDraw
+
+        with Image.open(path) as raw:
+            base = raw.convert("RGBA")
+        font = _load_font(max(14, base.width // 60))
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        box = draw.textbbox((0, 0), text, font=font)
+        tw, th = box[2] - box[0], box[3] - box[1]
+        pad = max(6, base.width // 300)
+        x = base.width - tw - pad * 3 - box[0]
+        y = base.height - th - pad * 3 - box[1]
+        # 不铺底色，只保留 40% 不透明的文字 + 极淡描边阴影，避免遮挡页面主体
+        draw.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0, 70))
+        draw.text((x, y), text, font=font, fill=(255, 255, 255, 102))
+        Image.alpha_composite(base, overlay).convert("RGB").save(path, "PNG")
+    except Exception:
+        # 水印只是辅助信息，缺字体或图片异常都不应影响用例判定
+        pass
+
+
+def _shot(page, name: str) -> None:
+    """整页截图并烧入毫秒级时间水印。"""
+    target = _ARTIFACTS / name
+    try:
+        page.screenshot(path=str(target), full_page=True)
+    except Exception:
+        return
+    _watermark(target, _timestamp())
 
 
 @pytest.fixture(scope="session")
@@ -63,15 +124,9 @@ def page(_insight_browser, request):
         rep = getattr(request.node, "rep_call", None)
         failed = rep is not None and rep.failed
         if failed:
-            try:
-                page.screenshot(path=str(_ARTIFACTS / "failure.png"), full_page=True)
-            except Exception:
-                pass
+            _shot(page, "failure.png")
         # 终态截图：每次执行都留一张，便于回看页面最后状态
-        try:
-            page.screenshot(path=str(_ARTIFACTS / "final.png"), full_page=True)
-        except Exception:
-            pass
+        _shot(page, "final.png")
         try:
             ctx.tracing.stop(path=str(_ARTIFACTS / "trace.zip"))
         except Exception:

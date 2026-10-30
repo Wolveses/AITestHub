@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import shutil
 import threading
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -140,21 +139,9 @@ def patch_case(
     if "site" in fields and fields["site"] != case.site:
         if fields["site"] not in Site.ALL:
             raise HTTPException(400, "端只能是 frontend 或 backend")
-        # 换端会改变入口地址，旧脚本不再可用：归档到 history 后清空指针，需重新生成
+        # 脚本按端入口地址生成，已产出脚本后固定端，避免脚本与入口错配
         if case.script_rel_path:
-            src = paths.resolve_rel(case.script_rel_path)
-            version = int(case.script_version or 0)
-            if src.exists() and version >= 1:
-                archive = paths.case_history_path(int(case.project_id), case_id, version)
-                archive.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, archive)
-            fields.update(
-                script_rel_path="",
-                script_version=0,
-                script_hash="",
-                last_error_category=None,
-                last_error_message=None,
-            )
+            raise HTTPException(409, "用例已生成脚本，端不可再切换；如需调整请删除用例后重新导入")
     # 用例信息变更后脚本与用例可能不再匹配：回到未实现，保留已有脚本供修复
     fields["status"] = CaseStatus.NOT_IMPLEMENTED
     db.update_case(case_id, **fields)

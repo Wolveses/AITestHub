@@ -2,7 +2,6 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Play, Sparkles, Wrench, X, Copy } from 'lucide-react';
-import { useConfirmStore } from '../../../../shared/store/confirmStore';
 import { useAutomationStore, type AutomationCase, type GenerationRecord, type ScriptRun } from '../../store/automationStore';
 import { Btn, ErrorCategoryTag, Field, StatusBadge, inputStyle, STATUS_META } from './common';
 
@@ -12,7 +11,6 @@ type Tab = 'snapshot' | 'script' | 'runs' | 'generations';
 
 export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; onClose: () => void }) {
   const { t } = useTranslation();
-  const { confirm } = useConfirmStore();
   const { getCase, getScript, listRuns, listGenerations, updateCase, generate, fix, run } = useAutomationStore();
   const [detail, setDetail] = useState<AutomationCase | null>(null);
   const [script, setScript] = useState<{ content: string; version: number }>({ content: '', version: 0 });
@@ -22,6 +20,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ title: '', precondition: '', steps: '', expected: '' });
   const [submitting, setSubmitting] = useState(false);
+  const [preview, setPreview] = useState<{ url: string; label: string } | null>(null);
 
   const refresh = async (id: number) => {
     const c = await getCase(id);
@@ -56,6 +55,15 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseId, detail?.status]);
+
+  useEffect(() => {
+    if (!preview) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPreview(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [preview]);
 
   if (caseId === null || detail === null) return null;
 
@@ -122,19 +130,12 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
 
   const handleSiteClick = () => {
     if (active || submitting) return;
-    const next = detail.site === 'backend' ? 'frontend' : 'backend';
+    // 脚本按端入口生成，已产出脚本后不允许再切换
     if (detail.has_script || detail.status === 'implemented') {
-      confirm({
-        title: t('ui.auto.switchSite', '切换端'),
-        message: t(
-          'ui.auto.switchSiteConfirm',
-          '切换端会改变入口地址，旧脚本将归档，需要重新生成脚本。确定继续吗？',
-        ),
-        onConfirm: () => void toggleSite(next),
-      });
+      toast.info(t('ui.auto.siteLocked', '用例已生成脚本，端不可再切换'));
       return;
     }
-    void toggleSite(next);
+    void toggleSite(detail.site === 'backend' ? 'frontend' : 'backend');
   };
 
   const artifactUrl = (runId: number, name: string) =>
@@ -173,13 +174,18 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
               {detail.source_case_id ? <span>· 用例 #{detail.source_case_id}</span> : null}
               <span
                 onClick={handleSiteClick}
-                title={t('ui.auto.switchSiteHint', '点击切换前台/后台')}
+                title={
+                  detail.has_script || detail.status === 'implemented'
+                    ? t('ui.auto.siteLocked', '用例已生成脚本，端不可再切换')
+                    : t('ui.auto.switchSiteHint', '点击切换前台/后台')
+                }
                 style={{
                   padding: '1px 6px',
                   borderRadius: 9,
                   border: '1px solid var(--border)',
                   color: detail.site === 'backend' ? 'var(--accent)' : 'var(--text-secondary)',
-                  cursor: active ? 'not-allowed' : 'pointer',
+                  cursor: active || detail.has_script || detail.status === 'implemented' ? 'not-allowed' : 'pointer',
+                  opacity: active || detail.has_script || detail.status === 'implemented' ? 0.5 : 1,
                 }}
               >
                 {siteLabel(detail.site)}
@@ -326,13 +332,28 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                     <span style={{ color: 'var(--text-muted)' }}>{r.duration_ms} ms</span>
                     <span style={{ color: 'var(--text-muted)' }}>v{r.script_version ?? 0}</span>
                     <div style={{ flex: 1 }} />
-                    <a href={artifactUrl(r.id, r.status === 'passed' ? 'final.png' : 'failure.png')} target="_blank" rel="noreferrer" style={linkStyle}>
-                      {t('ui.auto.finalScreenshot', '终态截图')}
-                    </a>
+                    {(() => {
+                      const shot = r.status === 'passed'
+                        ? { name: 'final.png', label: t('ui.auto.finalScreenshot', '终态截图') }
+                        : { name: 'failure.png', label: t('ui.auto.failureScreenshot', '失败截图') };
+                      return (
+                        <button
+                          type="button"
+                          style={linkButtonStyle}
+                          onClick={() => setPreview({ url: artifactUrl(r.id, shot.name), label: `${shot.label} · #${r.id}` })}
+                        >
+                          {shot.label}
+                        </button>
+                      );
+                    })()}
                     {r.status !== 'passed' && (
-                      <a href={artifactUrl(r.id, 'final.png')} target="_blank" rel="noreferrer" style={linkStyle}>
-                        {t('ui.auto.failureScreenshot', '失败截图')}
-                      </a>
+                      <button
+                        type="button"
+                        style={linkButtonStyle}
+                        onClick={() => setPreview({ url: artifactUrl(r.id, 'final.png'), label: `${t('ui.auto.finalScreenshot', '终态截图')} · #${r.id}` })}
+                      >
+                        {t('ui.auto.finalScreenshot', '终态截图')}
+                      </button>
                     )}
                     {r.trace_rel_path && (
                       <a href={artifactUrl(r.id, 'trace.zip')} style={linkStyle}>
@@ -369,6 +390,47 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
           )}
         </div>
       </div>
+
+      {preview && (
+        <div
+          onClick={() => setPreview(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1600,
+            background: 'rgba(0,0,0,.8)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 24,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: '94vw', maxHeight: '94vh' }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: '#fff', fontSize: 12 }}>
+              <span style={{ flex: 1 }}>{preview.label}</span>
+              <a href={preview.url} target="_blank" rel="noreferrer" style={{ color: '#fff', fontSize: 11, textDecoration: 'none', opacity: 0.85 }}>
+                {t('ui.auto.openOriginal', '新窗口打开')}
+              </a>
+              <button
+                type="button"
+                onClick={() => setPreview(null)}
+                aria-label={t('common.close', '关闭')}
+                style={{ ...linkButtonStyle, color: '#fff', display: 'flex', alignItems: 'center' }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <img
+              src={preview.url}
+              alt={preview.label}
+              style={{ maxWidth: '94vw', maxHeight: '86vh', objectFit: 'contain', borderRadius: 8, background: '#111' }}
+            />
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -399,3 +461,11 @@ const preStyle: CSSProperties = {
 
 const textareaStyle: CSSProperties = { ...inputStyle, resize: 'vertical', fontFamily: 'inherit' };
 const linkStyle: CSSProperties = { color: 'var(--accent)', fontSize: 11, textDecoration: 'none' };
+const linkButtonStyle: CSSProperties = {
+  ...linkStyle,
+  background: 'none',
+  border: 'none',
+  padding: 0,
+  cursor: 'pointer',
+  font: 'inherit',
+};

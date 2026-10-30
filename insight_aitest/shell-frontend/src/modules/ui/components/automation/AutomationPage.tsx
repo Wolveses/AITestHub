@@ -125,19 +125,12 @@ export function AutomationPage() {
 
   const handleSiteToggle = (c: AutomationCase) => {
     if (ACTIVE_STATUSES.has(c.status) || busyId === c.id) return;
-    const next = c.site === 'backend' ? 'frontend' : 'backend';
+    // 脚本按端入口生成，已产出脚本后不允许再切换
     if (c.has_script || c.status === 'implemented') {
-      confirm({
-        title: t('ui.auto.switchSite', '切换端'),
-        message: t(
-          'ui.auto.switchSiteConfirm',
-          '切换端会改变入口地址，旧脚本将归档，需要重新生成脚本。确定继续吗？',
-        ),
-        onConfirm: () => void applySite(c, next),
-      });
+      toast.info(t('ui.auto.siteLocked', '用例已生成脚本，端不可再切换'));
       return;
     }
-    void applySite(c, next);
+    void applySite(c, c.site === 'backend' ? 'frontend' : 'backend');
   };
 
   const statusLabel = (s: string) =>
@@ -295,7 +288,11 @@ export function AutomationPage() {
                         e.stopPropagation();
                         handleSiteToggle(c);
                       }}
-                      title={t('ui.auto.switchSiteHint', '点击切换前台/后台')}
+                      title={
+                        c.has_script || c.status === 'implemented'
+                          ? t('ui.auto.siteLocked', '用例已生成脚本，端不可再切换')
+                          : t('ui.auto.switchSiteHint', '点击切换前台/后台')
+                      }
                       style={{
                         justifySelf: 'start',
                         padding: '1px 7px',
@@ -303,8 +300,8 @@ export function AutomationPage() {
                         border: '1px solid var(--border)',
                         fontSize: 10,
                         color: c.site === 'backend' ? 'var(--accent)' : 'var(--text-secondary)',
-                        cursor: active ? 'not-allowed' : 'pointer',
-                        opacity: active ? 0.5 : 1,
+                        cursor: active || c.has_script || c.status === 'implemented' ? 'not-allowed' : 'pointer',
+                        opacity: active || c.has_script || c.status === 'implemented' ? 0.5 : 1,
                       }}
                     >
                       {siteLabel(c.site)}
