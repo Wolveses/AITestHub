@@ -1,0 +1,23 @@
+{
+  "artifact_path": "(name: 'str') -> 'Path'",
+  "assert_row_contains": "(page, *texts: 'str')",
+  "base_url": "() -> 'str'",
+  "cancel_dialog": "(dialog, name: 'str' = '取消')",
+  "choose_option": "(page, trigger, label: 'str', timeout: 'int' = 15000)",
+  "confirm_dialog": "(dialog, name: 'str' = '确定')",
+  "data_path": "(*parts: 'str') -> 'Path'",
+  "dialog_of": "(page, timeout: 'int' = 15000)",
+  "download_file": "(page, trigger, name: 'str', timeout: 'int' = 15000) -> 'Path'",
+  "fill_text_fields": "(dialog, *values: 'str')",
+  "frame_of": "(page, name=None, url=None)",
+  "new_tab": "(page, trigger, timeout: 'int' = 15000)",
+  "open_route": "(page, route: 'str' = '', wait: 'bool' = True, timeout: 'int' = 20000)",
+  "row_by_text": "(page, *texts: 'str')",
+  "text_inputs": "(container)",
+  "unique_name": "(prefix: 'str' = 'test') -> 'str'",
+  "upload_files": "(target, *files) -> 'None'",
+  "wait_hidden": "(locator, timeout: 'int' = 15000)",
+  "wait_row": "(page, *texts: 'str', timeout: 'int' = 15000)",
+  "wait_toast": "(page, text: 'str', disappear: 'bool' = True, timeout: 'int' = 15000)",
+  "wait_visible": "(locator, timeout: 'int' = 15000)"
+}

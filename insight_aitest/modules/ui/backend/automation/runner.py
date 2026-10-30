@@ -104,8 +104,14 @@ def run_script(
     run_dir: Path | None = None,
     timeout: int = DEFAULT_TIMEOUT_SEC,
     auth=None,
+    pages_root: Path | None = None,
+    retries: int = 0,
 ) -> dict:
-    """执行一个固化脚本，返回结果摘要（不写 ui_runs，由调用方决定是否落库）。"""
+    """执行一个固化脚本，返回结果摘要（不写 ui_runs，由调用方决定是否落库）。
+
+    retries: 失败后额外重试次数（仅用于吸收 UI 抖动，默认 0）。
+    pages_root: 覆盖 ``pages`` 包的搜索根目录（生成期首跑用暂存目录，避免污染正式资产）。
+    """
     if env is None:
         raise EnvMissingError("项目未配置环境，请先在环境管理中新增并测试通过")
 
@@ -148,6 +154,7 @@ def run_script(
         {
             "INSIGHT_UI_BASE_URL": target_url,
             "INSIGHT_UI_ARTIFACTS": str(out_dir),
+            "INSIGHT_UI_DATA_DIR": str(paths.data_dir(project_id)),
             "INSIGHT_UI_STORAGE_STATE": auth.storage_state_path or "",
             "INSIGHT_UI_HEADERS": json.dumps(auth.headers, ensure_ascii=False),
             "INSIGHT_UI_TIMEOUT_MS": "15000",
@@ -155,57 +162,76 @@ def run_script(
             "PYTHONUTF8": "1",
         }
     )
-    # 子进程 cwd 在用例目录，需显式补仓库根目录（import 脚手架插件）与项目脚本目录（import pages 页面对象）
+    # 子进程 cwd 在用例目录，需显式补仓库根目录（import 脚手架插件）与 pages 根目录（import 页面对象）
     existing = child_env.get("PYTHONPATH") or ""
     child_env["PYTHONPATH"] = os.pathsep.join(
-        p for p in (str(REPO_ROOT), str(paths.project_scripts_dir(project_id)), existing) if p
+        p
+        for p in (
+            str(REPO_ROOT),
+            str(pages_root or paths.project_scripts_dir(project_id)),
+            existing,
+        )
+        if p
     )
 
     started = time.time()
-    status = RunStatus.PASSED
+    status = RunStatus.ERROR
     error_message = ""
-    try:
-        proc = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                str(script),
-                "-q",
-                "-p",
-                "no:cacheprovider",
-                # 脚手架以插件形式加载（不在用例目录写 conftest）
-                "-p",
-                SCAFFOLD_PLUGIN,
-                # 固定 rootdir 到项目脚本目录，避免继承仓库的 pytest 配置
-                "--rootdir",
-                str(paths.project_scripts_dir(project_id)),
-                f"--junit-xml={junit}",
-            ],
-            cwd=str(script.parent),
-            env=child_env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
-        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        stdout_log.write_text(output, encoding="utf-8")
-        tests, failures, first = _parse_junit(junit)
-        if proc.returncode != 0 or failures > 0:
-            status = RunStatus.FAILED if proc.returncode in (1,) else RunStatus.ERROR
-            error_message = first or _tail(output)
-    except subprocess.TimeoutExpired:
-        status = RunStatus.ERROR
-        error_message = f"脚本执行超过 {timeout} 秒被终止（疑似页面卡死或等待超时）"
+    attempts = 0
+    for attempt in range(retries + 1):
+        attempts = attempt + 1
+        status, error_message = RunStatus.PASSED, ""
         try:
-            stdout_log.write_text(error_message, encoding="utf-8")
-        except OSError:
-            pass
-    except Exception as e:
-        status = RunStatus.ERROR
-        error_message = f"执行器异常：{type(e).__name__}: {e}"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    str(script),
+                    "-q",
+                    "-p",
+                    "no:cacheprovider",
+                    # 脚手架以插件形式加载（不在用例目录写 conftest）
+                    "-p",
+                    SCAFFOLD_PLUGIN,
+                    # 固定 rootdir 到项目脚本目录，避免继承仓库的 pytest 配置
+                    "--rootdir",
+                    str(paths.project_scripts_dir(project_id)),
+                    f"--junit-xml={junit}",
+                ],
+                cwd=str(script.parent),
+                env=child_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+            output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            stdout_log.write_text(output, encoding="utf-8")
+            tests, failures, first = _parse_junit(junit)
+            if proc.returncode != 0 or failures > 0:
+                status = RunStatus.FAILED if proc.returncode in (1,) else RunStatus.ERROR
+                error_message = first or _tail(output)
+        except subprocess.TimeoutExpired:
+            status = RunStatus.ERROR
+            error_message = f"脚本执行超过 {timeout} 秒被终止（疑似页面卡死或等待超时）"
+            try:
+                stdout_log.write_text(error_message, encoding="utf-8")
+            except OSError:
+                pass
+        except Exception as e:
+            status = RunStatus.ERROR
+            error_message = f"执行器异常：{type(e).__name__}: {e}"
+        if status is RunStatus.PASSED or attempt >= retries:
+            break
+        # 失败重试：清掉上一轮产物，避免截图/trace 混淆
+        for stale in out_dir.glob("*"):
+            if stale.is_file():
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
 
     duration_ms = int((time.time() - started) * 1000)
     screenshots = sorted(p.name for p in out_dir.glob("*.png"))
@@ -222,6 +248,7 @@ def run_script(
         "site": getattr(case, "site", "") or "",
         "screenshots": screenshots,
         "has_trace": trace.exists(),
+        "attempts": attempts,
     }
     (out_dir / "result.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"

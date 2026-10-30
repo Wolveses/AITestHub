@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from playwright.sync_api import expect
+
+# 与 scaffold 注入的默认超时保持一致；所有显式等待都用它，不要写固定 sleep
+DEFAULT_TIMEOUT = 15000
 
 
 def base_url() -> str:
@@ -53,7 +57,7 @@ def open_route(page, route: str = "", wait: bool = True, timeout: int = 20000):
     return resp
 
 
-def dialog_of(page, timeout: int = 15000):
+def dialog_of(page, timeout: int = DEFAULT_TIMEOUT):
     """等待并返回当前弹窗（Ant Design 弹窗）。"""
     dlg = page.get_by_role("dialog")
     dlg.wait_for(state="visible", timeout=timeout)
@@ -108,3 +112,100 @@ def assert_row_contains(page, *texts: str):
 def unique_name(prefix: str = "test") -> str:
     """唯一测试数据名（毫秒时间戳后缀），避免重复创建同名数据导致提交失败。"""
     return f"{prefix}{int(time.time() * 1000) % 10 ** 9}"
+
+
+def wait_visible(locator, timeout: int = DEFAULT_TIMEOUT):
+    """等待元素可见（显式等待），返回同一 locator，便于链式使用。"""
+    locator.wait_for(state="visible", timeout=timeout)
+    return locator
+
+
+def wait_hidden(locator, timeout: int = DEFAULT_TIMEOUT):
+    """等待元素隐藏或从 DOM 移除（如弹窗关闭、toast 消失）。"""
+    locator.wait_for(state="hidden", timeout=timeout)
+    return locator
+
+
+def wait_row(page, *texts: str, timeout: int = DEFAULT_TIMEOUT):
+    """等待包含指定文本的表格行出现，返回该行 locator。"""
+    row = row_by_text(page, *texts).first
+    row.wait_for(state="visible", timeout=timeout)
+    return row
+
+
+def wait_toast(page, text: str, disappear: bool = True, timeout: int = DEFAULT_TIMEOUT):
+    """等待提示条出现；disappear=True 时再等待其消失（替代固定 sleep）。"""
+    toast = page.get_by_text(text, exact=False).first
+    toast.wait_for(state="visible", timeout=timeout)
+    if disappear:
+        toast.wait_for(state="hidden", timeout=timeout)
+    return toast
+
+
+def data_path(*parts: str) -> Path:
+    """项目级测试数据文件路径（只读资产，禁止写入仓库）。"""
+    root = os.environ.get("INSIGHT_UI_DATA_DIR") or ""
+    if not root:
+        raise RuntimeError("缺少 INSIGHT_UI_DATA_DIR，请在平台内执行脚本")
+    p = Path(root).joinpath(*parts)
+    if not p.exists():
+        raise FileNotFoundError(f"测试数据文件不存在：{p}")
+    return p
+
+
+def artifact_path(name: str) -> Path:
+    """本次执行的产物路径（截图、下载文件等），目录由运行器提供。"""
+    root = os.environ.get("INSIGHT_UI_ARTIFACTS") or ""
+    if not root:
+        raise RuntimeError("缺少 INSIGHT_UI_ARTIFACTS，请在平台内执行脚本")
+    d = Path(root)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / name
+
+
+def choose_option(page, trigger, label: str, timeout: int = DEFAULT_TIMEOUT):
+    """下拉选择：点击触发控件后在弹出层中选择指定选项（Ant Design select/combobox）。"""
+    trigger.click()
+    option = page.get_by_role("option", name=label).first
+    option.wait_for(state="visible", timeout=timeout)
+    option.click()
+    return option
+
+
+def upload_files(target, *files) -> None:
+    """文件上传：target 可以是 input[type=file] locator，也可以是页面/弹窗容器。"""
+    paths_ = [str(f) for f in files]
+    if hasattr(target, "set_input_files"):
+        try:
+            target.set_input_files(paths_)
+            return
+        except Exception:
+            pass
+    target.locator('input[type="file"]').first.set_input_files(paths_)
+
+
+def frame_of(page, name=None, url=None):
+    """iframe 定位包装；传 name 或 url。"""
+    if name is not None:
+        return page.frame_locator(f'iframe[name="{name}"]')
+    if url is not None:
+        return page.frame_locator(f'iframe[src*="{url}"]')
+    return page.frame_locator("iframe").first
+
+
+def new_tab(page, trigger, timeout: int = DEFAULT_TIMEOUT):
+    """点击会打开新窗口的控件，返回新 page（自动等待 popup）。"""
+    with page.expect_popup(timeout=timeout) as info:
+        trigger.click()
+    popup = info.value
+    popup.wait_for_load_state()
+    return popup
+
+
+def download_file(page, trigger, name: str, timeout: int = DEFAULT_TIMEOUT) -> Path:
+    """触发下载并保存到本次执行的产物目录，返回文件路径。"""
+    with page.expect_download(timeout=timeout) as info:
+        trigger.click()
+    target = artifact_path(name)
+    info.value.save_as(str(target))
+    return target

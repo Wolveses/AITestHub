@@ -102,7 +102,13 @@ def _insight_browser(_insight_playwright):
 
 @pytest.fixture
 def page(_insight_browser, request):
-    kwargs = {"ignore_https_errors": True}
+    # 固定 locale/时区/视口，避免日期控件、时区断言与人工界面不一致
+    kwargs = {
+        "ignore_https_errors": True,
+        "locale": "zh-CN",
+        "timezone_id": "Asia/Shanghai",
+        "viewport": {"width": 1440, "height": 900},
+    }
     headers = os.environ.get("INSIGHT_UI_HEADERS") or ""
     if headers:
         try:

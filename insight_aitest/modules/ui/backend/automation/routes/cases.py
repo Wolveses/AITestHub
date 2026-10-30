@@ -212,7 +212,8 @@ def _run_worker(case_id: int) -> None:
         db.update_case(case_id, status=CaseStatus.RUNNING)
         concurrency.set_progress(case_id, "执行中", "运行固化脚本")
         env = db.default_env(project_id)
-        result = run_script(case, env)
+        # 执行期允许一次自动重试，吸收 UI 抖动（生成期首跑不重试，避免掩盖脚本缺陷）
+        result = run_script(case, env, retries=1)
         run_id = record_run(case, env, result)
         concurrency.set_progress(
             case_id,

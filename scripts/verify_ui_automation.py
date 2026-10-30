@@ -26,8 +26,11 @@ sys.path.insert(0, str(REPO_ROOT))
 from insight_aitest.modules.ui.backend.automation import helpers, paths  # noqa: E402
 from insight_aitest.modules.ui.backend.automation.generator import (  # noqa: E402
     UTILS_FILE,
+    _check_sandbox,
+    adopt_pages,
+    discard_pages,
     pages_catalog,
-    write_pages,
+    stage_pages,
 )
 from insight_aitest.modules.ui.backend.automation.runner import run_script  # noqa: E402
 
@@ -41,7 +44,20 @@ REQUIRED_HELPERS = (
     "row_by_text",
     "assert_row_contains",
     "unique_name",
+    "wait_visible",
+    "wait_hidden",
+    "wait_row",
+    "wait_toast",
+    "choose_option",
+    "upload_files",
+    "frame_of",
+    "new_tab",
+    "download_file",
+    "data_path",
+    "artifact_path",
 )
+
+API_SNAPSHOT = Path(__file__).resolve().parent / "helpers_api.json"
 
 CHECKS: list[tuple[str, bool]] = []
 
@@ -49,6 +65,46 @@ CHECKS: list[tuple[str, bool]] = []
 def check(name: str, ok: bool, detail: str = "") -> None:
     CHECKS.append((name, ok))
     print(("[通过] " if ok else "[失败] ") + name + (f"  {detail}" if detail else ""))
+
+
+def helpers_api() -> dict[str, str]:
+    """公共函数库对外签名快照（用于阻止发布时无声改动接口）。"""
+    import inspect
+
+    api: dict[str, str] = {}
+    for name in dir(helpers):
+        if name.startswith("_"):
+            continue
+        obj = getattr(helpers, name)
+        if inspect.isfunction(obj) and obj.__module__ == helpers.__name__:
+            api[name] = str(inspect.signature(obj))
+    return dict(sorted(api.items()))
+
+
+def check_api_snapshot(update: bool) -> None:
+    import json
+
+    current = helpers_api()
+    if update:
+        API_SNAPSHOT.write_text(
+            json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        check("公共函数库签名快照已更新", True, str(API_SNAPSHOT))
+        return
+    if not API_SNAPSHOT.exists():
+        check("公共函数库签名快照存在", False, "缺少 scripts/helpers_api.json，请加 --update-api")
+        return
+    baseline = json.loads(API_SNAPSHOT.read_text(encoding="utf-8"))
+    removed = [n for n in baseline if n not in current]
+    changed = [n for n in baseline if n in current and baseline[n] != current[n]]
+    check(
+        "公共函数库签名向后兼容",
+        not removed and not changed,
+        f"删除={removed} 变更签名={changed}" if (removed or changed) else f"{len(current)} 个函数",
+    )
+    added = [n for n in current if n not in baseline]
+    if added:
+        print(f"  提示：新增函数 {added}，发版前请执行 --update-api 更新快照")
 
 
 def check_static(project_id: int) -> None:
@@ -65,17 +121,44 @@ def check_static(project_id: int) -> None:
     temp_root = paths.pages_dir(10_000_000)  # 临时项目，检查完即删
     try:
         (temp_root / "users_page.py").write_text("x = 1\n", encoding="utf-8")
-        refused = write_pages(
-            10_000_000, [{"path": "pages/users_page.py", "content": "x = 2\n"}]
+        err, _ = stage_pages(
+            10_000_000, 9001, [{"path": "pages/users_page.py", "content": "x = 2\n"}]
         )
-        check("业务页面对象禁止覆盖", bool(refused), refused)
+        check("业务页面对象禁止覆盖", bool(err), err)
+
+        err, staged = stage_pages(
+            10_000_000, 9002, [{"path": f"pages/{UTILS_FILE}", "content": "x = 2\n"}]
+        )
+        check("_utils.py 可暂存覆盖", not err, err)
+        check(
+            "未通过首跑不落正式资产",
+            not (temp_root / UTILS_FILE).exists(),
+            "暂存内容不应出现在 pages/",
+        )
         (temp_root / UTILS_FILE).write_text("x = 1\n", encoding="utf-8")
-        allowed = write_pages(10_000_000, [{"path": f"pages/{UTILS_FILE}", "content": "x = 2\n"}])
+        adopt_pages(10_000_000, staged)
         backups = list((temp_root / "history").glob("*.py"))
-        check("_utils.py 允许覆盖并备份", not allowed and bool(backups))
-        bad = write_pages(10_000_000, [{"path": "../evil.py", "content": "x = 1\n"}])
-        check("目录穿越被拒绝", bool(bad), bad)
+        check("首跑通过后并入并备份旧版", bool(backups), f"{len(backups)} 个备份")
+        discard_pages(staged)
+
+        bad = stage_pages(10_000_000, 9003, [{"path": "../evil.py", "content": "x = 1\n"}])
+        check("目录穿越被拒绝", bool(bad[0]), bad[0])
+
+        unsafe, _ = stage_pages(
+            10_000_000, 9004, [{"path": "pages/bad_page.py", "content": "import os\n"}]
+        )
+        check("页面对象 import 白名单生效", bool(unsafe), unsafe)
+
+        sandbox = _check_sandbox(
+            "import os\n\ndef test_x(page):\n    page.wait_for_timeout(500)\n", kind="脚本"
+        )
+        sleep_blocked = _check_sandbox(
+            "def test_x(page):\n    page.wait_for_timeout(500)\n", kind="脚本"
+        )
+        check("脚本禁止导入 os", bool(sandbox), sandbox)
+        check("脚本禁止固定睡眠（AST）", bool(sleep_blocked), sleep_blocked)
     finally:
+        discard_pages(paths.staging_root(10_000_000, 9002))
         shutil.rmtree(temp_root.parent, ignore_errors=True)
 
 
@@ -113,8 +196,12 @@ def main() -> int:
     parser.add_argument("--project", type=int, default=1, help="项目 id，默认 1")
     parser.add_argument("--case", type=int, default=None, help="指定用例 id，默认取首个已生成脚本的用例")
     parser.add_argument("--skip-run", action="store_true", help="只做静态检查，不跑真实脚本")
+    parser.add_argument(
+        "--update-api", action="store_true", help="更新公共函数库签名快照（发版前新增函数时使用）"
+    )
     args = parser.parse_args()
 
+    check_api_snapshot(args.update_api)
     check_static(args.project)
     if not args.skip_run:
         check_run(args.project, args.case)

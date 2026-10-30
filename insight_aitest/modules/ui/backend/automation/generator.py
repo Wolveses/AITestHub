@@ -111,6 +111,9 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     from insight_aitest.modules.ui.backend.automation.helpers import (
         open_route, dialog_of, fill_text_fields, confirm_dialog, cancel_dialog,
         row_by_text, assert_row_contains, unique_name,
+        wait_visible, wait_hidden, wait_row, wait_toast,
+        choose_option, upload_files, frame_of, new_tab, download_file,
+        data_path, artifact_path,
     )
     - open_route(page, "#/usm/users")：直达页面并等待加载
     - dialog = dialog_of(page)：等待弹窗出现
@@ -118,17 +121,33 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     - confirm_dialog(dialog) / cancel_dialog(dialog)：点击并等待弹窗关闭
     - assert_row_contains(page, 用户名, "默认部门")：整行文本断言
     - unique_name("testuser")：唯一测试数据名
+    - wait_visible(locator) / wait_hidden(locator)：显式等待元素出现/消失
+    - wait_row(page, 用户名)：等待目标表格行出现
+    - wait_toast(page, "添加成功")：等待提示条出现并消失
+    - choose_option(page, 下拉控件, "选项文案")：下拉/combobox 选择
+    - upload_files(dialog, data_path("样例.xlsx"))：上传项目测试数据
+    - frame_of(page, name=...) / new_tab(page, 触发控件) / download_file(...)：iframe、新窗口、下载
+    - artifact_path("x.png")：本次执行的产物路径（下载或截图落盘用）
     自己拼 BASE_URL、自己 get_by_role("dialog") 再逐个 nth 填空、自己拼时间戳造唯一名，都视为不合格。
 26. 若「项目已有页面对象」一节列出可用的类/方法，优先直接 import 调用（如
     from pages.users_page import UsersPage），不要重复其流程。
 27. 代码落位三档（先判断语义再写代码，不要混淆）：
-    - 机制类能力（跳转、弹窗、输入框、表格行、唯一数据）→ 仓库 helpers（规则 25），脚本内禁止重写
-    - 项目内通用但非业务的能力（等 toast 消失、轮询刷新、通用格式化）→ pages/_utils.py，
+    - 机制类能力（跳转、弹窗、输入框、表格行、唯一数据、等待、下拉、上传、下载、iframe、新窗口）→ 仓库 helpers（规则 25），脚本内禁止重写
+    - 项目内通用但非业务、helpers 未覆盖的能力（特定轮询刷新、通用格式化）→ pages/_utils.py，
       该文件允许覆盖（系统会自动备份到 pages/history/），import 方式 from pages._utils import xxx
     - 被测系统业务操作（菜单、字段顺序、按钮文案、断言列）→ pages/<模块>_page.py，只能新增不可覆盖
     需要新增或更新上述 pages 文件时，在 finish 里附带：
     {"script": "...", "pages": [{"path": "pages/_utils.py", "content": "完整源码"}]}
     path 必须是 pages/ 下单层 .py 文件，content 需能通过 py_compile。
+    页面对象会先写入生成期暂存区，首跑通过后才并入正式资产；失败自动丢弃，不会污染既有复用代码。
+28. 禁止任何固定睡眠：不要写 page.wait_for_timeout / time.sleep / asyncio.sleep。
+    等待一律用 helpers 的 wait_visible / wait_hidden / wait_row / wait_toast，
+    或 expect(...) 自动轮询（to_be_visible / to_be_hidden / to_contain_text 等）。
+29. 安全边界（违反会被静态校验直接拒绝）：
+    - 只允许 import：playwright、pytest、pages.*、helpers、以及 time/json/re/tempfile/datetime/random/string/uuid/typing
+    - 禁止 import os/sys/subprocess/pathlib/shutil/requests 等，禁止读取配置文件与环境凭证
+    - 禁止调用 open/eval/exec/compile/getattr/setattr
+    - 上传样例文件用 data_path("文件名")（项目 data/ 目录只读资产）；产物落盘用 artifact_path("文件名")
 """
 
 
@@ -220,6 +239,57 @@ def _check_script(source: str) -> str:
     # BASE_URL 已是当前端入口（后台已含 /manage），再拼接会造成 /manage/manage
     if re.search(r"BASE_URL[^\n]{0,16}/manage", source):
         return "BASE_URL 已包含端入口（后台为 /manage），不要再拼接 /manage"
+    return _check_sandbox(source, kind="脚本")
+
+
+# 允许导入的模块白名单：playwright / pytest / 公共函数库 / 项目页面对象 / 少量纯计算标准库
+_ALLOWED_IMPORTS = {
+    "playwright",
+    "pytest",
+    "pages",
+    "time",
+    "json",
+    "re",
+    "tempfile",
+    "datetime",
+    "random",
+    "string",
+    "uuid",
+    "typing",
+}
+_ALLOWED_HELPERS_PREFIX = "insight_aitest.modules.ui.backend.automation.helpers"
+# 禁止调用的危险函数（防止脚本读密钥文件或绕过静态检查）
+_BANNED_CALLS = {"open", "eval", "exec", "compile", "__import__", "getattr", "setattr", "execfile"}
+
+
+def _check_sandbox(source: str, kind: str) -> str:
+    """AST 级安全校验：import 白名单 + 危险调用 + 固定睡眠。"""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        return f"{kind}语法错误: {e.msg}"
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root not in _ALLOWED_IMPORTS and not alias.name.startswith(_ALLOWED_HELPERS_PREFIX):
+                    return f"{kind}禁止导入 {alias.name}（仅允许 playwright/pytest/pages/helpers 与少量标准库）"
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            root = module.split(".")[0]
+            if root not in _ALLOWED_IMPORTS and not module.startswith(_ALLOWED_HELPERS_PREFIX):
+                return f"{kind}禁止导入 {module or '相对模块'}（仅允许 playwright/pytest/pages/helpers 与少量标准库）"
+        elif isinstance(node, ast.Call):
+            func = node.func
+            # 只拦截直接调用（open/eval/exec...），避免误伤页面对象里同名的合法方法
+            if isinstance(func, ast.Name) and func.id in _BANNED_CALLS:
+                return f"{kind}禁止调用 {func.id}（脚本不得读写任意文件或动态执行代码）"
+            attr = getattr(func, "attr", "")
+            if attr == "wait_for_timeout" or attr == "sleep":
+                return f"{kind}禁止固定睡眠（{attr}），请改用 helpers 的 wait_* 或 expect"
     return ""
 
 
@@ -298,7 +368,7 @@ def _case_brief(case) -> str:
     )
 
 
-PAGES_CATALOG_LIMIT = 4000
+PAGES_CATALOG_LIMIT = 8000
 # 项目级通用扩展文件：允许生成期覆盖（覆盖前自动备份到 pages/history/）
 UTILS_FILE = "_utils.py"
 
@@ -340,39 +410,83 @@ def pages_catalog(project_id: int) -> str:
                 lines.append(
                     f"- {module}.{node.name}({_signature(node)})" + (f"  # {doc}" if doc else "")
                 )
-    return "\n".join(lines)[:PAGES_CATALOG_LIMIT]
+    text = "\n".join(lines)
+    if len(text) <= PAGES_CATALOG_LIMIT:
+        return text
+    return (
+        text[:PAGES_CATALOG_LIMIT]
+        + "\n…（页面对象清单已截断，其余文件请按需复用：先看 pages/ 目录，再决定是否新建）"
+    )
 
 
-def write_pages(project_id: int, payload) -> str:
-    """把模型提交的页面对象写入项目 pages/，返回错误信息（空串为成功）。
+def stage_pages(project_id: int, case_id: int, payload) -> tuple[str, Path | None]:
+    """校验页面对象并写入生成期暂存目录，返回 (错误信息, 暂存根目录)。
+
+    暂存目录里是正式 pages/ 的副本 + 本次提交内容，首跑使用它，
+    避免未验证的页面对象污染正式资产；通过后由 adopt_pages 并入正式目录。
 
     落位规则：
-    - ``pages/_utils.py``（项目级通用扩展）允许覆盖，覆盖前备份到 pages/history/；
+    - ``pages/_utils.py``（项目级通用扩展）允许覆盖，并入时备份旧版到 pages/history/；
     - 其余页面对象只允许新增，避免一次生成破坏既有复用资产。
     """
     if not isinstance(payload, list) or not payload:
-        return ""
-    root = paths.pages_dir(project_id)
+        return "", None
+    staging = paths.staging_root(project_id, case_id)
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(paths.pages_dir(project_id), staging / "pages")
     for item in payload:
         if not isinstance(item, dict):
-            return "pages 必须是对象数组：[{\"path\": \"pages/x.py\", \"content\": \"...\"}]"
+            return "pages 必须是对象数组：[{\"path\": \"pages/x.py\", \"content\": \"...\"}]", None
         rel = str(item.get("path") or "").strip().replace("\\", "/")
         content = str(item.get("content") or "")
         if rel.count("/") != 1 or not rel.startswith("pages/") or not rel.endswith(".py"):
-            return f"页面对象路径必须形如 pages/xxx.py（单层文件），收到：{rel}"
+            return f"页面对象路径必须形如 pages/xxx.py（单层文件），收到：{rel}", None
         name = rel.split("/", 1)[1]
-        target = root / name
-        if target.exists() and name != UTILS_FILE:
-            return f"页面对象 {rel} 已存在，不能覆盖；请直接复用它的方法或换新文件名"
+        if name == "__init__.py":
+            return f"页面对象文件名不合法：{rel}", None
+        if (paths.pages_dir(project_id) / name).exists() and name != UTILS_FILE:
+            return f"页面对象 {rel} 已存在，不能覆盖；请直接复用它的方法或换新文件名", None
         problem = _compile(content)
+        if not problem:
+            problem = _check_sandbox(content, kind=f"页面对象 {rel} ")
         if problem:
-            return f"页面对象 {rel} 编译失败：{problem}"
+            return f"页面对象 {rel} 校验失败：{problem}", None
+        (staging / rel).write_text(content, encoding="utf-8")
+    return "", staging
+
+
+def adopt_pages(project_id: int, staging: Path | None) -> None:
+    """首跑通过后，把暂存页面对象并入正式 pages/（_utils.py 覆盖前备份）。"""
+    if staging is None:
+        return
+    staged = staging / "pages"
+    if not staged.exists():
+        return
+    real = paths.pages_dir(project_id)
+    for file in sorted(staged.glob("*.py")):
+        name = file.name
+        if name == "__init__.py":
+            continue
+        content = file.read_text(encoding="utf-8")
+        target = real / name
         if target.exists():
-            backup = root / "history" / f"{target.stem}_{datetime.now():%Y%m%d-%H%M%S-%f}.py"
+            if target.read_text(encoding="utf-8") == content:
+                continue
+            if name != UTILS_FILE:
+                # 非 _utils 文件不覆盖（生成期已校验存在性，这里兜底）
+                continue
+            backup = real / "history" / f"{target.stem}_{datetime.now():%Y%m%d-%H%M%S-%f}.py"
             backup.parent.mkdir(parents=True, exist_ok=True)
             backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
         target.write_text(content, encoding="utf-8")
-    return ""
+
+
+def discard_pages(staging: Path | None) -> None:
+    """丢弃暂存（生成失败时调用，保证资产零污染）。"""
+    if staging is not None:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 class GenerationJob:
@@ -391,6 +505,7 @@ class GenerationJob:
         self.tool_calls = 0
         self.model_name = ""
         self._log = None
+        self._staged_pages: Path | None = None
 
     # ===== 日志 =====
 
@@ -444,6 +559,9 @@ class GenerationJob:
             }
         finally:
             self._finalize(outcome)
+            # 无论成功失败都清理生成期暂存，正式资产只保留已验证版本
+            discard_pages(self._staged_pages)
+            self._staged_pages = None
             if self._log is not None:
                 try:
                     self._log.close()
@@ -650,11 +768,14 @@ class GenerationJob:
                     )
                     continue
 
-                pages_problem = write_pages(int(case.project_id), args.get("pages"))
+                pages_problem, staged = stage_pages(
+                    int(self.case.project_id), int(self.case.id), args.get("pages")
+                )
                 if pages_problem:
                     pages_rounds += 1
                     self._write_log({"type": "pages_invalid", "message": pages_problem})
                     if pages_rounds > MAX_FIX_ROUNDS:
+                        discard_pages(staged)
                         return {
                             "status": GenerationStatus.FAILED,
                             "error_category": ErrorCategory.SCRIPT,
@@ -671,12 +792,14 @@ class GenerationJob:
                         }
                     )
                     continue
-                if args.get("pages"):
+                self._staged_pages = staged
+                if staged is not None:
                     self._write_log(
-                        {"type": "pages_saved", "count": len(args.get("pages") or [])}
+                        {"type": "pages_staged", "count": len(args.get("pages") or [])}
                     )
 
                 concurrency.set_progress(self.case_id, "首跑验证", "本地执行脚本验证")
+                # 首跑用暂存 pages，通过后才并入正式资产
                 result = self._validate(source, auth)
                 self._write_log(
                     {
@@ -687,10 +810,14 @@ class GenerationJob:
                     }
                 )
                 if result.get("run_status") == "passed":
+                    adopt_pages(int(self.case.project_id), self._staged_pages)
+                    self._staged_pages = None
                     return self._solidify(source, ok=True)
 
                 rounds += 1
                 if rounds > MAX_FIX_ROUNDS:
+                    discard_pages(self._staged_pages)
+                    self._staged_pages = None
                     self._solidify(source, ok=False)
                     return {
                         "status": GenerationStatus.FAILED,
@@ -804,6 +931,7 @@ class GenerationJob:
                 script_path=tmp,
                 run_dir=paths.new_run_dir(project_id, int(self.case.id)) / "validate",
                 auth=auth,
+                pages_root=self._staged_pages,
             )
         except EnvMissingError as e:
             return {"run_status": "error", "error_category": ErrorCategory.ENV, "error_message": str(e)}
