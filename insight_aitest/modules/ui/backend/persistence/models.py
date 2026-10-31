@@ -26,6 +26,7 @@ from insight_aitest.platform.persistence.types import enum_values
 
 
 class RunStatus(Enum):  # NOTE: 与 api/models.py RunStatus 重复；跨模块抽取影响 149 处引用，暂保留
+    RUNNING = "running"  # 运行中（记录先落库，执行完再更新为终态）
     PASSED = "passed"  # 全部步骤通过（assert 全真）
     FAILED = "failed"  # 有 assert 失败（操作已执行）
     ERROR = "error"  # 引擎/环境异常（浏览器崩溃、LLM 调用失败、变量未定义等）

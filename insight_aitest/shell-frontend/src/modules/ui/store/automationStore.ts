@@ -14,6 +14,19 @@ export interface AutomationCase {
   kb_folder_id: number | null;
   /** 端：frontend（根路径）/ backend（base_url + /manage） */
   site: string;
+  /** 复用的流程资产 id（无则为独立脚本） */
+  flow_id: number | null;
+  /** 生成时所用流程版本 */
+  flow_version: number | null;
+  /** 流程标题（列表 chip 展示） */
+  flow_title?: string;
+  /** 流程状态（active/archived） */
+  flow_status?: string | null;
+  /** 本用例参数值 */
+  params: Record<string, string | number | boolean | null>;
+  /** 流程参数结构 */
+  params_schema: ParamSchemaItem[];
+  params_updated_at: string | null;
   status: string;
   script_version: number;
   has_script: boolean;
@@ -24,6 +37,45 @@ export interface AutomationCase {
   progress: { phase: string; message: string; updated_at: string } | null;
   created_at: string | null;
   updated_at: string | null;
+}
+
+export interface ParamSchemaItem {
+  name: string;
+  label?: string;
+  type?: 'str' | 'int' | 'bool' | 'select';
+  required?: boolean;
+  default?: string | number | boolean | null;
+  example?: string;
+  desc?: string;
+  unique?: boolean;
+  options?: string[];
+}
+
+export interface UiFlow {
+  id: number;
+  project_id: number;
+  folder_id: number;
+  flow_key: string;
+  title: string;
+  route: string;
+  keywords: string[];
+  params_schema: ParamSchemaItem[];
+  module: string;
+  script_rel_path: string;
+  version: number;
+  status: string;
+  case_count: number;
+  updated_at: string | null;
+  created_at: string | null;
+  source?: string;
+  cases?: {
+    id: number;
+    title: string;
+    status: string;
+    script_version: number;
+    flow_version: number | null;
+    flow_outdated: boolean;
+  }[];
 }
 
 export interface ImportableCase {
@@ -90,18 +142,25 @@ interface AutomationState {
   categoryFilter: string | null;
   keyword: string;
   envs: UIEnv[];
+  flows: UiFlow[];
+  flowFilter: number | null;
   setProjectId: (id: number | null) => void;
   setStatusFilter: (s: string) => void;
   setCategoryFilter: (c: string | null) => void;
   setKeyword: (k: string) => void;
+  setFlowFilter: (id: number | null) => void;
   loadCases: () => Promise<void>;
   loadEnvs: () => Promise<void>;
+  loadFlows: () => Promise<void>;
   importable: () => Promise<ImportableCase[]>;
   importCases: (
     documentIds: number[],
     siteMap?: Record<number, string>,
   ) => Promise<{ created: number; skipped: number; failed: unknown[] }>;
-  generate: (caseId: number) => Promise<void>;
+  generate: (
+    caseId: number,
+    opts?: { reuseFlowId?: number; forceNewFlow?: boolean },
+  ) => Promise<void>;
   fix: (caseId: number) => Promise<void>;
   run: (caseId: number) => Promise<void>;
   getCase: (caseId: number) => Promise<AutomationCase>;
@@ -114,6 +173,17 @@ interface AutomationState {
   }>;
   listRuns: (caseId: number) => Promise<ScriptRun[]>;
   listGenerations: (caseId: number) => Promise<GenerationRecord[]>;
+  getParams: (caseId: number) => Promise<{
+    flow_id: number | null;
+    flow_version: number | null;
+    values: Record<string, string | number | boolean | null>;
+    schema: ParamSchemaItem[];
+    updated_at: string | null;
+  }>;
+  saveParams: (
+    caseId: number,
+    values: Record<string, string | number | boolean | null>,
+  ) => Promise<AutomationCase>;
   saveEnv: (data: Record<string, unknown>, envId?: number) => Promise<UIEnv>;
   deleteEnv: (envId: number) => Promise<void>;
   testEnv: (envId: number) => Promise<{ ok: boolean; message: string }>;
@@ -147,18 +217,21 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
   categoryFilter: null,
   keyword: '',
   envs: [],
+  flows: [],
+  flowFilter: null,
 
   setProjectId: (id) => {
     if (id === null) localStorage.removeItem(LS_PROJECT);
     else localStorage.setItem(LS_PROJECT, String(id));
-    set({ projectId: id, categoryFilter: null });
+    set({ projectId: id, categoryFilter: null, flowFilter: null });
   },
   setStatusFilter: (s) => set({ statusFilter: s }),
   setCategoryFilter: (c) => set({ categoryFilter: c }),
   setKeyword: (k) => set({ keyword: k }),
+  setFlowFilter: (id) => set({ flowFilter: id }),
 
   loadCases: async () => {
-    const { projectId, statusFilter, categoryFilter, keyword } = get();
+    const { projectId, statusFilter, categoryFilter, keyword, flowFilter } = get();
     if (projectId === null) {
       set({ cases: [], total: 0 });
       return;
@@ -169,6 +242,7 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
       if (statusFilter) q.set('status', statusFilter);
       if (categoryFilter) q.set('category_path', categoryFilter);
       if (keyword.trim()) q.set('keyword', keyword.trim());
+      if (flowFilter !== null) q.set('flow_id', String(flowFilter));
       const r = await fetch(`${BASE}/cases?${q.toString()}`);
       if (!r.ok) throw new Error(await parseError(r));
       const data = await r.json();
@@ -186,6 +260,18 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
     }
     const r = await fetch(`${BASE}/envs?project_id=${projectId}`);
     if (r.ok) set({ envs: await r.json() });
+  },
+
+  loadFlows: async () => {
+    const projectId = get().projectId;
+    if (projectId === null) {
+      set({ flows: [] });
+      return;
+    }
+    const r = await fetch(`${BASE}/flows?project_id=${projectId}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    set({ flows: data.items || [] });
   },
 
   importable: async () => {
@@ -208,8 +294,15 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
     return await r.json();
   },
 
-  generate: async (caseId) => {
-    const r = await fetch(`${BASE}/cases/${caseId}/generate`, { method: 'POST' });
+  generate: async (caseId, opts) => {
+    const r = await fetch(`${BASE}/cases/${caseId}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reuse_flow_id: opts?.reuseFlowId ?? null,
+        force_new_flow: opts?.forceNewFlow ?? false,
+      }),
+    });
     if (!r.ok) throw new Error(await parseError(r));
     await get().loadCases();
   },
@@ -266,6 +359,24 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
     const r = await fetch(`${BASE}/cases/${caseId}/generations`);
     if (!r.ok) throw new Error(await parseError(r));
     return await r.json();
+  },
+
+  getParams: async (caseId) => {
+    const r = await fetch(`${BASE}/cases/${caseId}/params`);
+    if (!r.ok) throw new Error(await parseError(r));
+    return await r.json();
+  },
+
+  saveParams: async (caseId, values) => {
+    const r = await fetch(`${BASE}/cases/${caseId}/params`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values }),
+    });
+    if (!r.ok) throw new Error(await parseError(r));
+    const updated = await r.json();
+    set({ cases: get().cases.map((c) => (c.id === caseId ? updated : c)) });
+    return updated;
   },
 
   saveEnv: async (data, envId) => {

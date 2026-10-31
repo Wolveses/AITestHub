@@ -1,18 +1,18 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Play, Sparkles, Wrench, X, Copy, FileCode } from 'lucide-react';
-import { useAutomationStore, type AutomationCase, type GenerationRecord, type ScriptRun } from '../../store/automationStore';
+import { useAutomationStore, type AutomationCase, type GenerationRecord, type ParamSchemaItem, type ScriptRun } from '../../store/automationStore';
 import { Btn, ErrorCategoryTag, Field, StatusBadge, inputStyle, STATUS_META } from './common';
 
 const BASE = '/api/modules/ui/automation';
 const ACTIVE = new Set(['generating', 'fixing', 'running']);
-type Tab = 'snapshot' | 'script' | 'runs' | 'generations';
+type Tab = 'snapshot' | 'params' | 'script' | 'runs' | 'generations';
 type ScriptPreview = { content: string; version: number; pages: { name: string; path?: string; content: string }[] };
 
 export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; onClose: () => void }) {
   const { t } = useTranslation();
-  const { getCase, getScript, listRuns, listGenerations, updateCase, generate, fix, run } = useAutomationStore();
+  const { getCase, getScript, listRuns, listGenerations, updateCase, saveParams, generate, fix, run } = useAutomationStore();
   const [detail, setDetail] = useState<AutomationCase | null>(null);
   const [script, setScript] = useState<ScriptPreview>({ content: '', version: 0, pages: [] });
   const [runs, setRuns] = useState<ScriptRun[]>([]);
@@ -20,12 +20,30 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
   const [tab, setTab] = useState<Tab>('snapshot');
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ title: '', precondition: '', steps: '', expected: '' });
+  const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [preview, setPreview] = useState<{ url: string; label: string } | null>(null);
+  const [openRunLog, setOpenRunLog] = useState<number | null>(null);
+  const [openGenLog, setOpenGenLog] = useState<number | null>(null);
+  // 执行/生成记录里是否还有在跑的任务（决定是否继续轮询刷新列表与日志）
+  const anyRunning = runs.some((r) => r.status === 'running') || gens.some((g) => g.status === 'running');
+
+  // 参数默认回填：本用例已填值优先，其次用流程默认值
+  const initParams = (c: AutomationCase) => {
+    const init: Record<string, string> = {};
+    for (const item of c.params_schema || []) {
+      const filled = c.params?.[item.name];
+      if (filled !== undefined && filled !== null) init[item.name] = String(filled);
+      else if (item.default !== undefined && item.default !== null) init[item.name] = String(item.default);
+      else init[item.name] = '';
+    }
+    setParamValues(init);
+  };
 
   const refresh = async (id: number) => {
     const c = await getCase(id);
     setDetail(c);
+    initParams(c);
     setForm({
       title: c.title,
       precondition: c.precondition,
@@ -42,20 +60,28 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
       setDetail(null);
       setEditing(false);
       setTab('snapshot');
+      setOpenRunLog(null);
+      setOpenGenLog(null);
       return;
     }
+    setOpenRunLog(null);
+    setOpenGenLog(null);
     refresh(caseId).catch((e) => toast.error((e as Error).message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseId]);
 
   useEffect(() => {
-    if (caseId === null || !detail || !ACTIVE.has(detail.status)) return;
+    // 用例状态处于活跃态，或任一执行/生成记录仍在运行，都要保持轮询，
+    // 否则执行刚结束的瞬间列表就停止刷新，状态会停在「执行中」
+    if (caseId === null) return;
+    const caseActive = detail !== null && ACTIVE.has(detail.status);
+    if (!caseActive && !anyRunning) return;
     const timer = setInterval(() => {
       refresh(caseId).catch(() => undefined);
     }, 3000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [caseId, detail?.status]);
+  }, [caseId, detail?.status, anyRunning]);
 
   useEffect(() => {
     if (!preview) return;
@@ -113,6 +139,48 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
     }
   };
 
+  const saveParamValues = async () => {
+    const schema = detail.params_schema || [];
+    const missing = schema.filter((item) => item.required && !String(paramValues[item.name] ?? '').trim());
+    if (missing.length > 0) {
+      toast.error(
+        t('ui.auto.paramRequiredMissing', '必填参数不能为空：{{names}}', {
+          names: missing.map((item) => item.label || item.name).join('、'),
+        }),
+      );
+      return;
+    }
+    const values: Record<string, string | number | boolean> = {};
+    for (const item of schema) {
+      const raw = paramValues[item.name] ?? '';
+      if (item.type === 'int') {
+        const n = Number(raw);
+        values[item.name] = raw !== '' && Number.isFinite(n) ? n : raw;
+      } else if (item.type === 'bool') {
+        values[item.name] = raw === 'true';
+      } else {
+        values[item.name] = raw;
+      }
+    }
+    setSubmitting(true);
+    try {
+      await saveParams(detail.id, values);
+      toast.success(t('ui.auto.paramsSaved', '参数已保存，建议重新执行'));
+      await refresh(detail.id);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const paramSource = (item: ParamSchemaItem) => {
+    const filled = detail.params?.[item.name];
+    return filled !== undefined && filled !== null && filled !== ''
+      ? t('ui.auto.paramSourceCase', '本用例')
+      : t('ui.auto.paramSourceDefault', '流程默认');
+  };
+
   const siteLabel = (s: string) =>
     s === 'backend' ? t('ui.auto.siteBackend', '后台') : t('ui.auto.siteFrontend', '前台');
 
@@ -144,6 +212,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
 
   const tabs: { key: Tab; label: string }[] = [
     { key: 'snapshot', label: t('ui.auto.tabSnapshot', '用例快照') },
+    { key: 'params', label: detail.params_schema.length > 0 ? `${t('ui.auto.tabParams', '参数')}（${detail.params_schema.length}）` : t('ui.auto.tabParams', '参数') },
     { key: 'script', label: t('ui.auto.tabScript', '脚本') },
     { key: 'runs', label: `${t('ui.auto.tabRuns', '执行记录')}（${runs.length}）` },
     { key: 'generations', label: `${t('ui.auto.tabGenerations', '生成记录')}（${gens.length}）` },
@@ -194,7 +263,13 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
             </div>
           </div>
           <StatusBadge status={detail.status} label={statusLabel(detail.status)} />
-          <Btn size="sm" variant="primary" disabled={active || submitting} onClick={() => act(generate, t('ui.auto.generateQueued', '已提交生成任务'))}>
+          <Btn
+            size="sm"
+            variant="primary"
+            disabled={active || submitting}
+            title={t('ui.auto.regenerateHint', '重新探索页面并按实测控件重建流程参数（会消耗模型额度）')}
+            onClick={() => act((id) => generate(id, { forceNewFlow: true }), t('ui.auto.generateQueued', '已提交生成任务'))}
+          >
             <Sparkles size={12} /> {detail.has_script ? t('ui.auto.regenerate', '重新生成') : t('ui.auto.generateScript', '生成脚本')}
           </Btn>
           <Btn size="sm" disabled={active || submitting || detail.status !== 'implemented'} onClick={() => act(run, t('ui.auto.runQueued', '已提交执行任务'))}>
@@ -294,6 +369,96 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
             </div>
           )}
 
+          {tab === 'params' && (
+            <div>
+              {detail.params_schema.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                  {t(
+                    'ui.auto.paramsNoFlow',
+                    '该用例使用独立脚本，没有流程参数可编辑。同目录下同流程的用例复用一套流程脚本后，差异数据会在本页以参数形式展示。',
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                    {detail.flow_id
+                      ? t('ui.auto.paramsFlowHint', '复用流程 #{{id}} · 版本 v{{version}}，参数仅影响本用例的执行注入值', {
+                          id: detail.flow_id,
+                          version: detail.flow_version ?? 0,
+                        })
+                      : t('ui.auto.paramsHint', '参数由流程提供，执行时注入本用例的取值（唯一参数会自动追加运行时间后缀）。')}
+                  </div>
+                  <div style={{ overflowX: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
+                    <div style={paramGridStyle}>
+                      <span>{t('ui.auto.paramName', '参数')}</span>
+                      <span>{t('ui.auto.paramDesc', '含义')}</span>
+                      <span>{t('ui.auto.paramType', '类型')}</span>
+                      <span>{t('ui.auto.paramRequired', '必填')}</span>
+                      <span>{t('ui.auto.paramCurrent', '当前值')}</span>
+                      <span>{t('ui.auto.paramDefault', '默认值')}</span>
+                      <span>{t('ui.auto.paramUnique', '唯一')}</span>
+                      <span>{t('ui.auto.paramSource', '来源')}</span>
+                    </div>
+                    {detail.params_schema.map((item) => {
+                      const disabled = active || submitting;
+                      const value = paramValues[item.name] ?? '';
+                      const setValue = (next: string) => setParamValues((prev) => ({ ...prev, [item.name]: next }));
+                      return (
+                        <div key={item.name} style={paramRowStyle}>
+                          <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11 }} title={item.label}>{item.name}</span>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.desc || item.label}>
+                            {item.desc || item.label || '—'}
+                          </span>
+                          <span style={{ color: 'var(--text-muted)' }}>{item.type || 'str'}</span>
+                          <span style={{ color: item.required ? 'var(--error)' : 'var(--text-muted)' }}>
+                            {item.required ? t('ui.auto.yes', '是') : t('ui.auto.no', '否')}
+                          </span>
+                          {item.type === 'bool' ? (
+                            <select value={value} onChange={(e) => setValue(e.target.value)} style={inputStyle} disabled={disabled}>
+                              <option value="">—</option>
+                              <option value="true">{t('ui.auto.boolTrue', '是')}</option>
+                              <option value="false">{t('ui.auto.boolFalse', '否')}</option>
+                            </select>
+                          ) : item.type === 'select' ? (
+                            <select value={value} onChange={(e) => setValue(e.target.value)} style={inputStyle} disabled={disabled}>
+                              <option value="">—</option>
+                              {(item.options || []).map((opt) => (
+                                <option key={opt} value={opt}>{opt}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type={item.type === 'int' ? 'number' : 'text'}
+                              value={value}
+                              onChange={(e) => setValue(e.target.value)}
+                              style={inputStyle}
+                              disabled={disabled}
+                            />
+                          )}
+                          <span style={{ color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }} title={String(item.default ?? '')}>
+                            {item.default === undefined || item.default === null || item.default === '' ? '—' : String(item.default)}
+                          </span>
+                          <span style={{ color: item.unique ? 'var(--accent)' : 'var(--text-muted)' }}>
+                            {item.unique ? t('ui.auto.yes', '是') : t('ui.auto.no', '否')}
+                          </span>
+                          <span style={{ color: 'var(--text-muted)' }}>{paramSource(item)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                    <Btn variant="primary" onClick={saveParamValues} disabled={active || submitting}>
+                      {t('ui.auto.save', '保存')}
+                    </Btn>
+                    <Btn onClick={() => initParams(detail)} disabled={active || submitting}>
+                      {t('ui.auto.paramReset', '重置')}
+                    </Btn>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {tab === 'script' && (
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
@@ -361,14 +526,30 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
               {runs.map((r) => (
                 <div key={r.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, fontSize: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ color: r.status === 'passed' ? 'var(--success)' : 'var(--error)', fontWeight: 600 }}>
-                      {r.status === 'passed' ? t('ui.auto.pass', '通过') : t('ui.auto.fail', '失败')}
+                    <span
+                      style={{
+                        color: r.status === 'passed' ? 'var(--success)' : r.status === 'running' ? 'var(--info)' : 'var(--error)',
+                        fontWeight: 600,
+                      }}
+                    >
+                      {r.status === 'passed'
+                        ? t('ui.auto.pass', '通过')
+                        : r.status === 'running'
+                          ? t('ui.auto.statusRunning', '执行中')
+                          : t('ui.auto.fail', '失败')}
                     </span>
                     <span style={{ color: 'var(--text-muted)' }}>#{r.id}</span>
                     <span style={{ color: 'var(--text-muted)' }}>{r.started_at?.replace('T', ' ').slice(0, 19)}</span>
                     <span style={{ color: 'var(--text-muted)' }}>{r.duration_ms} ms</span>
                     <span style={{ color: 'var(--text-muted)' }}>v{r.script_version ?? 0}</span>
                     <div style={{ flex: 1 }} />
+                    <button
+                      type="button"
+                      style={linkButtonStyle}
+                      onClick={() => setOpenRunLog(openRunLog === r.id ? null : r.id)}
+                    >
+                      {t('ui.auto.runLog', '查看日志')}
+                    </button>
                     {(() => {
                       const shot = r.status === 'passed'
                         ? { name: 'final.png', label: t('ui.auto.finalScreenshot', '终态截图') }
@@ -399,6 +580,9 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                     )}
                   </div>
                   {r.error && <pre style={{ ...preStyle, marginTop: 8 }}>{r.error}</pre>}
+                  {openRunLog === r.id && (
+                    <LogViewer url={`${BASE}/cases/${detail.id}/runs/${r.id}/log`} live={r.status === 'running'} />
+                  )}
                 </div>
               ))}
             </div>
@@ -419,8 +603,19 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                     <ErrorCategoryTag category={g.error_category} label={errorLabel(g.error_category)} />
                     <span style={{ color: 'var(--text-muted)' }}>{g.tool_calls} {t('ui.auto.toolCalls', '次工具调用')}</span>
                     <span style={{ color: 'var(--text-muted)' }}>{g.started_at?.replace('T', ' ').slice(0, 19)}</span>
+                    <div style={{ flex: 1 }} />
+                    <button
+                      type="button"
+                      style={linkButtonStyle}
+                      onClick={() => setOpenGenLog(openGenLog === g.id ? null : g.id)}
+                    >
+                      {t('ui.auto.generationLog', '查看日志')}
+                    </button>
                   </div>
                   {g.error_message && <pre style={{ ...preStyle, marginTop: 8 }}>{g.error_message}</pre>}
+                  {openGenLog === g.id && (
+                    <LogViewer url={`${BASE}/cases/${detail.id}/generations/${g.id}/log`} live={g.status === 'running'} />
+                  )}
                 </div>
               ))}
             </div>
@@ -497,6 +692,28 @@ const preStyle: CSSProperties = {
 };
 
 const textareaStyle: CSSProperties = { ...inputStyle, resize: 'vertical', fontFamily: 'inherit' };
+
+const PARAM_COLUMNS = '110px 1fr 64px 52px 160px 110px 56px 76px';
+const paramGridStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: PARAM_COLUMNS,
+  gap: 8,
+  padding: '8px 10px',
+  fontSize: 11,
+  color: 'var(--text-muted)',
+  borderBottom: '1px solid var(--border)',
+  background: 'var(--bg-card)',
+  whiteSpace: 'nowrap',
+};
+const paramRowStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: PARAM_COLUMNS,
+  gap: 8,
+  alignItems: 'center',
+  padding: '7px 10px',
+  fontSize: 12,
+  borderBottom: '1px solid var(--bg-card)',
+};
 const linkStyle: CSSProperties = { color: 'var(--accent)', fontSize: 11, textDecoration: 'none' };
 const linkButtonStyle: CSSProperties = {
   ...linkStyle,
@@ -506,3 +723,44 @@ const linkButtonStyle: CSSProperties = {
   cursor: 'pointer',
   font: 'inherit',
 };
+
+/** 过程日志查看器：运行中按 2 秒轮询，结束后只拉一次。 */
+function LogViewer({ url, live }: { url: string; live: boolean }) {
+  const { t } = useTranslation();
+  const [text, setText] = useState(t('ui.auto.logLoading', '日志加载中…'));
+  const boxRef = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        // 加时间戳绕过浏览器缓存，保证运行中每次都能拿到追加后的内容
+        const r = await fetch(`${url}?_t=${Date.now()}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const body = await r.text();
+        if (alive) setText(body || t('ui.auto.logEmpty', '（暂无输出）'));
+      } catch (e) {
+        if (alive) setText(t('ui.auto.logLoadFailed', '日志加载失败：{{msg}}', { msg: (e as Error).message }));
+      }
+    };
+    tick();
+    const timer = live ? setInterval(tick, 2000) : undefined;
+    return () => {
+      alive = false;
+      if (timer) clearInterval(timer);
+    };
+  }, [url, live, t]);
+
+  useEffect(() => {
+    if (live && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;
+  }, [text, live]);
+
+  return (
+    <pre
+      ref={boxRef}
+      style={{ ...preStyle, marginTop: 8, maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap' }}
+    >
+      {text}
+    </pre>
+  );
+}

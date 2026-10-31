@@ -101,6 +101,24 @@ def _insight_browser(_insight_playwright):
 
 
 @pytest.fixture
+def params():
+    """用例参数（流程 schema 默认值 + 本用例取值，由后端合并后写入 params.json）。
+
+    独立脚本用例没有流程参数，直接返回空字典；unique 参数已由后端追加运行时间后缀。
+    """
+    path = os.environ.get("INSIGHT_UI_PARAMS") or ""
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    values = data.get("values") if isinstance(data, dict) else None
+    return dict(values) if isinstance(values, dict) else {}
+
+
+@pytest.fixture
 def page(_insight_browser, request):
     # 固定 locale/时区/视口，避免日期控件、时区断言与人工界面不一致
     kwargs = {

@@ -30,8 +30,12 @@ export function AutomationPage() {
     setCategoryFilter,
     keyword,
     setKeyword,
+    flows,
+    flowFilter,
+    setFlowFilter,
     loadCases,
     loadEnvs,
+    loadFlows,
     generate,
     fix,
     run,
@@ -60,8 +64,9 @@ export function AutomationPage() {
     if (projectId !== null) {
       loadCases();
       loadEnvs();
+      loadFlows();
     }
-  }, [projectId, statusFilter, categoryFilter, loadCases, loadEnvs]);
+  }, [projectId, statusFilter, categoryFilter, flowFilter, loadCases, loadEnvs, loadFlows]);
 
   // 搜索防抖
   useEffect(() => {
@@ -203,6 +208,20 @@ export function AutomationPage() {
           <option value="running">{t('ui.auto.statusRunning', '执行中')}</option>
         </select>
 
+        <select
+          value={flowFilter ?? ''}
+          onChange={(e) => setFlowFilter(e.target.value === '' ? null : Number(e.target.value))}
+          style={{ ...inputStyle, width: 160 }}
+          title={t('ui.auto.flowFilterHint', '按流程筛选')}
+        >
+          <option value="">{t('ui.auto.allFlows', '全部流程')}</option>
+          {flows.map((f) => (
+            <option key={f.id} value={f.id}>
+              {f.title} (v{f.version})
+            </option>
+          ))}
+        </select>
+
         <div style={{ position: 'relative' }}>
           <Search size={13} style={{ position: 'absolute', left: 8, top: 8, color: 'var(--text-muted)' }} />
           <input
@@ -278,6 +297,29 @@ export function AutomationPage() {
                       </span>
                       {c.script_version > 0 && (
                         <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>v{c.script_version}</span>
+                      )}
+                      {c.flow_id && c.flow_title && (
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFlowFilter(c.flow_id);
+                          }}
+                          title={t('ui.auto.flowChipHint', '点击按该流程筛选')}
+                          style={{
+                            flexShrink: 0,
+                            padding: '1px 7px',
+                            borderRadius: 9,
+                            border: '1px solid var(--border)',
+                            fontSize: 10,
+                            color: c.flow_status === 'archived' ? 'var(--text-muted)' : 'var(--accent)',
+                            maxWidth: 160,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {t('ui.auto.flowChip', '流程 · {{title}}', { title: c.flow_title })}
+                        </span>
                       )}
                       {c.last_error_category && (
                         <ErrorCategoryTag category={c.last_error_category} label={errorLabel(c.last_error_category)} />

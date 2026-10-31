@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -96,6 +97,66 @@ def _parse_junit(junit: Path) -> tuple[int, int, str]:
     return tests, failures, first[:6000]
 
 
+def _coerce_param(value, kind: str):
+    """按参数类型做最小转换（非法值原样保留，交由脚本/断言暴露问题）。"""
+    if kind == "int":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+    return "" if value is None else value
+
+
+def _unique_value(value: str, suffix: str) -> str:
+    """给需要唯一的数据追加时间后缀。
+
+    后缀只用数字且不加连接符：被测系统常限制用户名只能字母/数字/中文，
+    带下划线会被格式校验拒绝，弹窗点「确定」后保持打开导致首跑误判失败。
+    邮箱则把后缀插到 ``@`` 前，保证邮箱格式仍然合法。
+    """
+    if "@" in value:
+        local, _, domain = value.partition("@")
+        return f"{local}{suffix}@{domain}"
+    return f"{value}{suffix}"
+
+
+def build_params(case) -> dict:
+    """合并流程参数 schema 与本用例取值，返回 ``{"values": ..., "schema": ...}``。
+
+    - 取值优先级：本用例 params_json → schema.default → 空串；
+    - ``unique=true`` 的参数追加本次运行时间后缀，避免重复创建冲突；
+    - 没有流程参数（schema 与取值都为空）时返回空字典，独立脚本不受影响。
+    """
+    schema = list(getattr(case, "params_schema_json", None) or [])
+    raw = dict(getattr(case, "params_json", None) or {})
+    if not schema and not raw:
+        return {}
+    suffix = datetime.now().strftime("%H%M%S")
+    values: dict = {}
+    for item in schema:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        value = raw.get(name)
+        if value is None or value == "":
+            value = item.get("default")
+        value = _coerce_param(value, str(item.get("type") or "str"))
+        if item.get("unique") and value not in ("", None):
+            value = _unique_value(str(value), suffix)
+        values[name] = value
+    # schema 之外的取值原样保留（手工补充或历史数据）
+    for key, value in raw.items():
+        if key not in values:
+            values[key] = value
+    return {"values": values, "schema": schema}
+
+
 def run_script(
     case,
     env,
@@ -149,6 +210,14 @@ def run_script(
     junit = out_dir / "junit.xml"
     stdout_log = out_dir / "stdout.log"
 
+    # 参数化：schema 默认值 ← 本用例取值，unique 参数追加运行后缀，供 params fixture 读取
+    params_payload = build_params(case)
+    params_file = out_dir / "params.json"
+    if params_payload:
+        params_file.write_text(
+            json.dumps(params_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
     target_url = site_url(env, getattr(case, "site", "") or "")
     child_env = dict(os.environ)
     child_env.update(
@@ -156,6 +225,7 @@ def run_script(
             "INSIGHT_UI_BASE_URL": target_url,
             "INSIGHT_UI_ARTIFACTS": str(out_dir),
             "INSIGHT_UI_DATA_DIR": str(paths.data_dir(project_id)),
+            "INSIGHT_UI_PARAMS": str(params_file) if params_payload else "",
             "INSIGHT_UI_STORAGE_STATE": auth.storage_state_path or "",
             "INSIGHT_UI_HEADERS": json.dumps(auth.headers, ensure_ascii=False),
             "INSIGHT_UI_TIMEOUT_MS": "15000",
@@ -182,14 +252,23 @@ def run_script(
     for attempt in range(retries + 1):
         attempts = attempt + 1
         status, error_message = RunStatus.PASSED, ""
+        # 失败重试会清理上一轮产物（含 params.json），每轮重写保证 params fixture 可读
+        if params_payload:
+            params_file.write_text(
+                json.dumps(params_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         try:
-            proc = subprocess.run(
+            # 输出实时落盘：前端在执行记录里轮询 stdout.log 就能看到运行过程，
+            # 结束后文件保留完整日志（不能用 subprocess.run 的 capture_output，那要等结束才写）
+            stdout_log.write_text("", encoding="utf-8")
+            proc = subprocess.Popen(
                 [
                     sys.executable,
                     "-m",
                     "pytest",
                     str(script),
-                    "-q",
+                    # -v 让每个用例的进度逐行输出，前端看到的执行过程更具体
+                    "-v",
                     "-p",
                     "no:cacheprovider",
                     # 脚手架以插件形式加载（不在用例目录写 conftest）
@@ -202,14 +281,33 @@ def run_script(
                 ],
                 cwd=str(script.parent),
                 env=child_env,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
+                bufsize=1,
             )
-            output = (proc.stdout or "") + "\n" + (proc.stderr or "")
-            stdout_log.write_text(output, encoding="utf-8")
+
+            def _pump() -> None:
+                try:
+                    with stdout_log.open("a", encoding="utf-8") as fh:
+                        for line in proc.stdout:  # type: ignore[union-attr]
+                            fh.write(line)
+                            fh.flush()
+                except Exception:  # 进程被杀时管道中断是预期内的
+                    pass
+
+            pump = threading.Thread(target=_pump, daemon=True, name=f"ui-run-log-{case_id}")
+            pump.start()
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                raise
+            finally:
+                pump.join(timeout=3)
+            output = stdout_log.read_text(encoding="utf-8", errors="replace")
             tests, failures, first = _parse_junit(junit)
             if proc.returncode != 0 or failures > 0:
                 status = RunStatus.FAILED if proc.returncode in (1,) else RunStatus.ERROR
@@ -247,6 +345,7 @@ def run_script(
         "finished_at": datetime.now().isoformat(),
         "base_url": target_url,
         "site": getattr(case, "site", "") or "",
+        "params": params_payload.get("values") or {},
         "screenshots": screenshots,
         "has_trace": trace.exists(),
         "attempts": attempts,
@@ -265,13 +364,17 @@ def _tail(text: str, limit: int = 3000) -> str:
     return text[-limit:] if len(text) > limit else text
 
 
-def record_run(case, env, result: dict) -> int:
-    """把执行结果写入 ui_runs（runner='script'）。"""
+def start_run(case, env) -> tuple[int, Path]:
+    """执行前先落一条 RUNNING 记录，返回 (run_id, 产物目录)。
+
+    先落库再执行，前端在执行记录里就能看到「执行中」并轮询日志；结束后回填终态。
+    """
     from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 
-    started = datetime.fromisoformat(result["started_at"])
-    finished = datetime.fromisoformat(result["finished_at"])
-    status = RunStatus(result.get("run_status") or "failed")
+    out_dir = paths.new_run_dir(int(case.project_id), int(case.id))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now()
+    db = get_automation_db()
     run = RunRecord(
         case_id=int(case.id),
         case_title=case.title or "",
@@ -281,23 +384,44 @@ def record_run(case, env, result: dict) -> int:
             "steps": list(case.steps or []),
             "expected": case.expected,
         },
-        status=status,
+        status=RunStatus.RUNNING,
         total_steps=0,
-        passed_steps=1 if status is RunStatus.PASSED else 0,
-        started_at=started,
-        finished_at=finished,
-        duration_ms=int(result.get("duration_ms") or 0),
+        passed_steps=0,
+        started_at=now,
+        finished_at=now,
+        duration_ms=0,
         steps=[],
-        base_url_used=result.get("base_url") or "",
+        base_url_used=site_url(env, getattr(case, "site", "") or "") if env else "",
         project_id=int(case.project_id),
-        error=result.get("error_message") or None,
+        error=None,
         runner="script",
         env_id=int(env.id) if env is not None else None,
         script_version=int(case.script_version or 0),
+        artifacts_rel_path=paths.to_rel(out_dir),
+        trace_rel_path="",
+    )
+    run_id = db.create_script_run(run)
+    db.update_case(int(case.id), last_run_id=run_id)
+    return run_id, out_dir
+
+
+def finish_run(run_id: int, case, result: dict) -> None:
+    """执行结束回填终态、耗时、错误与产物路径，并同步用例的最近错误。"""
+    from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+
+    db = get_automation_db()
+    status = RunStatus(result.get("run_status") or "failed")
+    finished = datetime.fromisoformat(result["finished_at"])
+    db.update_script_run(
+        run_id,
+        status=status,
+        finished_at=finished,
+        duration_ms=int(result.get("duration_ms") or 0),
+        error=result.get("error_message") or None,
         artifacts_rel_path=result.get("artifacts_rel_path") or "",
         trace_rel_path=result.get("trace_rel_path") or "",
+        base_url_used=result.get("base_url") or "",
     )
-    run_id = get_automation_db().create_script_run(run)
     fields = {"last_run_id": run_id}
     if status is not RunStatus.PASSED:
         fields["last_error_category"] = result.get("error_category")
@@ -306,5 +430,4 @@ def record_run(case, env, result: dict) -> int:
         # 最后一次执行通过后，不再展示历史脚本缺陷
         fields["last_error_category"] = None
         fields["last_error_message"] = ""
-    get_automation_db().update_case(int(case.id), **fields)
-    return run_id
+    db.update_case(int(case.id), **fields)

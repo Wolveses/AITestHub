@@ -27,6 +27,13 @@ class CaseStatus:
     RUNNING = "running"
 
 
+class UiFlowStatus:
+    """流程资产状态（active 可复用，archived 仅保留历史）。"""
+
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
 class GenerationKind:
     GENERATE = "generate"
     FIX = "fix"
@@ -84,6 +91,17 @@ class UiCase(MappedAsDataclass, Base, kw_only=True):
     # 端：frontend（根路径）/ backend（base_url + /manage），导入时按关键字推断，可手动改
     site: Mapped[str] = mapped_column(Text, default=Site.FRONTEND)
 
+    # 复用的流程资产（ui_flows.id）：同目录同流程用例共用一套脚本，按参数注入差异场景
+    flow_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # 生成时所用流程版本；流程升级后变旧，前端提示建议重新生成
+    flow_version: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # 本用例的参数值（{name: value}）与流程参数结构（[{name,label,type,...}]）
+    params_json: Mapped[dict] = mapped_column("params_json", JSON, default_factory=dict)
+    params_schema_json: Mapped[list] = mapped_column("params_schema_json", JSON, default_factory=list)
+    params_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, default=None
+    )
+
     status: Mapped[str] = mapped_column(Text, default=CaseStatus.NOT_IMPLEMENTED)
     script_rel_path: Mapped[str] = mapped_column(Text, default="")
     script_version: Mapped[int] = mapped_column(Integer, default=0)
@@ -94,6 +112,43 @@ class UiCase(MappedAsDataclass, Base, kw_only=True):
     last_generated_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, default=None
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+
+
+class UiFlow(MappedAsDataclass, Base, kw_only=True):
+    """流程资产：同目录同操作流程的用例共用一套流程脚本，差异走参数。
+
+    - ``folder_id``：用例库目录 id（kb_folder_id），目录改名不影响归属；
+    - ``flow_key``：流程标识（英文短名），与 folder_id 组合唯一；
+    - ``params_schema``：参数结构（name/label/type/required/default/unique/...）；
+    - ``script_rel_path``：流程脚本相对路径，脚本内以模块级 ``FLOW`` 字面量声明元数据。
+    """
+
+    __tablename__ = "ui_flows"
+    __table_args__ = (
+        UniqueConstraint("project_id", "folder_id", "flow_key", name="uq_ui_flows_scope"),
+        Index("idx_ui_flows_project", "project_id"),
+        Index("idx_ui_flows_folder", "folder_id"),
+    )
+
+    id: Mapped[int | None] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, default=None
+    )
+    project_id: Mapped[int] = mapped_column(Integer)
+    folder_id: Mapped[int] = mapped_column(Integer, default=0)
+    flow_key: Mapped[str] = mapped_column(Text, default="")
+    title: Mapped[str] = mapped_column(Text, default="")
+    route: Mapped[str] = mapped_column(Text, default="")
+    keywords: Mapped[list] = mapped_column("keywords_json", JSON, default_factory=list)
+    params_schema: Mapped[list] = mapped_column(
+        "params_schema_json", JSON, default_factory=list
+    )
+    # 流程脚本的 import 路径（flows.f_<folder_id>.<key>_v<version>）
+    module: Mapped[str] = mapped_column(Text, default="")
+    script_rel_path: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(Text, default=UiFlowStatus.ACTIVE)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
 
