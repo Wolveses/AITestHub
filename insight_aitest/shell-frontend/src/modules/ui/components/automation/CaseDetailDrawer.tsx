@@ -12,7 +12,7 @@ type ScriptPreview = { content: string; version: number; pages: { name: string; 
 
 export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; onClose: () => void }) {
   const { t } = useTranslation();
-  const { getCase, getScript, listRuns, listGenerations, updateCase, saveParams, generate, fix, cancelGenerate, run } = useAutomationStore();
+  const { getCase, getScript, listRuns, listGenerations, updateCase, generate, fix, cancelGenerate, run } = useAutomationStore();
   const [detail, setDetail] = useState<AutomationCase | null>(null);
   const [script, setScript] = useState<ScriptPreview>({ content: '', version: 0, pages: [] });
   const [runs, setRuns] = useState<ScriptRun[]>([]);
@@ -20,7 +20,6 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
   const [tab, setTab] = useState<Tab>('snapshot');
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ title: '', precondition: '', steps: '', expected: '' });
-  const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [preview, setPreview] = useState<{ url: string; label: string } | null>(null);
   const [openRunLog, setOpenRunLog] = useState<number | null>(null);
@@ -30,22 +29,11 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
   // 执行/生成记录里是否还有在跑的任务（决定是否继续轮询刷新列表与日志）
   const anyRunning = runs.some((r) => r.status === 'running') || gens.some((g) => g.status === 'running');
 
-  // 参数默认回填：本用例已填值优先，其次用生成时提取的默认值
-  const initParams = (c: AutomationCase) => {
-    const init: Record<string, string> = {};
-    for (const item of c.params_schema || []) {
-      const filled = c.params?.[item.name];
-      if (filled !== undefined && filled !== null) init[item.name] = String(filled);
-      else if (item.default !== undefined && item.default !== null) init[item.name] = String(item.default);
-      else init[item.name] = '';
-    }
-    setParamValues(init);
-  };
+  // 参数值为生成时实测固化的执行数据，面板只读展示，不再本地编辑
 
   const refresh = async (id: number) => {
     const c = await getCase(id);
     setDetail(c);
-    initParams(c);
     setForm({
       title: c.title,
       precondition: c.precondition,
@@ -141,43 +129,6 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
       });
       toast.success(t('ui.auto.caseSaved', '用例已保存，状态回到未实现'));
       setEditing(false);
-      await refresh(detail.id);
-    } catch (e) {
-      toast.error((e as Error).message);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const saveParamValues = async () => {
-    if (!detail) return;
-    // 只展示/保存与用例步骤相关的参数，其余控件由系统自动填充
-    const schema = (detail.params_schema || []).filter((item) => item.related !== false);
-    const missing = schema.filter((item) => item.required && !String(paramValues[item.name] ?? '').trim());
-    if (missing.length > 0) {
-      toast.error(
-        t('ui.auto.paramRequiredMissing', '必填参数不能为空：{{names}}', {
-          names: missing.map((item) => item.label || item.name).join('、'),
-        }),
-      );
-      return;
-    }
-    const values: Record<string, string | number | boolean> = {};
-    for (const item of schema) {
-      const raw = paramValues[item.name] ?? '';
-      if (item.type === 'int') {
-        const n = Number(raw);
-        values[item.name] = raw !== '' && Number.isFinite(n) ? n : raw;
-      } else if (item.type === 'bool') {
-        values[item.name] = raw === 'true';
-      } else {
-        values[item.name] = raw;
-      }
-    }
-    setSubmitting(true);
-    try {
-      await saveParams(detail.id, values);
-      toast.success(t('ui.auto.paramsSaved', '参数已保存，建议重新执行'));
       await refresh(detail.id);
     } catch (e) {
       toast.error((e as Error).message);
@@ -405,7 +356,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                 <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7 }}>
                   {t(
                     'ui.auto.paramsNoSchema',
-                    '该用例没有提取到参数。生成脚本时若在弹窗中操作过表单，系统会按实测控件自动生成参数，可在此查看并修改取值。',
+                    '该用例没有提取到参数。生成脚本时若在弹窗中操作过表单，系统会按实测控件自动生成参数，可在此查看。',
                   )}
                 </div>
               ) : (
@@ -413,7 +364,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
                     {t(
                       'ui.auto.paramsHint',
-                      '参数由生成时实测的弹窗控件自动提取，仅影响本用例下一次执行的注入值；唯一参数会自动追加运行时间后缀。',
+                      '参数取自生成时实际执行的输入值，只读展示，直接用于本用例执行；唯一参数会自动追加运行时间后缀。',
                     )}
                   </div>
                   <div style={{ overflowX: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
@@ -428,9 +379,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                       <span>{t('ui.auto.paramSource', '来源')}</span>
                     </div>
                     {paramSchema.map((item) => {
-                      const disabled = active || submitting;
-                      const value = paramValues[item.name] ?? '';
-                      const setValue = (next: string) => setParamValues((prev) => ({ ...prev, [item.name]: next }));
+                      const value = detail.params?.[item.name] ?? item.default ?? '';
                       return (
                         <div key={item.name} style={paramRowStyle}>
                           <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11 }} title={item.label}>
@@ -443,28 +392,15 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                           <span style={{ color: item.required ? 'var(--error)' : 'var(--text-muted)' }}>
                             {item.required ? t('ui.auto.yes', '是') : t('ui.auto.no', '否')}
                           </span>
-                          {item.type === 'bool' ? (
-                            <select value={value} onChange={(e) => setValue(e.target.value)} style={inputStyle} disabled={disabled}>
-                              <option value="">—</option>
-                              <option value="true">{t('ui.auto.boolTrue', '是')}</option>
-                              <option value="false">{t('ui.auto.boolFalse', '否')}</option>
-                            </select>
-                          ) : item.type === 'select' ? (
-                            <select value={value} onChange={(e) => setValue(e.target.value)} style={inputStyle} disabled={disabled}>
-                              <option value="">—</option>
-                              {(item.options || []).map((opt) => (
-                                <option key={opt} value={opt}>{opt}</option>
-                              ))}
-                            </select>
-                          ) : (
-                            <input
-                              type="text"
-                              value={value}
-                              onChange={(e) => setValue(e.target.value)}
-                              style={inputStyle}
-                              disabled={disabled}
-                            />
-                          )}
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={String(value ?? '')}>
+                            {item.type === 'bool'
+                              ? value === true || value === 'true'
+                                ? t('ui.auto.boolTrue', '是')
+                                : t('ui.auto.boolFalse', '否')
+                              : String(value ?? '') === ''
+                                ? '—'
+                                : String(value)}
+                          </span>
                           <span style={{ color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }} title={String(item.default ?? '')}>
                             {item.default === undefined || item.default === null || item.default === '' ? '—' : String(item.default)}
                           </span>
@@ -475,14 +411,6 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                         </div>
                       );
                     })}
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                    <Btn variant="primary" onClick={saveParamValues} disabled={active || submitting}>
-                      {t('ui.auto.save', '保存')}
-                    </Btn>
-                    <Btn onClick={() => initParams(detail)} disabled={active || submitting}>
-                      {t('ui.auto.paramReset', '重置')}
-                    </Btn>
                   </div>
                 </>
               )}

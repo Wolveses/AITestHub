@@ -756,6 +756,30 @@ def _merge_inventory(inventory: list[dict], items: list[dict]) -> bool:
     return changed
 
 
+def _refresh_inventory(inventory: list[dict], items: list[dict]) -> bool:
+    """用最新一次 DOM 实测刷新已有控件的当前值/勾选状态（不改清单结构）。
+
+    弹窗刚出现时表单还是空的，若那一刻取参数默认值会全部为空；模型探索时实际
+    填入的值才是本用例的执行数据，finish 前刷新一次即可对齐参数与真实输入。
+    """
+    existing = {(i.get("label"), i.get("type")): i for i in inventory}
+    changed = False
+    for item in items:
+        target = existing.get((item.get("label"), item.get("type")))
+        if target is None:
+            continue
+        for key in ("value", "checked"):
+            if key in item:
+                if target.get(key) != item[key]:
+                    target[key] = item[key]
+                    changed = True
+            elif key in target:
+                # 实测为空即清空：空值可能正是本用例要验证的点，不能沿用旧值
+                target.pop(key, None)
+                changed = True
+    return changed
+
+
 _PARAM_TYPE_MAP = {
     "select": "select",
     "checkbox": "bool",
@@ -982,7 +1006,9 @@ def _inventory_schema(inventory: list[dict], case_text: str = "") -> list[dict]:
             else:
                 default = _auto_value(label, kind, options, "") if required else ""
                 desc = "输入控件，" + ("必填，已由系统自动填写" if required else "非必填，留空")
-        if unique and not default:
+        # 只有「与本用例无关」的控件才补占位值；相关控件的空值是真实执行数据
+        # （例如「用户名称为空」用例），绝不能用 auto 覆盖
+        if unique and not related and not default:
             default = "auto@example.com" if ("邮箱" in raw_label or "email" in raw_label.lower()) else "auto"
         if not related:
             desc += "（未在用例步骤中提到，由系统自动处理）"
@@ -1910,6 +1936,14 @@ class GenerationJob:
                 pages_payload = args.get("pages")
                 patch_payload = args.get("patch") or args.get("patches")
 
+                # 参数取「本用例实际执行用到的值」：弹窗初期表单为空，这里用 finish 前的
+                # 真实 DOM 值刷新一次，避免参数面板显示空值/占位值而非模型实际输入
+                if not is_fix and raw_script.strip() and inventory:
+                    items_now, sig_now = _dump_controls(client)
+                    if items_now and (not inventory_sig or (sig_now and sig_now == inventory_sig)):
+                        if _refresh_inventory(inventory, items_now):
+                            self._write_log({"type": "controls", "items": inventory})
+
                 # 两阶段输出第一步：只提交资产（pages），回灌后再单独出 case.py，
                 # 避免一次 JSON 同时塞资产与脚本被输出上限截断。
                 if (
@@ -2443,6 +2477,8 @@ class GenerationJob:
                                 "禁止写死；参数名必须原样使用：\n"
                                 + _format_params(param_schema)
                                 + "\nunique=true 的参数由运行器自动追加运行时间后缀，不要自己再拼时间戳。"
+                                "系统会在 finish 时把弹窗当前真实值固化为参数（面板只读展示），"
+                                "因此探索阶段请按用例步骤真实填写（包括格式错误、为空等异常数据）。"
                                 "清单之外的控件不要凭空编造。"
                                 "下拉的真实可选值已由系统读好（面板未展开时也能读到），"
                                 "不要再自己点开下拉逐个读；弹窗内严禁按 Escape（实测会关闭整个弹窗）。"

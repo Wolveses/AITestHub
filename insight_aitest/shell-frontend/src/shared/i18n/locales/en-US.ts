@@ -1574,7 +1574,7 @@ export default {
         tabSnapshot: 'Case snapshot',
         tabParams: 'Params',
         paramsNoSchema: 'No params related to the case steps. If a form was used in a dialog during generation, params are derived from the observed controls and the case steps, while other controls are filled automatically.',
-        paramsHint: 'Only params related to the case steps are shown. Unrelated required controls get generated placeholders, optional ones stay empty. Changes only affect the next run of this case; unique params get a run-time suffix automatically.',
+        paramsHint: 'Only params related to the case steps are shown. Values are the actual inputs captured during generation (read-only) and are used directly when running this case; unique params get a run-time suffix automatically.',
         paramName: 'Param',
         paramDesc: 'Meaning',
         paramType: 'Type',
