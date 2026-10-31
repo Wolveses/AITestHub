@@ -450,17 +450,35 @@ def _chat(llm, messages: list[dict], **kwargs) -> str:
     finish 一轮要吐完整用例脚本（含 pages），模型默认输出上限常把 JSON 截断成非法内容。
     注意：只有端点明确拒绝 max_tokens 时才去掉参数重试；超时/限流等错误由 LLMClient
     内部重试处理，这里若整轮再来一遍会把「等模型响应」的时间直接翻倍。
+
+    空回复（LLMUnavailableError）是长上下文下的偶发抖动，直接判失败会让整轮生成作废；
+    这里收紧近期观察后原地重试 2 次，仍为空才抛出。
     """
     kwargs.setdefault("max_tokens", CHAT_MAX_TOKENS)
-    try:
-        return llm.chat(_trim_messages(messages), **kwargs)
-    except Exception as e:
-        msg = str(e).lower()
-        if "max_tokens" not in msg and "max output" not in msg:
+    dropped_max_tokens = False
+    empty_retries = 0
+    budget = MAX_PROMPT_CHARS
+    keep_recent = 8
+    while True:
+        try:
+            return llm.chat(
+                _trim_messages(messages, budget=budget, keep_recent=keep_recent), **kwargs
+            )
+        except Exception as e:
+            msg = str(e).lower()
+            if not dropped_max_tokens and ("max_tokens" in msg or "max output" in msg):
+                # 个别端点不接受 max_tokens 参数时退回默认预算
+                kwargs.pop("max_tokens", None)
+                dropped_max_tokens = True
+                continue
+            if "空回复" in msg and empty_retries < 2:
+                empty_retries += 1
+                time.sleep(empty_retries)
+                # 首次重试保留一半近期观察，第二次再压缩；上下文越短越不容易空回
+                budget = 10000
+                keep_recent = 4 if empty_retries == 1 else 3
+                continue
             raise
-        # 个别端点不接受 max_tokens 参数时退回默认预算
-        kwargs.pop("max_tokens", None)
-        return llm.chat(_trim_messages(messages), **kwargs)
 
 
 def _clean_script(text: str) -> str:
