@@ -97,6 +97,19 @@ def build_app() -> FastAPI:
             get_tc_db()
         except Exception as e:
             logger.warning(f"TestCase DB 预热提示: {e}")
+        # 工作区磁盘维护：清理过期 MCP 临时文件与 __pycache__（后台线程，不阻塞启动）
+        try:
+            import threading
+
+            from insight_aitest.modules.ui.backend.automation.maintenance import (
+                run_workspace_maintenance,
+            )
+
+            threading.Thread(
+                target=run_workspace_maintenance, daemon=True, name="ui-workspace-maintenance"
+            ).start()
+        except Exception as e:
+            logger.warning(f"UI 工作区维护提示: {e}")
         yield
         logger.info("Insight-AITest 平台关闭")
 

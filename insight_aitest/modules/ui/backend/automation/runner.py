@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -28,6 +29,9 @@ from insight_aitest.modules.ui.backend.automation.models import ErrorCategory
 from insight_aitest.modules.ui.backend.persistence.models import RunRecord, RunStatus
 
 logger = logging.getLogger(__name__)
+
+# 每个用例保留的执行记录/产物目录数（超出即删除，避免高频执行撑爆磁盘）
+RUN_RETAIN = 15
 
 DEFAULT_TIMEOUT_SEC = 600
 
@@ -402,7 +406,45 @@ def start_run(case, env) -> tuple[int, Path]:
     )
     run_id = db.create_script_run(run)
     db.update_case(int(case.id), last_run_id=run_id)
+    # 产物清理：trace 只留本次，执行目录与执行记录按用例只留最近 RUN_RETAIN 次
+    _prune_history(db, int(case.id), keep_run_id=run_id, current_dir=out_dir)
     return run_id, out_dir
+
+
+def _prune_history(db, case_id: int, keep_run_id: int, current_dir: Path) -> None:
+    """按用例裁剪历史产物，避免执行次数增长导致磁盘无上限。
+
+    1. trace.zip 体积大，只保留本次执行的 trace，其余删除并清空引用；
+    2. 执行目录与 ui_runs 记录只保留最近 ``RUN_RETAIN`` 次（含本次）；
+    3. 生成期首跑留下的 ``validate/trace.zip`` 随所属目录整体淘汰。
+    """
+    runs = db.list_script_runs(case_id, limit=1000)
+    for run in runs[RUN_RETAIN:]:
+        rel_dir = run.get("artifacts_rel_path") or ""
+        if rel_dir:
+            try:
+                d = paths.resolve_rel(rel_dir)
+                if d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+            except OSError:
+                pass
+    db.delete_script_runs([int(r["id"]) for r in runs[RUN_RETAIN:]])
+    for run in runs[:RUN_RETAIN]:
+        if int(run["id"]) == keep_run_id:
+            continue
+        rel = run.get("trace_rel_path") or ""
+        if not rel:
+            continue
+        try:
+            trace = paths.resolve_rel(rel)
+            if trace.exists():
+                trace.unlink()
+        except OSError:
+            pass
+        db.update_script_run(int(run["id"]), trace_rel_path="")
+    run_dirs = sorted((d for d in current_dir.parent.iterdir() if d.is_dir()), key=lambda d: d.name)
+    for d in run_dirs[:-RUN_RETAIN]:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def finish_run(run_id: int, case, result: dict) -> None:

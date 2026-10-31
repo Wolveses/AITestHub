@@ -373,6 +373,22 @@ class UIAutomationDatabase:
             for key, value in fields.items():
                 setattr(run, key, value)
 
+    def delete_script_runs(self, run_ids: list[int]) -> int:
+        """删除执行记录（历史裁剪用；调用方需先清理对应产物目录）。"""
+        if not run_ids:
+            return 0
+        with session_scope(self.db_path) as s:
+            rows = s.execute(
+                select(RunRecord).where(
+                    RunRecord.id.in_(run_ids), RunRecord.runner == "script"
+                )
+            ).scalars()
+            deleted = 0
+            for row in rows:
+                s.delete(row)
+                deleted += 1
+            return deleted
+
     @staticmethod
     def _run_dict(r: RunRecord) -> dict:
         return {
