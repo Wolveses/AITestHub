@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""AI 自动化脚本数据模型（ui_cases / ui_envs / ui_generations）。
+"""AI 自动化脚本数据模型（ui_cases / ui_envs / ui_generations / ui_lessons）。
 
 与旧 Midscene 表同库（ui.db），互不干扰：
 - ui_cases：从知识库用例文档导入的自动化用例资产（快照式，后续不随源同步）；
 - ui_envs：环境配置（主机地址 + 登录接口 + token 注入方式），密码不落库；
-- ui_generations：每次生成/修复的尝试记录（含失败分类与工具日志路径）。
+- ui_generations：每次生成/修复的尝试记录（含失败分类、工具日志路径与 token 消耗指标）；
+- ui_lessons：反面样本（错题库），把失败日志/踩坑/解决方案沉淀为可注入的片段。
 """
 
 from __future__ import annotations
@@ -153,5 +154,35 @@ class UiGeneration(MappedAsDataclass, Base, kw_only=True):
     log_rel_path: Mapped[str] = mapped_column(Text, default="")
     model: Mapped[str] = mapped_column(Text, default="")
     tool_calls: Mapped[int] = mapped_column(Integer, default=0)
+    # 可观测指标：语料命中字符、发送给模型的字符、模型回复字符、失败修复轮次
+    corpus_chars: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_chars: Mapped[int] = mapped_column(Integer, default=0)
+    completion_chars: Mapped[int] = mapped_column(Integer, default=0)
+    fix_rounds: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+
+
+class UiLesson(MappedAsDataclass, Base, kw_only=True):
+    """反面样本（错题库）：失败日志 / 踩过的坑 / 解决方案。
+
+    体积约束由 lessons.py 负责：单条截断、每项目限量、注入 top N 且总量封顶。
+    """
+
+    __tablename__ = "ui_lessons"
+    __table_args__ = (
+        UniqueConstraint("project_id", "fingerprint", name="uq_ui_lessons_fp"),
+        Index("idx_ui_lessons_project", "project_id"),
+    )
+
+    id: Mapped[int | None] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, default=None
+    )
+    project_id: Mapped[int] = mapped_column(Integer)
+    fingerprint: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(Text, default="")
+    title: Mapped[str] = mapped_column(Text, default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)

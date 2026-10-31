@@ -24,7 +24,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from insight_aitest.modules.ui.backend.automation import concurrency, corpus, paths
+from insight_aitest.modules.ui.backend.automation import concurrency, corpus, lessons, paths
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 from insight_aitest.modules.ui.backend.automation.env_service import prepare_auth, site_url
 from insight_aitest.modules.ui.backend.automation.models import (
@@ -38,7 +38,10 @@ from insight_aitest.modules.ui.backend.automation.runner import EnvMissingError,
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_CALLS = 60
+# 模型自己发起的探索调用上限：到量即强制 finish，避免无限确认烧 token
+MAX_MODEL_CALLS = 20
+# 含自动补快照/控件枚举/页面事实预取的绝对上限，防自动重试失控
+MAX_TOOL_CALLS = 40
 MAX_SECONDS = 12 * 60
 MAX_FIX_ROUNDS = 3
 # 至少完成 6 次真实浏览器操作才允许首次产出脚本，避免只凭首页快照猜步骤
@@ -136,13 +139,57 @@ CONTROL_INVENTORY_JS = """() => {
   return { sig: (root.textContent || '').trim().slice(0, 60), items };
 }"""
 
+# 确定性预取：直连页面读表格表头/菜单项/字段/按钮文案，零模型 token。
+# 这些正是模型最容易瞎猜的部分（用例文案与真实按钮名经常不一致）。
+PAGE_FACTS_JS = """() => {
+  const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+  const cut = (s) => clean(s).slice(0, 40);
+  const labelOf = (el) => {
+    const near = el.closest('label');
+    if (near) {
+      const text = cut(near.textContent);
+      if (text) return text;
+    }
+    const aria = el.getAttribute('aria-label');
+    if (aria && aria.trim()) return cut(aria);
+    return cut(el.getAttribute('placeholder') || el.getAttribute('name') || el.id || '');
+  };
+  const root = document.querySelector('[role=dialog]');
+  const scope = root || document.body;
+  const fields = [];
+  scope.querySelectorAll('input, textarea, select, [role=combobox]').forEach((el) => {
+    const type = (el.tagName === 'SELECT' || el.getAttribute('role') === 'combobox') ? 'select' : (el.type || 'text');
+    if (['button', 'submit', 'reset', 'file', 'hidden'].includes(type)) return;
+    const label = labelOf(el);
+    if (label) fields.push(label);
+  });
+  const buttons = [];
+  document.querySelectorAll('button, [role=button], input[type=submit]').forEach((el) => {
+    const text = cut(el.textContent) || cut(el.value);
+    if (text) buttons.push(text);
+  });
+  return {
+    url: (location.href || '').slice(0, 160),
+    menus: Array.from(document.querySelectorAll('[role=menuitem], .ui-menu-item, nav a')).map((el) => cut(el.textContent)).filter(Boolean).slice(0, 20),
+    headers: Array.from(document.querySelectorAll('table thead th')).map((el) => cut(el.textContent)).filter(Boolean).slice(0, 20),
+    buttons: buttons.slice(0, 20),
+    fields: fields.slice(0, 20),
+  };
+}"""
+
 SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通过浏览器工具真实探索被测系统，然后写出可直接运行的 Python pytest 自动化脚本。
 
 交互协议（严格执行）：
 - 每次只输出一个 JSON 对象，不要输出 Markdown 代码块、不要输出多余文字。
 - 探索阶段：{"thought": "查看当前页面结构", "tool": "browser_snapshot", "args": {}}
   （tool 必须是下面「可用工具」清单里的真实工具名；不要把示例文字原样抄回来）
-- 完成阶段：{"thought": "脚本已就绪", "tool": "finish", "args": {"script": "完整 Python 源码", "pages": [...]}}
+- 完成阶段（两阶段输出，避免单次 JSON 被截断）：
+  1) 需要新增/更新资产时，先只提交资产：{"thought": "先落地资产", "tool": "finish", "args": {"pages": [...]}}
+  2) 收到「资产已接受」后，只提交脚本：{"thought": "脚本已就绪", "tool": "finish", "args": {"script": "完整 Python 源码"}}
+  脚本不引用新资产时，可一步提交 {"script": "...", "pages": [...]}。
+- 修复阶段（首跑失败后）：优先输出最小补丁
+  {"thought": "按报错改这一处", "tool": "finish", "args": {"patch": [{"find": "脚本中唯一出现的原文", "replace": "替换后的代码"}]}}
+  find 必须在脚本里唯一命中；补丁无法表达改动时才输出完整 script。
 
 脚本硬性要求：
 1. 同步 API：from playwright.sync_api import expect；禁止 async/await。
@@ -238,18 +285,19 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     - 禁止 import os/sys/subprocess/pathlib/shutil/requests 等，禁止读取配置文件与环境凭证
     - 禁止调用 open/eval/exec/compile/getattr/setattr
     - 上传样例文件用 data_path("文件名")；产物落盘用 artifact_path("文件名")
-30. 「同目录参考脚本」是本项目同目录下已被验证通过的脚本：先用它们确认页面路由、定位写法
-    与断言风格，能直接沿用的直接沿用（同样的页面对象、common 函数、表格断言），减少重复探索。
-    但参考脚本只是历史经验，与当前用例步骤冲突时一律以当前用例与真实快照为准，
-    不要照抄参考脚本里的业务数据、固定账号或断言文案。
+30. 「参考片段」是本项目同目录下已通过首跑脚本里的动作级代码（跳转/点击/输入/断言等）：
+    先用它们确认页面路由、定位写法与断言风格，能直接沿用的直接沿用（同样的页面对象、
+    common 函数、表格断言），减少重复探索。片段只是历史经验，与当前用例步骤冲突时
+    一律以当前用例与真实快照为准，不要照抄片段里的业务数据、固定账号或断言文案。
     按钮/文案以浏览器快照里真实出现的文本为准（用例步骤写「保存」时，界面按钮可能叫「确定」），
     不要照抄用例描述里的字面文案。
 31. 表单校验失败（控制台报错或字段下方出现红色提示）时，必须**在当前弹窗内直接修改该字段**，
     不要点取消/关闭再重新打开弹窗；提示里给出格式限制（如「6-32位字符，仅支持大小写字母、数字、中文、邮箱」）
     时，换成符合该限制的唯一值（例如 user + 时间戳，不要带下划线/符号），严禁重复提交同一非法值。
     同一步骤连续 2 次失败说明策略错了，换定位方式或换数据，不要原地重试。
-32. 工具调用有硬预算（60 次，含自动补快照），用尽即判定本次生成失败。
-    操作到「预期结果」并拿到关键选择器后就应立即 finish，不要为了再确认一遍而反复快照。
+32. 工具调用有硬预算（14 次，系统另会自动补快照/枚举控件，不占你的预算）。
+    操作到「预期结果」并拿到关键选择器（路由 + 定位 + 断言点）后就应立即 finish，
+    不要为了再确认一遍而反复快照；预算用尽时系统会强制你直接输出 finish。
 33. ref 只能来自最近一次 browser_snapshot / browser_find 的输出。快照被截断看不到目标按钮时，
     用 browser_find(text="新增") 或再 browser_snapshot 取真实 ref，**禁止猜测或凭记忆写 e125
     这类 ref**（不存在的 ref 会被直接拒绝，反复猜会耗尽预算）。
@@ -261,6 +309,8 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
 35. 页面对象是普通类：必须 `UsersPage(page).open(dept=...)` 这样实例化后调用（方法签名里
     没有 self）；不要写成 `UsersPage.open(page, ...)`。pages/ 下已存在的文件禁止覆盖，
     提交会被拒绝；需要新能力时新建文件，或直接复用已有方法签名。
+36. 「反面样本」是本项目历史失败的错题库（失败日志 + 踩过的坑 + 已验证的解决方案）：
+    写脚本前先看，避免重复踩同样的坑；样本与当前页面事实冲突时以实测为准。
 """
 
 
@@ -356,7 +406,9 @@ def _parse_json_reply(content: str) -> dict | None:
             pass
         start = raw.find("{", start + 1)
     for obj in found:
-        if isinstance(obj.get("tool"), str) or "script" in obj:
+        if isinstance(obj.get("tool"), str) or any(
+            k in obj for k in ("script", "pages", "patch", "patches")
+        ):
             return obj
     # 没有一个像真实回复：说明整段 JSON 被截断（通常是输出长度打满），
     # 不要退化成脚本里的碎片对象，否则会被误判成「工具名无效」
@@ -653,6 +705,78 @@ def _merge_inventory(inventory: list[dict], items: list[dict]) -> bool:
     return changed
 
 
+PAGE_FACTS_LIMIT = 1200
+
+
+def _dump_page_facts(client) -> str:
+    """直连页面读取表格表头/菜单/字段/按钮文案（零模型 token）。
+
+    返回给模型看的紧凑文本；读失败返回空串，不影响主链路。
+    """
+    try:
+        text, is_error = client.call_tool(
+            "browser_evaluate", {"function": PAGE_FACTS_JS}, timeout=40
+        )
+    except Exception:  # noqa: BLE001 - 预取失败不影响主链路
+        return ""
+    if is_error or not text:
+        return ""
+    start = text.find("{")
+    if start < 0:
+        return ""
+    try:
+        data, _ = json.JSONDecoder(strict=False).raw_decode(text[start:])
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+
+    lines: list[str] = []
+    url = str(data.get("url") or "").strip()
+    if url:
+        lines.append(f"当前地址：{url}")
+    for key, title in (
+        ("menus", "菜单项"),
+        ("headers", "表格表头"),
+        ("buttons", "按钮文案"),
+        ("fields", "表单字段"),
+    ):
+        values = data.get(key)
+        if isinstance(values, list) and values:
+            lines.append(f"{title}：" + "、".join(str(v) for v in values if str(v).strip()))
+    return _truncate("\n".join(lines), PAGE_FACTS_LIMIT)
+
+
+def _apply_patches(source: str, payload) -> tuple[str, str]:
+    """按 find/replace 应用最小补丁；任一段找不到或不唯一即整体失败。
+
+    返回 ``(新源码, 错误信息)``；错误信息为空表示补丁成功。
+    """
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list) or not payload:
+        return source, "patch 必须是非空数组：[{\"find\": \"...\", \"replace\": \"...\"}]"
+    if len(payload) > 12:
+        return source, "单次补丁最多 12 段，请拆成更小的改动"
+    result = source
+    for index, item in enumerate(payload, 1):
+        if not isinstance(item, dict):
+            return source, f"第 {index} 段补丁不是对象"
+        find = item.get("find")
+        replace = item.get("replace")
+        if not isinstance(find, str) or not find:
+            return source, f"第 {index} 段补丁缺少 find"
+        if not isinstance(replace, str):
+            replace = "" if replace is None else str(replace)
+        count = result.count(find)
+        if count == 0:
+            return source, f"第 {index} 段补丁的 find 在脚本中不存在（可能上一段补丁已改动这段代码）"
+        if count > 1:
+            return source, f"第 {index} 段补丁的 find 命中 {count} 处，请补充上下文保证唯一"
+        result = result.replace(find, replace, 1)
+    return result, ""
+
+
 def _case_brief(case) -> str:
     steps = "\n".join(f"{i}. {s}" for i, s in enumerate(case.steps or [], 1)) or "（无）"
     return (
@@ -742,16 +866,23 @@ def _copy_assets(src: Path, dst: Path) -> None:
         init.write_text("# -*- coding: utf-8 -*-\n", encoding="utf-8")
 
 
-def _prepare_staging(project_id: int, case_id: int) -> Path:
-    """重建暂存目录：正式 common/pages 的副本，首跑用它（已验证才并入正式目录）。"""
+def _prepare_staging(project_id: int, case_id: int, reuse: bool = False) -> Path:
+    """重建暂存目录：正式 common/pages 的副本，首跑用它（已验证才并入正式目录）。
+
+    reuse=True 用于两阶段输出：第一步已暂存资产，第二步在此基础上继续追加。
+    """
     staging = paths.staging_root(project_id, case_id)
+    if reuse and (staging / "common").exists():
+        return staging
     shutil.rmtree(staging, ignore_errors=True)
     for package in ASSET_DIRS:
         _copy_assets(_asset_root(project_id, package), staging / package)
     return staging
 
 
-def stage_pages(project_id: int, case_id: int, payload) -> tuple[str, Path | None]:
+def stage_pages(
+    project_id: int, case_id: int, payload, reuse_staging: bool = False
+) -> tuple[str, Path | None]:
     """校验资产提交并写入生成期暂存目录，返回 (错误信息, 暂存根目录)。
 
     暂存目录是正式 common/ + pages/ 的副本，首跑用它，
@@ -763,7 +894,7 @@ def stage_pages(project_id: int, case_id: int, payload) -> tuple[str, Path | Non
     """
     if not isinstance(payload, list) or not payload:
         return "", None
-    staging = _prepare_staging(project_id, case_id)
+    staging = _prepare_staging(project_id, case_id, reuse=reuse_staging)
 
     for item in payload:
         if not isinstance(item, dict):
@@ -834,7 +965,17 @@ class GenerationJob:
         self.gen_id = 0
         self.started = time.time()
         self.tool_calls = 0
+        # 模型自己发起的调用（不含自动补快照/控件枚举），用于探索预算约束
+        self.model_calls = 0
         self.model_name = ""
+        # 可观测指标：语料命中字符、输入/输出字符、修复轮次
+        self.corpus_chars = 0
+        self.prompt_chars = 0
+        self.completion_chars = 0
+        self.fix_rounds = 0
+        # 首次失败快照与采用的修复方式，成功时沉淀「踩坑 + 解决方案」样本
+        self.first_failure = ""
+        self.fix_mode = ""
         self._log = None
         self._staged_pages: Path | None = None
 
@@ -985,12 +1126,20 @@ class GenerationJob:
             "可用工具：\n" + catalog,
             "用例信息：\n" + _case_brief(case),
         ]
-        corpus_text = corpus.reference_scripts(case, self.db)
+        corpus_text = corpus.reference_snippets(case, self.db)
         if corpus_text:
             user_parts.append(
-                "同目录参考脚本（同项目同目录下已通过首跑的脚本，优先沿用其中的路由、定位与断言写法）：\n"
+                "同目录参考片段（同项目同目录下已通过首跑的脚本动作片段，优先沿用其中的路由、定位与断言写法）：\n"
                 + corpus_text
             )
+        lesson_text = lessons.relevant_lessons(case, self.db)
+        if lesson_text:
+            user_parts.append(
+                "反面样本（本项目历史失败的错题库，含踩过的坑与已验证的解决方案，"
+                "写脚本前先看，避免重复踩坑）：\n"
+                + lesson_text
+            )
+        self.corpus_chars = len(corpus_text) + len(lesson_text)
         if not is_fix:
             user_parts.append(
                 "弹窗打开后，系统会自动用 browser_evaluate 枚举其中的可编辑控件并以"
@@ -1020,6 +1169,29 @@ class GenerationJob:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": "\n\n".join(user_parts)},
         ]
+
+        # 确定性预取：直连页面读真实文案（表格表头/菜单/字段/按钮），零模型 token。
+        # 最多 3 次（首屏 + 弹窗），内容不变不重复注入。
+        facts_state = {"sig": "", "count": 0}
+
+        def push_facts(prefix: str = "") -> None:
+            if facts_state["count"] >= 3:
+                return
+            facts_state["count"] += 1
+            text = _dump_page_facts(client)
+            if not text or text == facts_state["sig"]:
+                return
+            facts_state["sig"] = text
+            self._write_log({"type": "page_facts", "text": text})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"【页面实测事实{prefix}】系统已直连页面读取以下真实文案，"
+                        "不需要再为确认按钮/菜单/表头而反复快照：\n" + text
+                    ),
+                }
+            )
 
         # 先自动打开目标页面并回灌快照：模型拿到真实 ref 后才不会拿 Playwright 表达式/中文描述当 target
         snap = ""
@@ -1067,10 +1239,16 @@ class GenerationJob:
         except Exception as e:
             self._write_log({"type": "auto_open_error", "error": f"{type(e).__name__}: {e}"})
 
+        push_facts("（首屏）")
+
         rounds = 0
         bad_json = 0
         early_finish = 0
         pages_rounds = 0
+        last_source = ""
+        budget_notice = False
+        finish_nudged = False
+        locators_seen = 0
         recent_calls: list[tuple[str, str]] = []
         bad_targets: dict[str, int] = {}
         unknown_replies: dict[str, int] = {}
@@ -1095,6 +1273,20 @@ class GenerationJob:
                     "error_category": ErrorCategory.MODEL,
                     "message": f"工具调用次数超过 {MAX_TOOL_CALLS} 次上限，已终止",
                 }
+            if self.model_calls > MAX_MODEL_CALLS and not budget_notice:
+                budget_notice = True
+                self._write_log({"type": "budget_exhausted", "model_calls": self.model_calls})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"探索预算已用尽（你已发起 {self.model_calls} 次工具调用，上限 {MAX_MODEL_CALLS}）。"
+                            "不要再调用任何浏览器工具，立即基于已确认的页面事实输出 finish JSON："
+                            '{"thought": "脚本已就绪", "tool": "finish", "args": {"script": "完整脚本"}}'
+                            "（若第一步已提交资产，则只提交 script）。"
+                        ),
+                    }
+                )
 
             concurrency.set_progress(self.case_id, "模型思考", f"已调用工具 {self.tool_calls} 次")
             try:
@@ -1114,6 +1306,11 @@ class GenerationJob:
                     "error_category": ErrorCategory.MODEL,
                     "message": f"模型调用失败：{type(e).__name__}: {e}",
                 }
+            # 指标：按实际发送（裁剪后）与模型回复估算字符消耗
+            self.prompt_chars += sum(
+                len(str(m.get("content") or "")) for m in _trim_messages(messages)
+            )
+            self.completion_chars += len(reply or "")
 
             parsed = _parse_json_reply(reply)
             if parsed is None:
@@ -1143,8 +1340,8 @@ class GenerationJob:
             args = parsed.get("args") or {}
             if not isinstance(args, dict):
                 args = {}
-            # 模型常省略 thought/tool，直接给出 finish 内容（script/pages）：按 finish 处理
-            if not raw_tool and any(k in parsed for k in ("script", "pages")):
+            # 模型常省略 thought/tool，直接给出 finish 内容（script/pages/patch）：按 finish 处理
+            if not raw_tool and any(k in parsed for k in ("script", "pages", "patch", "patches")):
                 raw_tool = "finish"
                 args = parsed
             elif not raw_tool and "script" in args:
@@ -1158,13 +1355,20 @@ class GenerationJob:
                     self._write_log({"type": "tool_alias", "from": raw_tool, "to": fixed})
                     tool = fixed
             self._write_log({"type": "assistant", "thought": thought, "tool": tool, "args": args})
+            if budget_notice and tool != "finish":
+                return {
+                    "status": GenerationStatus.FAILED,
+                    "error_category": ErrorCategory.MODEL,
+                    "message": f"探索预算用尽（{MAX_MODEL_CALLS} 次）后仍未产出脚本，已终止以节省配额",
+                }
 
             if tool in ("browser_close", "browser_kill"):
                 # 浏览器/标签页由脚手架管理：关闭后没有标签页，模型会陷入「反复 close」空转
                 blocked_closes += 1
                 self.tool_calls += 1
+                self.model_calls += 1
                 self._write_log({"type": "blocked_tool", "tool": tool})
-                if blocked_closes >= 3 or self.tool_calls > MAX_TOOL_CALLS:
+                if blocked_closes >= 3 or self.model_calls > MAX_MODEL_CALLS:
                     return {
                         "status": GenerationStatus.FAILED,
                         "error_category": ErrorCategory.MODEL,
@@ -1185,11 +1389,12 @@ class GenerationJob:
             if tool != "finish" and tool not in known_tools:
                 # 未知/空/被禁用工具名不能送 MCP（会报 Tool "" not found），提示按协议重来
                 self.tool_calls += 1
-                if self.tool_calls > MAX_TOOL_CALLS:
+                self.model_calls += 1
+                if self.model_calls > MAX_MODEL_CALLS:
                     return {
                         "status": GenerationStatus.FAILED,
                         "error_category": ErrorCategory.MODEL,
-                        "message": f"工具调用次数超过 {MAX_TOOL_CALLS} 次上限，已终止",
+                        "message": f"探索预算用尽（{MAX_MODEL_CALLS} 次）仍未给出有效工具名，已终止",
                     }
                 self._write_log({"type": "unknown_tool", "tool": tool, "reply": _truncate(reply, 800)})
                 sig = (reply or "").strip()[:400]
@@ -1235,12 +1440,125 @@ class GenerationJob:
                         }
                     )
                     continue
-                source = _clean_script(str(args.get("script") or ""))
+                raw_script = str(args.get("script") or "")
+                pages_payload = args.get("pages")
+                patch_payload = args.get("patch") or args.get("patches")
+
+                # 两阶段输出第一步：只提交资产（pages），回灌后再单独出 case.py，
+                # 避免一次 JSON 同时塞资产与脚本被输出上限截断。
+                if (
+                    not raw_script.strip()
+                    and isinstance(pages_payload, list)
+                    and pages_payload
+                    and not patch_payload
+                    and not last_source
+                ):
+                    # 资产阶段本身也计入轮次，防止模型反复只交 pages 空转
+                    pages_rounds += 1
+                    if pages_rounds > MAX_FIX_ROUNDS:
+                        return {
+                            "status": GenerationStatus.FAILED,
+                            "error_category": ErrorCategory.SCRIPT,
+                            "message": "模型反复提交资产而不输出脚本，已终止",
+                        }
+                    if self._staged_pages is not None:
+                        messages.append({"role": "assistant", "content": reply})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "资产已经暂存好了。请直接输出 case.py 脚本："
+                                    '{"thought": "脚本已就绪", "tool": "finish", "args": {"script": "完整 Python 源码"}}。'
+                                ),
+                            }
+                        )
+                        continue
+                    pages_problem, staged = stage_pages(
+                        int(self.case.project_id), int(self.case.id), pages_payload
+                    )
+                    if pages_problem:
+                        self._write_log({"type": "pages_invalid", "message": pages_problem})
+                        if pages_rounds > MAX_FIX_ROUNDS:
+                            discard_pages(staged)
+                            return {
+                                "status": GenerationStatus.FAILED,
+                                "error_category": ErrorCategory.SCRIPT,
+                                "message": f"资产写入失败：{pages_problem}",
+                            }
+                        messages.append({"role": "assistant", "content": reply})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": f"资产未通过校验：{pages_problem}\n请修正后只提交 pages 数组。",
+                            }
+                        )
+                        continue
+                    self._staged_pages = staged
+                    self._write_log({"type": "pages_staged", "count": len(pages_payload)})
+                    messages.append({"role": "assistant", "content": reply})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "【资产已接受】系统已校验并暂存 pages/common 文件。"
+                                "现在不要再探索，只输出 case.py 脚本："
+                                '{"thought": "脚本已就绪", "tool": "finish", "args": {"script": "完整 Python 源码"}}。'
+                                "脚本可直接 import 刚提交的资产。"
+                            ),
+                        }
+                    )
+                    continue
+
+                # 首跑失败后优先走最小补丁：只回 find/replace，应用失败再退回整份重写
+                if patch_payload:
+                    if not last_source:
+                        messages.append({"role": "assistant", "content": reply})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "当前还没有可打补丁的脚本版本，请直接输出完整 finish JSON："
+                                    '{"tool": "finish", "args": {"script": "完整脚本"}}。'
+                                ),
+                            }
+                        )
+                        continue
+                    source, patch_problem = _apply_patches(last_source, patch_payload)
+                    if patch_problem:
+                        rounds += 1
+                        self.fix_rounds += 1
+                        self._write_log({"type": "patch_invalid", "message": patch_problem})
+                        if rounds > MAX_FIX_ROUNDS:
+                            return {
+                                "status": GenerationStatus.FAILED,
+                                "error_category": ErrorCategory.SCRIPT,
+                                "message": f"补丁无法应用到脚本：{patch_problem}",
+                            }
+                        messages.append({"role": "assistant", "content": reply})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"补丁未应用：{patch_problem}\n"
+                                    "请重新给出在脚本中唯一命中的 find 片段；"
+                                    "若改动无法用补丁表达，直接输出完整 script。"
+                                ),
+                            }
+                        )
+                        continue
+                    self.fix_mode = "patch"
+                    self._write_log({"type": "patch_applied", "count": len(patch_payload)})
+                else:
+                    source = _clean_script(raw_script)
+                    if self.fix_rounds:
+                        self.fix_mode = "rewrite"
+
                 problem = _check_script(source)
                 if not problem:
                     problem = _compile(source)
                 if problem:
                     rounds += 1
+                    self.fix_rounds += 1
                     self._write_log({"type": "script_invalid", "message": problem})
                     if rounds > MAX_FIX_ROUNDS:
                         return {
@@ -1252,13 +1570,21 @@ class GenerationJob:
                     messages.append(
                         {
                             "role": "user",
-                            "content": f"脚本未通过校验：{problem}\n请修正后重新输出 finish JSON（完整脚本）。",
+                            "content": (
+                                f"脚本未通过校验：{problem}\n"
+                                "请优先输出最小补丁"
+                                '{"tool": "finish", "args": {"patch": [{"find": "唯一命中的原文", "replace": "改后代码"}]}}；'
+                                "补丁无法表达时才输出完整 script。"
+                            ),
                         }
                     )
                     continue
 
                 pages_problem, staged = stage_pages(
-                    int(self.case.project_id), int(self.case.id), args.get("pages")
+                    int(self.case.project_id),
+                    int(self.case.id),
+                    pages_payload,
+                    reuse_staging=self._staged_pages is not None,
                 )
                 if pages_problem:
                     pages_rounds += 1
@@ -1281,12 +1607,13 @@ class GenerationJob:
                         }
                     )
                     continue
-                self._staged_pages = staged
                 if staged is not None:
+                    self._staged_pages = staged
                     self._write_log(
-                        {"type": "pages_staged", "count": len(args.get("pages") or [])}
+                        {"type": "pages_staged", "count": len(pages_payload or [])}
                     )
 
+                last_source = source
                 concurrency.set_progress(self.case_id, "首跑验证", "本地执行脚本验证")
                 # 首跑用暂存资产，通过后才并入正式目录
                 result = self._validate(source, auth, pages_root=self._staged_pages)
@@ -1304,6 +1631,10 @@ class GenerationJob:
                     return self._solidify(source, ok=True)
 
                 rounds += 1
+                self.fix_rounds += 1
+                failure_text = result.get("error_message") or ""
+                if not self.first_failure:
+                    self.first_failure = failure_text
                 if rounds > MAX_FIX_ROUNDS:
                     discard_pages(self._staged_pages)
                     self._staged_pages = None
@@ -1317,7 +1648,6 @@ class GenerationJob:
                         "message": "脚本首跑未通过：" + (result.get("error_message") or "未知错误"),
                         "script_saved": bool(is_fix),
                     }
-                failure_text = result.get("error_message") or ""
                 code_error = any(
                     k in failure_text
                     for k in (
@@ -1337,12 +1667,14 @@ class GenerationJob:
                         "content": (
                             "脚本已写入但本地首跑失败。"
                             + (
-                                "这是纯代码/API 用法错误，不需要重新探索页面：直接按报错修脚本，"
-                                "再输出完整 finish JSON。\n"
+                                "这是纯代码/API 用法错误，不需要重新探索页面：直接按报错打补丁。\n"
                                 if code_error
-                                else "可以先回看快照确认真实按钮文案与字段，再修复脚本并输出完整 finish JSON。\n"
+                                else "可以先回看快照确认真实按钮文案与字段，再打补丁。\n"
                             )
-                            + "提示：按钮文案必须与快照里实际出现的文本一致（用例写「保存」，界面可能是「确定」）；"
+                            + "请优先输出最小补丁"
+                            '{"tool": "finish", "args": {"patch": [{"find": "脚本中唯一命中的原文", "replace": "改后代码"}]}}；'
+                            "补丁无法表达时才输出完整 script。\n"
+                            "提示：按钮文案必须与快照里实际出现的文本一致（用例写「保存」，界面可能是「确定」）；"
                             "element(s) not found 多半是可访问名带图标字符，去掉 exact=True 改用子串匹配；"
                             "get_by_label 超时说明 label 未关联 input；get_by_role(\"textbox\") 序号错位或命中 disabled 密码框时，"
                             "先用 browser_evaluate 枚举 [role=dialog] input 的 type/placeholder/disabled，再按 placeholder 等属性定位；"
@@ -1357,6 +1689,7 @@ class GenerationJob:
 
             # 工具调用
             self.tool_calls += 1
+            self.model_calls += 1
             concurrency.set_progress(
                 self.case_id, "浏览器探索", f"{tool}（第 {self.tool_calls} 次）"
             )
@@ -1385,11 +1718,12 @@ class GenerationJob:
             if invalid_target:
                 # 表达式不是 MCP 的 target，直接纠正，不浪费一次浏览器调用
                 self.tool_calls += 1
-                if self.tool_calls > MAX_TOOL_CALLS:
+                self.model_calls += 1
+                if self.model_calls > MAX_MODEL_CALLS:
                     return {
                         "status": GenerationStatus.FAILED,
                         "error_category": ErrorCategory.MODEL,
-                        "message": f"工具调用次数超过 {MAX_TOOL_CALLS} 次上限，已终止",
+                        "message": f"探索预算用尽（{MAX_MODEL_CALLS} 次）仍未给出合法 target，已终止",
                     }
                 self._write_log({"type": "bad_target", "tool": tool, "value": invalid_target})
                 bad_targets[invalid_target] = bad_targets.get(invalid_target, 0) + 1
@@ -1423,6 +1757,7 @@ class GenerationJob:
                 and inventory
             ):
                 self.tool_calls += 1
+                self.model_calls += 1
                 blocked_closes += 1
                 self._write_log({"type": "blocked_escape", "count": blocked_closes})
                 messages.append({"role": "assistant", "content": reply})
@@ -1450,11 +1785,12 @@ class GenerationJob:
             if ref_match and last_refs and ref_match.group(1) not in last_refs:
                 ref = ref_match.group(1)
                 self.tool_calls += 1
-                if self.tool_calls > MAX_TOOL_CALLS:
+                self.model_calls += 1
+                if self.model_calls > MAX_MODEL_CALLS:
                     return {
                         "status": GenerationStatus.FAILED,
                         "error_category": ErrorCategory.MODEL,
-                        "message": f"工具调用次数超过 {MAX_TOOL_CALLS} 次上限，已终止",
+                        "message": f"探索预算用尽（{MAX_MODEL_CALLS} 次）仍未给出合法 ref，已终止",
                     }
                 bad_refs[ref] = bad_refs.get(ref, 0) + 1
                 self._write_log({"type": "bad_ref", "tool": tool, "ref": ref})
@@ -1497,6 +1833,9 @@ class GenerationJob:
             linked = "[Snapshot](" in (observation or "")
             if not is_error:
                 observation = _inline_snapshot_links(observation)
+                # 成功交互一次说明已拿到可用定位：凑够 2 个定位 + 路由即可判定三件套齐
+                if tool in ("browser_click", "browser_type", "browser_select_option"):
+                    locators_seen += 1
             blank = _snapshot_empty(observation) or "（快照为空：页面可能还没渲染）" in observation
             # 快照为空（SPA 还没渲染完）时直接重试，别把空快照喂给模型让它瞎猜 ref
             if not is_error and blank and (tool == "browser_snapshot" or linked):
@@ -1589,6 +1928,8 @@ class GenerationJob:
                             "has_dialog_text": "dialog" in low,
                         }
                     )
+                if items:
+                    push_facts("（弹窗）")
                 if items and _merge_inventory(inventory, items) and inventory_notices < 3:
                     inventory_notices += 1
                     self._write_log({"type": "controls", "items": inventory})
@@ -1646,13 +1987,19 @@ class GenerationJob:
                         "error_category": ErrorCategory.MODEL,
                         "message": f"同一工具参数已重复 {same} 次且页面无变化（{tool}），已终止以免继续消耗配额",
                     }
-            if self.tool_calls >= 45:
+            if (
+                not finish_nudged
+                and not is_fix
+                and locators_seen >= 2
+                and self.tool_calls >= MIN_EXPLORE_CALLS
+            ):
+                finish_nudged = True
                 messages.append(
                     {
                         "role": "user",
                         "content": (
-                            f"已用工具 {self.tool_calls}/{MAX_TOOL_CALLS} 次。请基于已确认的页面事实尽快 finish，"
-                            "不要再为二次确认反复快照。"
+                            "路由、定位、断言点已齐（已确认目标页面、真实控件与预期结果）。"
+                            "请立即 finish 输出脚本，不要再为二次确认反复快照。"
                         ),
                     }
                 )
@@ -1729,15 +2076,31 @@ class GenerationJob:
     def _finalize(self, outcome: dict) -> None:
         status = outcome.get("status", GenerationStatus.FAILED)
         log_rel = paths.to_rel(paths.generation_log(self.case_id, self.gen_id))
+        metrics = {
+            "tool_calls": self.tool_calls,
+            "model": self.model_name,
+            "log_rel_path": log_rel,
+            "corpus_chars": self.corpus_chars,
+            "prompt_chars": self.prompt_chars,
+            "completion_chars": self.completion_chars,
+            "fix_rounds": self.fix_rounds,
+        }
         if status == GenerationStatus.SUCCESS:
             concurrency.set_progress(self.case_id, "完成", "脚本已固化")
             self.db.finish_generation(
                 self.gen_id,
                 status=GenerationStatus.SUCCESS,
-                tool_calls=self.tool_calls,
-                model=self.model_name,
-                log_rel_path=log_rel,
+                **metrics,
             )
+            # 失败后修复通过：把「踩的坑 + 解决方案」沉淀成反面样本（成功样本）
+            if self.first_failure:
+                solution = {
+                    "patch": "按报错输出最小补丁（find/replace）并在本地应用，补丁不唯一时回退整份重写",
+                    "rewrite": "按首次失败信息重写整份脚本（复看真实快照与控件清单后修正定位/断言）",
+                }.get(self.fix_mode, "按首次失败信息修正脚本")
+                lessons.record_solution(
+                    self.db, self.case, ErrorCategory.SCRIPT, self.first_failure, solution
+                )
             return
 
         category = outcome.get("error_category") or ErrorCategory.MODEL
@@ -1755,10 +2118,10 @@ class GenerationJob:
             status=GenerationStatus.FAILED,
             error_category=category,
             error_message=message[:4000],
-            tool_calls=self.tool_calls,
-            model=self.model_name,
-            log_rel_path=log_rel,
+            **metrics,
         )
+        # 失败日志沉淀为反面样本，后续同类用例生成时注入提示词
+        lessons.record_failure(self.db, self.case, category, message)
 
 
 def start_job(case_id: int, kind: str) -> None:

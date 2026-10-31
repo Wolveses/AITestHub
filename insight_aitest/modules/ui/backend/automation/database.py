@@ -7,7 +7,12 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 
-from insight_aitest.modules.ui.backend.automation.models import UiCase, UiEnv, UiGeneration
+from insight_aitest.modules.ui.backend.automation.models import (
+    UiCase,
+    UiEnv,
+    UiGeneration,
+    UiLesson,
+)
 from insight_aitest.modules.ui.backend.persistence.models import RunRecord
 from insight_aitest.platform.persistence import Base, ensure_schema, get_engine, session_scope
 
@@ -61,6 +66,20 @@ def _ensure_ui_cases_params(db_path: str) -> None:
         conn.commit()
 
 
+def _ensure_generation_metrics(db_path: str) -> None:
+    """给旧 ui_generations 表补可观测指标列（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ui_generations)")}
+        if not cols:
+            return
+        for name in ("corpus_chars", "prompt_chars", "completion_chars", "fix_rounds"):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE ui_generations ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+
+
 def _drop_flow_assets(db_path: str) -> None:
     """移除流程复用机制留下的表与列（幂等；旧版 SQLite 不支持 DROP COLUMN 时跳过）。"""
     import sqlite3
@@ -88,12 +107,19 @@ class UIAutomationDatabase:
                 UiCase.__table__,
                 UiEnv.__table__,
                 UiGeneration.__table__,
+                UiLesson.__table__,
                 RunRecord.__table__,
             ],
         )
         ensure_schema(
             db_path,
-            [_ensure_run_script_columns, _ensure_ui_cases_site, _ensure_ui_cases_params, _drop_flow_assets],
+            [
+                _ensure_run_script_columns,
+                _ensure_ui_cases_site,
+                _ensure_ui_cases_params,
+                _ensure_generation_metrics,
+                _drop_flow_assets,
+            ],
         )
 
     # ===== 用例 =====
@@ -283,6 +309,74 @@ class UIAutomationDatabase:
                     .limit(limit)
                 )
             )
+
+    # ===== 反面样本（错题库）=====
+
+    def upsert_lesson(
+        self, project_id: int, fingerprint: str, category: str, title: str, content: str
+    ) -> int:
+        """按指纹去重写入反面样本；命中已有样本时更新正文与时间，不重复膨胀。"""
+        with session_scope(self.db_path) as s:
+            lesson = s.scalar(
+                select(UiLesson).where(
+                    UiLesson.project_id == project_id,
+                    UiLesson.fingerprint == fingerprint,
+                )
+            )
+            if lesson is not None:
+                lesson.category = category
+                lesson.title = title
+                lesson.content = content
+                lesson.updated_at = datetime.now()
+                return int(lesson.id)
+            lesson = UiLesson(
+                project_id=project_id,
+                fingerprint=fingerprint,
+                category=category,
+                title=title,
+                content=content,
+            )
+            s.add(lesson)
+            s.flush()
+            return int(lesson.id)
+
+    def list_lessons(self, project_id: int, limit: int = 300) -> list[UiLesson]:
+        with session_scope(self.db_path) as s:
+            return list(
+                s.scalars(
+                    select(UiLesson)
+                    .where(UiLesson.project_id == project_id)
+                    .order_by(UiLesson.hits.desc(), UiLesson.updated_at.desc())
+                    .limit(limit)
+                )
+            )
+
+    def bump_lesson_hits(self, lesson_ids: list[int]) -> None:
+        """记录样本被注入提示词的次数（淘汰策略按命中次数优先保留）。"""
+        if not lesson_ids:
+            return
+        with session_scope(self.db_path) as s:
+            for lesson_id in lesson_ids:
+                lesson = s.get(UiLesson, lesson_id)
+                if lesson is not None:
+                    lesson.hits = int(lesson.hits or 0) + 1
+
+    def trim_lessons(self, project_id: int, keep: int) -> int:
+        """超出上限时淘汰「命中次数最少 + 最久未更新」的样本，返回删除条数。"""
+        with session_scope(self.db_path) as s:
+            stale = list(
+                s.scalars(
+                    select(UiLesson)
+                    .where(UiLesson.project_id == project_id)
+                    .order_by(UiLesson.hits.asc(), UiLesson.updated_at.asc())
+                )
+            )
+            extra = len(stale) - keep
+            if extra <= 0:
+                return 0
+            for lesson in stale[:extra]:
+                s.delete(lesson)
+            return extra
 
     # ===== 脚本执行记录（ui_runs 中 runner='script' 的行）=====
 

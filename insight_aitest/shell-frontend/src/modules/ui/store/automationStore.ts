@@ -88,6 +88,10 @@ export interface GenerationRecord {
   error_message: string | null;
   tool_calls: number;
   model: string;
+  corpus_chars: number;
+  prompt_chars: number;
+  completion_chars: number;
+  fix_rounds: number;
   started_at: string | null;
   finished_at: string | null;
 }

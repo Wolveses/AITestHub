@@ -472,6 +472,12 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                     </span>
                     <ErrorCategoryTag category={g.error_category} label={errorLabel(g.error_category)} />
                     <span style={{ color: 'var(--text-muted)' }}>{g.tool_calls} {t('ui.auto.toolCalls', '次工具调用')}</span>
+                    {(g.corpus_chars > 0 || g.prompt_chars > 0) && (
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        {t('ui.auto.corpusChars', '语料')} {g.corpus_chars} · {t('ui.auto.promptChars', '输入')} {g.prompt_chars} · {t('ui.auto.completionChars', '输出')} {g.completion_chars}
+                        {g.fix_rounds > 0 ? ` · ${t('ui.auto.fixRounds', '修复')} ${g.fix_rounds}` : ''}
+                      </span>
+                    )}
                     <span style={{ color: 'var(--text-muted)' }}>{g.started_at?.replace('T', ' ').slice(0, 19)}</span>
                     <div style={{ flex: 1 }} />
                     {g.error_message && (
