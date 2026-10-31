@@ -250,7 +250,7 @@ export function AutomationPage() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 60px 110px 90px',
+              gridTemplateColumns: '1fr 150px 60px 110px 90px',
               gap: 8,
               padding: '8px 16px',
               fontSize: 11,
@@ -261,6 +261,7 @@ export function AutomationPage() {
             }}
           >
             <span>{t('ui.auto.caseTitle', '用例标题')}</span>
+            <span>{t('ui.auto.flow', '流程')}</span>
             <span>{t('ui.auto.site', '端')}</span>
             <span>{t('ui.auto.status', '状态')}</span>
             <span>{t('ui.auto.actions', '操作')}</span>
@@ -280,7 +281,7 @@ export function AutomationPage() {
                     onClick={() => setDetailId(c.id)}
                     style={{
                       display: 'grid',
-                      gridTemplateColumns: '1fr 60px 110px 90px',
+                      gridTemplateColumns: '1fr 150px 60px 110px 90px',
                       gap: 8,
                       alignItems: 'center',
                       padding: '9px 16px',
@@ -298,33 +299,35 @@ export function AutomationPage() {
                       {c.script_version > 0 && (
                         <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>v{c.script_version}</span>
                       )}
-                      {c.flow_id && c.flow_title && (
-                        <span
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setFlowFilter(c.flow_id);
-                          }}
-                          title={t('ui.auto.flowChipHint', '点击按该流程筛选')}
-                          style={{
-                            flexShrink: 0,
-                            padding: '1px 7px',
-                            borderRadius: 9,
-                            border: '1px solid var(--border)',
-                            fontSize: 10,
-                            color: c.flow_status === 'archived' ? 'var(--text-muted)' : 'var(--accent)',
-                            maxWidth: 160,
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {t('ui.auto.flowChip', '流程 · {{title}}', { title: c.flow_title })}
-                        </span>
-                      )}
                       {c.last_error_category && (
                         <ErrorCategoryTag category={c.last_error_category} label={errorLabel(c.last_error_category)} />
                       )}
                     </div>
+                    <span
+                      onClick={(e) => {
+                        if (!c.flow_id) return;
+                        e.stopPropagation();
+                        setFlowFilter(c.flow_id);
+                      }}
+                      title={
+                        c.flow_id && c.flow_title
+                          ? `${c.flow_title}（${t('ui.auto.flowChipHint', '点击按该流程筛选')}）`
+                          : ''
+                      }
+                      style={{
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        color: !c.flow_title
+                          ? 'var(--text-muted)'
+                          : c.flow_status === 'archived'
+                            ? 'var(--text-muted)'
+                            : 'var(--accent)',
+                        cursor: c.flow_id ? 'pointer' : 'default',
+                      }}
+                    >
+                      {c.flow_title || '—'}
+                    </span>
                     <span
                       onClick={(e) => {
                         e.stopPropagation();

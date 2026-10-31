@@ -25,6 +25,8 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
   const [preview, setPreview] = useState<{ url: string; label: string } | null>(null);
   const [openRunLog, setOpenRunLog] = useState<number | null>(null);
   const [openGenLog, setOpenGenLog] = useState<number | null>(null);
+  const [openRunError, setOpenRunError] = useState<number | null>(null);
+  const [openGenError, setOpenGenError] = useState<number | null>(null);
   // 执行/生成记录里是否还有在跑的任务（决定是否继续轮询刷新列表与日志）
   const anyRunning = runs.some((r) => r.status === 'running') || gens.some((g) => g.status === 'running');
 
@@ -62,10 +64,14 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
       setTab('snapshot');
       setOpenRunLog(null);
       setOpenGenLog(null);
+      setOpenRunError(null);
+      setOpenGenError(null);
       return;
     }
     setOpenRunLog(null);
     setOpenGenLog(null);
+    setOpenRunError(null);
+    setOpenGenError(null);
     refresh(caseId).catch((e) => toast.error((e as Error).message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseId]);
@@ -543,6 +549,15 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                     <span style={{ color: 'var(--text-muted)' }}>{r.duration_ms} ms</span>
                     <span style={{ color: 'var(--text-muted)' }}>v{r.script_version ?? 0}</span>
                     <div style={{ flex: 1 }} />
+                    {r.error && (
+                      <button
+                        type="button"
+                        style={linkButtonStyle}
+                        onClick={() => setOpenRunError(openRunError === r.id ? null : r.id)}
+                      >
+                        {t('ui.auto.failureReason', '失败原因')}
+                      </button>
+                    )}
                     <button
                       type="button"
                       style={linkButtonStyle}
@@ -579,7 +594,9 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                       </a>
                     )}
                   </div>
-                  {r.error && <pre style={{ ...preStyle, marginTop: 8 }}>{r.error}</pre>}
+                  {r.error && openRunError === r.id && (
+                    <pre style={{ ...preStyle, marginTop: 8 }}>{r.error}</pre>
+                  )}
                   {openRunLog === r.id && (
                     <LogViewer url={`${BASE}/cases/${detail.id}/runs/${r.id}/log`} live={r.status === 'running'} />
                   )}
@@ -604,6 +621,15 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                     <span style={{ color: 'var(--text-muted)' }}>{g.tool_calls} {t('ui.auto.toolCalls', '次工具调用')}</span>
                     <span style={{ color: 'var(--text-muted)' }}>{g.started_at?.replace('T', ' ').slice(0, 19)}</span>
                     <div style={{ flex: 1 }} />
+                    {g.error_message && (
+                      <button
+                        type="button"
+                        style={linkButtonStyle}
+                        onClick={() => setOpenGenError(openGenError === g.id ? null : g.id)}
+                      >
+                        {t('ui.auto.failureReason', '失败原因')}
+                      </button>
+                    )}
                     <button
                       type="button"
                       style={linkButtonStyle}
@@ -612,7 +638,9 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                       {t('ui.auto.generationLog', '查看日志')}
                     </button>
                   </div>
-                  {g.error_message && <pre style={{ ...preStyle, marginTop: 8 }}>{g.error_message}</pre>}
+                  {g.error_message && openGenError === g.id && (
+                    <pre style={{ ...preStyle, marginTop: 8 }}>{g.error_message}</pre>
+                  )}
                   {openGenLog === g.id && (
                     <LogViewer url={`${BASE}/cases/${detail.id}/generations/${g.id}/log`} live={g.status === 'running'} />
                   )}
