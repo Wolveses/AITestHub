@@ -1336,6 +1336,11 @@ def discard_pages(staging: Path | None) -> None:
         shutil.rmtree(staging, ignore_errors=True)
 
 
+# 运行中的生成/修复任务：case_id -> GenerationJob（供终止接口打断阻塞调用）
+_active_jobs: dict[int, "GenerationJob"] = {}
+_jobs_guard = threading.Lock()
+
+
 class GenerationJob:
     """一次生成/修复任务（后台线程执行）。"""
 
@@ -1363,6 +1368,25 @@ class GenerationJob:
         self.fix_mode = ""
         self._log = None
         self._staged_pages: Path | None = None
+        # 当前 MCP 客户端：用户终止时由外部线程 close，打断正在等待的请求
+        self._client = None
+
+    def abort(self) -> None:
+        """请求终止：先置取消标记，再关闭 MCP 客户端让阻塞中的调用立即返回。"""
+        concurrency.request_cancel(self.case_id)
+        client = self._client
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _cancelled_outcome(self) -> dict:
+        return {
+            "status": GenerationStatus.FAILED,
+            "cancelled": True,
+            "message": "用户已终止本次生成",
+        }
 
     # ===== 日志 =====
 
@@ -1381,6 +1405,8 @@ class GenerationJob:
     def run(self) -> None:
         case = self.case
         if case is None:
+            with _jobs_guard:
+                _active_jobs.pop(self.case_id, None)
             return
         project_id = int(case.project_id)
         is_fix = self.kind == GenerationKind.FIX
@@ -1410,13 +1436,17 @@ class GenerationJob:
         try:
             outcome = self._execute(is_fix)
         except Exception as e:
-            logger.exception("生成任务异常 case=%s", self.case_id)
-            outcome = {
-                "status": GenerationStatus.FAILED,
-                "error_category": ErrorCategory.MODEL,
-                "message": f"生成任务异常：{type(e).__name__}: {e}",
-                "detail": traceback.format_exc()[-2000:],
-            }
+            if concurrency.is_cancelled(self.case_id):
+                # 终止时关闭 MCP/杀掉子进程会以异常形式冒泡，按「已终止」收尾而不是失败
+                outcome = self._cancelled_outcome()
+            else:
+                logger.exception("生成任务异常 case=%s", self.case_id)
+                outcome = {
+                    "status": GenerationStatus.FAILED,
+                    "error_category": ErrorCategory.MODEL,
+                    "message": f"生成任务异常：{type(e).__name__}: {e}",
+                    "detail": traceback.format_exc()[-2000:],
+                }
         finally:
             self._finalize(outcome)
             # 无论成功失败都清理生成期暂存，正式资产只保留已验证版本
@@ -1427,6 +1457,9 @@ class GenerationJob:
                     self._log.close()
                 except OSError:
                     pass
+            concurrency.clear_cancel(self.case_id)
+            with _jobs_guard:
+                _active_jobs.pop(self.case_id, None)
             concurrency.release(project_id)
 
     def _execute(self, is_fix: bool) -> dict:
@@ -1466,10 +1499,15 @@ class GenerationJob:
             output_dir=str(paths.mcp_dir()),
         )
         concurrency.set_progress(self.case_id, "启动 MCP", "拉起 playwright MCP（首次较慢）")
+        # 先登记客户端：MCP 冷启动可能很久，终止时 close 能立即打断 startup 请求
+        self._client = client
         try:
             client.start()
         except Exception as e:
             client.close()
+            self._client = None
+            if concurrency.is_cancelled(self.case_id):
+                return self._cancelled_outcome()
             return {
                 "status": GenerationStatus.FAILED,
                 "error_category": ErrorCategory.ENV,
@@ -1480,6 +1518,7 @@ class GenerationJob:
             return self._react_loop(client, llm, self.model_name, auth, is_fix)
         finally:
             client.close()
+            self._client = None
 
     def _react_loop(self, client, llm, model_name: str, auth, is_fix: bool) -> dict:
         case = self.case
@@ -1653,6 +1692,8 @@ class GenerationJob:
         bad_refs: dict[str, int] = {}
         last_refs: set[str] = set(REF_RE.findall(snap or ""))
         while True:
+            if concurrency.is_cancelled(self.case_id):
+                return self._cancelled_outcome()
             if time.time() - self.started > MAX_SECONDS:
                 return {
                     "status": GenerationStatus.FAILED,
@@ -1694,6 +1735,8 @@ class GenerationJob:
             try:
                 reply = _chat(llm, messages, temperature=0.2)
             except Exception as e:
+                if concurrency.is_cancelled(self.case_id):
+                    return self._cancelled_outcome()
                 self._write_log(
                     {
                         "type": "llm_error",
@@ -1713,6 +1756,9 @@ class GenerationJob:
                 len(str(m.get("content") or "")) for m in _trim_messages(messages)
             )
             self.completion_chars += len(reply or "")
+            # 模型调用是长阻塞点，返回后立即检查一次终止标记
+            if concurrency.is_cancelled(self.case_id):
+                return self._cancelled_outcome()
 
             parsed = _parse_json_reply(reply)
             if parsed is None:
@@ -2034,6 +2080,8 @@ class GenerationJob:
                     params_schema=param_schema,
                     params_values=param_values,
                 )
+                if result.get("cancelled"):
+                    return self._cancelled_outcome()
                 self._write_log(
                     {
                         "type": "validate",
@@ -2240,17 +2288,23 @@ class GenerationJob:
             try:
                 observation, is_error = client.call_tool(tool, args)
             except MCPError as e:
+                if concurrency.is_cancelled(self.case_id):
+                    return self._cancelled_outcome()
                 return {
                     "status": GenerationStatus.FAILED,
                     "error_category": ErrorCategory.ENV,
                     "message": f"浏览器工具调用失败：{e}",
                 }
             except Exception as e:
+                if concurrency.is_cancelled(self.case_id):
+                    return self._cancelled_outcome()
                 return {
                     "status": GenerationStatus.FAILED,
                     "error_category": ErrorCategory.ENV,
                     "message": f"浏览器工具异常：{type(e).__name__}: {e}",
                 }
+            if concurrency.is_cancelled(self.case_id):
+                return self._cancelled_outcome()
             # 大快照会被 MCP 写成 .yml 只回链接，必须读回内容，否则模型看不到页面就会反复导航
             linked = "[Snapshot](" in (observation or "")
             if not is_error:
@@ -2471,6 +2525,8 @@ class GenerationJob:
                 run_dir=paths.new_run_dir(project_id, int(self.case.id)) / "validate",
                 auth=auth,
                 pages_root=pages_root if pages_root is not None else self._staged_pages,
+                # 首跑是本任务另一个长阻塞点，终止时立即杀掉 pytest 子进程
+                cancel_check=lambda: concurrency.is_cancelled(self.case_id),
             )
         except EnvMissingError as e:
             return {"run_status": "error", "error_category": ErrorCategory.ENV, "error_message": str(e)}
@@ -2554,6 +2610,25 @@ class GenerationJob:
             "completion_chars": self.completion_chars,
             "fix_rounds": self.fix_rounds,
         }
+        if outcome.get("cancelled"):
+            # 用户主动终止：不算失败样本（不写错题库），状态恢复到进入前
+            fallback = self.prev_status or CaseStatus.NOT_IMPLEMENTED
+            self.db.update_case(
+                self.case_id,
+                status=fallback,
+                last_error_category=None,
+                last_error_message=None,
+            )
+            concurrency.set_progress(self.case_id, "已终止", "用户已终止本次生成")
+            self.db.finish_generation(
+                self.gen_id,
+                status=GenerationStatus.FAILED,
+                error_category=None,
+                error_message="用户已终止本次生成",
+                **metrics,
+            )
+            return
+
         if status == GenerationStatus.SUCCESS:
             concurrency.set_progress(self.case_id, "完成", "脚本已固化")
             self.db.finish_generation(
@@ -2595,5 +2670,19 @@ class GenerationJob:
 
 def start_job(case_id: int, kind: str) -> None:
     """在后台线程启动生成/修复（调用方需已通过 acquire 抢到项目锁）。"""
+    # 先清理上一次残留的终止标记，避免新任务一起手就被判定为已终止
+    concurrency.clear_cancel(case_id)
     job = GenerationJob(case_id, kind)
+    with _jobs_guard:
+        _active_jobs[case_id] = job
     threading.Thread(target=job.run, daemon=True, name=f"ui-gen-{case_id}").start()
+
+
+def cancel_job(case_id: int) -> bool:
+    """终止正在运行的生成/修复任务，返回是否确实有任务在跑。"""
+    with _jobs_guard:
+        job = _active_jobs.get(case_id)
+    if job is None:
+        return False
+    job.abort()
+    return True

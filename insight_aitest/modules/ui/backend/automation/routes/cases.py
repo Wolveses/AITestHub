@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from insight_aitest.modules.ui.backend.automation import concurrency, paths
 from insight_aitest.modules.ui.backend.automation.database import UIAutomationDatabase
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
-from insight_aitest.modules.ui.backend.automation.generator import ASSET_DIRS, start_job
+from insight_aitest.modules.ui.backend.automation.generator import ASSET_DIRS, cancel_job, start_job
 from insight_aitest.modules.ui.backend.automation.importer import import_cases, list_importable
 from insight_aitest.modules.ui.backend.automation.models import (
     CaseStatus,
@@ -311,6 +311,18 @@ def generate(case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)
 @router.post("/{case_id}/fix")
 def fix(case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)) -> dict:
     return _start_generate(case_id, GenerationKind.FIX, db)
+
+
+@router.post("/{case_id}/cancel")
+def cancel_generate(
+    case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)
+) -> dict:
+    """终止正在进行的生成/修复任务（卡在模型响应或浏览器调用时主动停止）。"""
+    _get_or_404(case_id, db)
+    if not cancel_job(case_id):
+        raise HTTPException(409, "当前没有正在进行的生成/修复任务")
+    concurrency.set_progress(case_id, "终止中", "正在停止生成任务")
+    return {"accepted": True, "case_id": case_id}
 
 
 def _run_worker(case_id: int) -> None:

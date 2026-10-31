@@ -22,6 +22,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from insight_aitest.modules.ui.backend.automation import paths
 from insight_aitest.modules.ui.backend.automation.env_service import prepare_auth, site_url
@@ -171,12 +172,14 @@ def run_script(
     auth=None,
     pages_root: Path | None = None,
     retries: int = 0,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict:
     """执行一个固化脚本，返回结果摘要（不写 ui_runs，由调用方决定是否落库）。
 
     retries: 失败后额外重试次数（仅用于吸收 UI 抖动，默认 0）。
     pages_root: 覆盖项目资产根目录（含 common/ 与 pages/ 包）。生成期首跑传暂存目录，
         避免未验证的资产污染正式目录；不传时默认 ``scripts/<project_id>``。
+    cancel_check: 生成期首跑传入终止检查，返回 True 时立即杀掉 pytest 子进程。
     """
     if env is None:
         raise EnvMissingError("项目未配置环境，请先在环境管理中新增并测试通过")
@@ -253,6 +256,7 @@ def run_script(
     status = RunStatus.ERROR
     error_message = ""
     attempts = 0
+    aborted = False
     for attempt in range(retries + 1):
         attempts = attempt + 1
         status, error_message = RunStatus.PASSED, ""
@@ -304,13 +308,30 @@ def run_script(
 
             pump = threading.Thread(target=_pump, daemon=True, name=f"ui-run-log-{case_id}")
             pump.start()
+            cancelled = False
             try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                raise
+                deadline = time.time() + timeout
+                while True:
+                    if cancel_check and cancel_check():
+                        proc.kill()
+                        cancelled = True
+                        break
+                    remain = deadline - time.time()
+                    if remain <= 0:
+                        proc.kill()
+                        raise subprocess.TimeoutExpired(cmd="pytest", timeout=timeout)
+                    try:
+                        proc.wait(timeout=min(remain, 0.5))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
             finally:
                 pump.join(timeout=3)
+            if cancelled:
+                status = RunStatus.ERROR
+                error_message = "用户已终止本次生成"
+                aborted = True
+                break
             output = stdout_log.read_text(encoding="utf-8", errors="replace")
             tests, failures, first = _parse_junit(junit)
             if proc.returncode != 0 or failures > 0:
@@ -353,6 +374,7 @@ def run_script(
         "screenshots": screenshots,
         "has_trace": trace.exists(),
         "attempts": attempts,
+        "cancelled": aborted,
     }
     (out_dir / "result.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"

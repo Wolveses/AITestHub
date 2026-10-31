@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Play, Sparkles, Wrench, X, Copy, FileCode } from 'lucide-react';
+import { Play, Sparkles, Wrench, X, Copy, FileCode, Square } from 'lucide-react';
 import { useAutomationStore, type AutomationCase, type GenerationRecord, type ParamSchemaItem, type ScriptRun } from '../../store/automationStore';
 import { Btn, ErrorCategoryTag, Field, StatusBadge, inputStyle, STATUS_META } from './common';
 
@@ -12,7 +12,7 @@ type ScriptPreview = { content: string; version: number; pages: { name: string; 
 
 export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; onClose: () => void }) {
   const { t } = useTranslation();
-  const { getCase, getScript, listRuns, listGenerations, updateCase, saveParams, generate, fix, run } = useAutomationStore();
+  const { getCase, getScript, listRuns, listGenerations, updateCase, saveParams, generate, fix, cancelGenerate, run } = useAutomationStore();
   const [detail, setDetail] = useState<AutomationCase | null>(null);
   const [script, setScript] = useState<ScriptPreview>({ content: '', version: 0, pages: [] });
   const [runs, setRuns] = useState<ScriptRun[]>([]);
@@ -101,6 +101,8 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
   if (caseId === null || detail === null) return null;
 
   const active = ACTIVE.has(detail.status);
+  // 只有生成/修复可终止；执行中的 pytest 子进程不在本次终止范围内
+  const generating = detail.status === 'generating' || detail.status === 'fixing';
   // 与用例步骤无关的控件不进参数面板（必填项由系统生成占位值、非必填留空）
   const paramSchema = (detail.params_schema || []).filter((item) => item.related !== false);
   const statusLabel = (s: string) => t(STATUS_META[s]?.labelKey || s, s);
@@ -295,6 +297,17 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
           <Btn size="sm" disabled={active || submitting || detail.status !== 'implemented'} onClick={() => act(fix, t('ui.auto.fixQueued', '已提交修复任务'))}>
             <Wrench size={12} /> {t('ui.auto.autoFix', '自动修复')}
           </Btn>
+          {generating && (
+            <Btn
+              size="sm"
+              variant="ghost"
+              disabled={submitting}
+              title={t('ui.auto.cancelGenerateHint', '停止当前生成/修复任务（已产生的临时资产会被丢弃）')}
+              onClick={() => act(cancelGenerate, t('ui.auto.cancelGenerateQueued', '已请求终止，正在停止任务'))}
+            >
+              <Square size={12} /> {t('ui.auto.cancelGenerate', '终止生成')}
+            </Btn>
+          )}
           <Btn size="sm" variant="ghost" onClick={onClose} title={t('ui.auto.close', '关闭')}>
             <X size={15} />
           </Btn>

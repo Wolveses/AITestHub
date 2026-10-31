@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Download, Play, RefreshCw, Search, Settings2, Sparkles, Wrench, Eye } from 'lucide-react';
+import { Download, Play, RefreshCw, Search, Settings2, Sparkles, Wrench, Eye, Square } from 'lucide-react';
 import { useProjectStore } from '../../../../shared/store/projectStore';
 import { useConfirmStore } from '../../../../shared/store/confirmStore';
 import { ModuleHelpButton } from '../../../../shared/components/ModuleHelpButton';
@@ -34,6 +34,7 @@ export function AutomationPage() {
     loadEnvs,
     generate,
     fix,
+    cancelGenerate,
     run,
     deleteCase,
     updateCase,
@@ -231,7 +232,7 @@ export function AutomationPage() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 60px 110px 90px',
+              gridTemplateColumns: '1fr 60px 110px 120px',
               gap: 8,
               padding: '8px 16px',
               fontSize: 11,
@@ -255,13 +256,14 @@ export function AutomationPage() {
             ) : (
               cases.map((c) => {
                 const active = ACTIVE_STATUSES.has(c.status) || busyId === c.id;
+                const generating = c.status === 'generating' || c.status === 'fixing';
                 return (
                   <div
                     key={c.id}
                     onClick={() => setDetailId(c.id)}
                     style={{
                       display: 'grid',
-                      gridTemplateColumns: '1fr 60px 110px 90px',
+                      gridTemplateColumns: '1fr 60px 110px 120px',
                       gap: 8,
                       alignItems: 'center',
                       padding: '9px 16px',
@@ -327,6 +329,11 @@ export function AutomationPage() {
                       <Btn size="sm" variant="ghost" disabled={active || c.status !== 'implemented'} title={t('ui.auto.autoFix', '自动修复')} onClick={() => withBusy(c.id, () => fix(c.id), t('ui.auto.fixQueued', '已提交修复任务'))}>
                         <Wrench size={12} />
                       </Btn>
+                      {generating && (
+                        <Btn size="sm" variant="ghost" title={t('ui.auto.cancelGenerateHint', '停止当前生成/修复任务（已产生的临时资产会被丢弃）')} onClick={() => withBusy(c.id, () => cancelGenerate(c.id), t('ui.auto.cancelGenerateQueued', '已请求终止，正在停止任务'))}>
+                          <Square size={12} />
+                        </Btn>
+                      )}
                       <Btn size="sm" variant="ghost" title={t('ui.auto.viewDetail', '详情')} onClick={() => setDetailId(c.id)}>
                         <Eye size={12} />
                       </Btn>

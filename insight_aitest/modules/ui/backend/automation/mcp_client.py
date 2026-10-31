@@ -47,6 +47,8 @@ class PlaywrightMCPClient:
         self._queue: queue.Queue = queue.Queue()
         self._reader: threading.Thread | None = None
         self._next_id = 0
+        # 终止标记：外部（如用户终止生成）关闭客户端时，正在等待响应的 request 立即退出
+        self._closed = threading.Event()
 
     # ===== 生命周期 =====
 
@@ -91,6 +93,7 @@ class PlaywrightMCPClient:
         return [npx, *args]
 
     def start(self) -> None:
+        self._closed.clear()
         self._proc = subprocess.Popen(
             self._build_cmd(),
             stdin=subprocess.PIPE,
@@ -119,6 +122,7 @@ class PlaywrightMCPClient:
     def close(self) -> None:
         proc = self._proc
         self._proc = None
+        self._closed.set()
         if proc is None:
             return
         try:
@@ -175,6 +179,8 @@ class PlaywrightMCPClient:
         )
         deadline = time.time() + (timeout or self.call_timeout)
         while True:
+            if self._closed.is_set():
+                raise MCPError("MCP 连接已关闭（任务被终止）")
             remain = deadline - time.time()
             if remain <= 0:
                 raise MCPTimeout(f"MCP 请求 {method} 超时")

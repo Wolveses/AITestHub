@@ -143,6 +143,7 @@ interface AutomationState {
   ) => Promise<{ created: number; skipped: number; failed: unknown[] }>;
   generate: (caseId: number) => Promise<void>;
   fix: (caseId: number) => Promise<void>;
+  cancelGenerate: (caseId: number) => Promise<void>;
   run: (caseId: number) => Promise<void>;
   getCase: (caseId: number) => Promise<AutomationCase>;
   updateCase: (caseId: number, data: Partial<AutomationCase>) => Promise<AutomationCase>;
@@ -275,6 +276,12 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
 
   fix: async (caseId) => {
     const r = await fetch(`${BASE}/cases/${caseId}/fix`, { method: 'POST' });
+    if (!r.ok) throw new Error(await parseError(r));
+    await get().loadCases();
+  },
+
+  cancelGenerate: async (caseId) => {
+    const r = await fetch(`${BASE}/cases/${caseId}/cancel`, { method: 'POST' });
     if (!r.ok) throw new Error(await parseError(r));
     await get().loadCases();
   },
