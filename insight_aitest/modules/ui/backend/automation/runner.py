@@ -129,11 +129,11 @@ def _unique_value(value: str, suffix: str) -> str:
 
 
 def build_params(case) -> dict:
-    """合并流程参数 schema 与本用例取值，返回 ``{"values": ..., "schema": ...}``。
+    """合并用例参数 schema 与取值，返回 ``{"values": ..., "schema": ...}``。
 
     - 取值优先级：本用例 params_json → schema.default → 空串；
     - ``unique=true`` 的参数追加本次运行时间后缀，避免重复创建冲突；
-    - 没有流程参数（schema 与取值都为空）时返回空字典，独立脚本不受影响。
+    - 没有参数结构（schema 与取值都为空）时返回空字典，独立脚本不受影响。
     """
     schema = list(getattr(case, "params_schema_json", None) or [])
     raw = dict(getattr(case, "params_json", None) or {})

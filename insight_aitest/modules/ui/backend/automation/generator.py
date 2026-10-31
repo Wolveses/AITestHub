@@ -23,6 +23,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from insight_aitest.modules.ui.backend.automation import concurrency, corpus, lessons, paths
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
@@ -39,11 +40,14 @@ from insight_aitest.modules.ui.backend.automation.runner import EnvMissingError,
 logger = logging.getLogger(__name__)
 
 # 模型自己发起的探索调用上限：到量即强制 finish，避免无限确认烧 token
-MAX_MODEL_CALLS = 20
+MAX_MODEL_CALLS = 30
 # 含自动补快照/控件枚举/页面事实预取的绝对上限，防自动重试失控
 MAX_TOOL_CALLS = 40
-MAX_SECONDS = 12 * 60
-MAX_FIX_ROUNDS = 3
+MAX_SECONDS = 20 * 60
+# 首跑验证失败预算：每轮都在上一轮失败基础上迭代，给足修复机会
+MAX_FIX_ROUNDS = 5
+# 静态校验/补丁应用/资产写入失败单独计数，避免这类小错吃掉首跑验证的修复额度
+MAX_STATIC_ROUNDS = 3
 # 至少完成 6 次真实浏览器操作才允许首次产出脚本，避免只凭首页快照猜步骤
 MIN_EXPLORE_CALLS = 6
 OBS_LIMIT = 6000
@@ -132,7 +136,11 @@ CONTROL_INVENTORY_JS = """() => {
     } else if (type !== 'checkbox' && type !== 'radio') {
       value = el.value === undefined ? '' : el.value;
     }
-    const item = { label: labelOf(el), type, value, options, disabled: !!el.disabled };
+    const label = labelOf(el);
+    // 必填判定：原生 required / aria-required / label 里的红色星号
+    const required = !!(el.required || el.getAttribute('aria-required') === 'true'
+      || label.includes('*') || label.includes('＊'));
+    const item = { label, type, value, options, disabled: !!el.disabled, required };
     if (tickable) item.checked = !!el.checked;
     items.push(item);
   });
@@ -241,6 +249,9 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     字段顺序属于业务语义，必须写在页面对象（pages/<模块>_page.py）里；仓库只提供 env 契约，
     不含任何这类原语，可复用的弹窗/输入框定位逻辑应沉淀到 common/。
 20. 「使用默认密码」默认勾选时密码框是 disabled，不要填密码；也不要重复点击「新增」。
+    该复选框的真实 input 尺寸为 0×0（视觉由兄弟 span 绘制），check()/uncheck() 必定超时；
+    切换勾选状态只能点外层包裹 label：
+    dialog.locator("label.ui-checkbox-wrap").filter(has_text="使用默认密码").click()
 21. MCP 的 ref 只在当次快照内有效：每次点击/输入后重新 browser_snapshot 取新 ref 再操作，
     不要复用上一张快照里的 ref。弹窗内严禁按 Escape（实测会把整个弹窗关掉、已填数据丢失），
     要收起下拉就再次点击同一个 combobox，要看当前状态用 browser_snapshot。
@@ -311,6 +322,21 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     提交会被拒绝；需要新能力时新建文件，或直接复用已有方法签名。
 36. 「反面样本」是本项目历史失败的错题库（失败日志 + 踩过的坑 + 已验证的解决方案）：
     写脚本前先看，避免重复踩同样的坑；样本与当前页面事实冲突时以实测为准。
+    若给出「本用例历史失败记录」，必须逐条避开里面已经失败过的断言/定位写法，
+    每一次生成都要在上一次失败的基础上改进，不要原样重写同一段代码。
+37. 若系统给出了「参数结构」（由弹窗实测控件 + 用例步骤确定性生成），测试函数必须声明 params fixture：
+    def test_xxx(page, params)，表单取值一律写成 params["参数名"]，禁止写死用户名/邮箱/名称等业务数据。
+    参数名必须与结构里的 name 完全一致；unique=true 的参数已由运行器自动追加运行时间后缀，
+    不要再自己拼时间戳或调用 unique_name。这样生成后可在参数面板里直接修改取值并重新执行。
+    与用例步骤无关的控件已由系统自动填充（必填项生成占位值、非必填留空），直接读 params 即可，
+    不要为了让表单通过而改动它们的语义，也不要为它们新增参数。
+    默认值为空的参数：若用例要求填写该字段，写成 params["参数名"] or "占位值"（面板有值时用面板值）；
+    若用例要求留空，直接用空串即可，不要为了「看起来有值」而写死数据。
+38. 该后台的校验错误不落在 input 上：错误文案在 div.ui-form-error-tip，表单项容器会加
+    ui-form-item-invalid，input 自身仍是 ui-input ui-input-md ui-input-left。
+    断言一律用文案（expect(dialog.get_by_text("显示名称不能为空")).to_be_visible()），
+    禁止编造 ui-input-error 这类 class。密码为空的提示是「密码不能为空」，
+    且需先取消勾选「使用默认密码」，否则密码框 disabled、不参与校验。
 """
 
 
@@ -422,11 +448,16 @@ def _chat(llm, messages: list[dict], **kwargs) -> str:
     """统一模型调用：显式给足输出预算。
 
     finish 一轮要吐完整用例脚本（含 pages），模型默认输出上限常把 JSON 截断成非法内容。
+    注意：只有端点明确拒绝 max_tokens 时才去掉参数重试；超时/限流等错误由 LLMClient
+    内部重试处理，这里若整轮再来一遍会把「等模型响应」的时间直接翻倍。
     """
     kwargs.setdefault("max_tokens", CHAT_MAX_TOKENS)
     try:
         return llm.chat(_trim_messages(messages), **kwargs)
-    except Exception:
+    except Exception as e:
+        msg = str(e).lower()
+        if "max_tokens" not in msg and "max output" not in msg:
+            raise
         # 个别端点不接受 max_tokens 参数时退回默认预算
         kwargs.pop("max_tokens", None)
         return llm.chat(_trim_messages(messages), **kwargs)
@@ -645,6 +676,8 @@ def _normalize_items(data: list) -> list[dict]:
             item["options"] = [str(o)[:40] for o in options][:60]
         if raw.get("checked") is not None:
             item["checked"] = bool(raw.get("checked"))
+        if raw.get("required"):
+            item["required"] = True
         items.append(item)
     return items
 
@@ -703,6 +736,358 @@ def _merge_inventory(inventory: list[dict], items: list[dict]) -> bool:
         seen.add(key)
         changed = True
     return changed
+
+
+_PARAM_TYPE_MAP = {
+    "select": "select",
+    "checkbox": "bool",
+    "radio": "bool",
+    "password": "str",
+    "textarea": "str",
+}
+# 这些 label 对应的文本字段重复提交会冲突（用户名/邮箱/手机号等），运行器自动追加时间后缀
+_UNIQUE_HINTS = (
+    "用户名",
+    "账号",
+    "邮箱",
+    "手机",
+    "电话",
+    "编号",
+    "编码",
+    "username",
+    "email",
+    "phone",
+    "account",
+    "code",
+)
+_GENERIC_LABEL_RE = re.compile(r"^控件\d+$")
+# 与用例步骤无关、但实测为必填的控件：按 label 生成符合常见校验规则的占位值
+_AUTO_VALUE_RULES = (
+    (("邮箱", "邮件"), "auto@example.com"),
+    (("手机", "电话", "联系方式"), "13800000000"),
+    (("密码", "口令"), "Aa123456!"),
+    (("pin",), "123456"),
+    (("编号", "编码"), "A0001"),
+)
+# 用例文案里常用「账号」「昵称」等同义说法，用于把控件和步骤对上
+_LABEL_ALIASES = {
+    "用户名": ("用户名", "账号", "登录名", "用户账号"),
+    "账号": ("账号", "用户名", "登录名"),
+    "登录名": ("登录名", "用户名", "账号"),
+    "密码": ("密码", "口令"),
+    "显示名称": ("显示名称", "昵称"),
+    "昵称": ("昵称", "显示名称"),
+    "邮箱": ("邮箱", "邮件", "电子邮箱"),
+    "手机": ("手机", "手机号", "手机号码"),
+    "电话": ("电话", "联系方式", "手机"),
+    "联系方式": ("联系方式", "手机", "电话"),
+    "用户等级": ("用户等级", "等级"),
+    "部门": ("部门", "所属部门"),
+    "职位": ("职位", "职务"),
+    "有效期": ("有效期", "期限"),
+}
+_LABEL_SPLIT_RE = re.compile(r"[（(\[{<，,；;/|]")
+_LABEL_NOISE_RE = re.compile(r"(请输入|请选择|输入|选择|必填项|必填|选填)")
+
+
+def _label_core(label: str) -> str:
+    """去掉括号说明、必填星号与「请输入」等噪声，得到控件主词。"""
+    text = _LABEL_SPLIT_RE.split(str(label or ""), 1)[0]
+    text = text.replace("*", "").replace("＊", "")
+    return _LABEL_NOISE_RE.sub("", text).strip()
+
+
+def _text_norm(text: str) -> str:
+    return re.sub(r"[^\w]", "", str(text or "").lower())
+
+
+def _case_text(case) -> str:
+    """用例全文（标题/前置/步骤/预期），用于判定哪些控件与用例步骤相关。"""
+    steps = "；".join(str(s) for s in (getattr(case, "steps", None) or []))
+    return "\n".join(
+        [
+            str(getattr(case, "title", "") or ""),
+            str(getattr(case, "precondition", "") or ""),
+            steps,
+            str(getattr(case, "expected", "") or ""),
+        ]
+    )
+
+
+HISTORY_MAX_GENS = 8
+HISTORY_MAX_EVENTS = 3
+HISTORY_ITEM_CHARS = 220
+HISTORY_MAX_CHARS = 2000
+
+
+def _case_failure_history(case, db) -> str:
+    """本用例历次生成真实失败的事实，供新一轮生成直接基于失败迭代。
+
+    只读该用例自己的生成记录：优先取日志里的首跑验证/静态校验/补丁失败消息，
+    没有日志时退回该轮最终错误。体积控制：最多 8 轮、每轮 ≤3 条、
+    单条 ≤220 字、总量 ≤2000 字。
+    """
+    try:
+        gens = db.list_generations(int(getattr(case, "id")), HISTORY_MAX_GENS)
+    except Exception:  # noqa: BLE001 - 历史仅供参考，读失败不影响本次生成
+        return ""
+
+    def brief(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "")).strip()[:HISTORY_ITEM_CHARS]
+
+    seen: set[str] = set()
+    blocks: list[str] = []
+    used = 0
+    for gen in gens:
+        if (getattr(gen, "status", "") or "") == GenerationStatus.SUCCESS:
+            continue
+        items: list[str] = []
+
+        def add(label: str, text: str) -> None:
+            text = brief(text)
+            if not text:
+                return
+            key = text[:60]
+            if key in seen:
+                return
+            seen.add(key)
+            items.append(f"  - {label}：{text}")
+
+        log_rel = getattr(gen, "log_rel_path", "") or ""
+        if log_rel:
+            try:
+                log_path = paths.resolve_rel(log_rel)
+                if log_path.exists():
+                    with log_path.open(encoding="utf-8") as f:
+                        for line in f:
+                            if len(items) >= HISTORY_MAX_EVENTS:
+                                break
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                evt = json.loads(line)
+                            except Exception:
+                                continue
+                            etype = evt.get("type")
+                            if etype == "validate" and evt.get("status") == "failed":
+                                add("首跑验证失败", evt.get("message") or "")
+                            elif etype == "script_invalid":
+                                add("脚本静态校验失败", evt.get("message") or "")
+                            elif etype in ("patch_invalid", "pages_invalid"):
+                                add("补丁/资产未应用", evt.get("message") or "")
+                            elif etype == "llm_error":
+                                add("模型调用失败", evt.get("error") or "")
+            except Exception:  # noqa: BLE001
+                pass
+        if not items:
+            add("最终失败", getattr(gen, "error_message", "") or "")
+        if not items:
+            continue
+        block = f"- 第 {getattr(gen, 'id', '?')} 次生成：\n" + "\n".join(items)
+        if used + len(block) > HISTORY_MAX_CHARS:
+            break
+        used += len(block)
+        blocks.append(block)
+    return "\n".join(blocks)
+
+
+def _is_related(label: str, text_norm: str) -> bool:
+    """控件主词（或同义说法）是否出现在用例文案里。"""
+    core = _label_core(label)
+    core_norm = _text_norm(core)
+    if len(core_norm) >= 2 and core_norm in text_norm:
+        return True
+    for alias in _LABEL_ALIASES.get(core, ()):
+        alias_norm = _text_norm(alias)
+        if len(alias_norm) >= 2 and alias_norm in text_norm:
+            return True
+    return False
+
+
+def _auto_value(label: str, kind: str, options: list[str], current: str) -> str:
+    """无关必填控件的占位值（下拉沿用界面默认，文本按字段语义生成）。"""
+    if kind == "select":
+        return current or (options[0] if options else "")
+    lowered = label.lower()
+    for hints, value in _AUTO_VALUE_RULES:
+        if any(h.lower() in lowered for h in hints):
+            return value
+    return "auto"
+
+
+def _param_name(label: str, index: int, used: set[str]) -> str:
+    """由控件 label 推导参数名：保留中文/字母数字，重名追加序号。"""
+    cleaned = re.sub(r"[^\w]", "", label or "", flags=re.UNICODE)[:12]
+    base = cleaned if cleaned and not _GENERIC_LABEL_RE.match(label or "") else f"f{index}"
+    name = base
+    suffix = 2
+    while name in used:
+        name = f"{base}{suffix}"
+        suffix += 1
+    return name
+
+
+def _inventory_schema(inventory: list[dict], case_text: str = "") -> list[dict]:
+    """把实测控件清单确定性转换成参数结构（零模型 token）。
+
+    只把与用例步骤相关的控件提取为可编辑参数（related=True）；其余控件
+    （related=False）由系统自动处理：必填项生成占位值注入，非必填项留空，
+    避免无关参数挤占面板、增加生成与维护成本。
+    """
+    text_norm = _text_norm(case_text)
+    schema: list[dict] = []
+    used: set[str] = set()
+    for index, item in enumerate(inventory, 1):
+        raw_label = str(item.get("label") or f"控件{index}").strip()[:40]
+        label = _label_core(raw_label) or raw_label
+        kind = _PARAM_TYPE_MAP.get(str(item.get("type") or "text"), "str")
+        options = [str(o).strip()[:40] for o in item.get("options") or [] if str(o).strip()][:60]
+        unique = kind == "str" and any(h in raw_label.lower() for h in _UNIQUE_HINTS)
+        # 用例文案为空（极少见）时退回全量，避免参数面板空白无从调整
+        related = _is_related(raw_label, text_norm) if text_norm else True
+        if kind == "bool":
+            default = bool(item.get("checked"))
+            desc = "勾选控件，默认" + ("勾选" if default else "未勾选")
+            required = False
+        elif kind == "select":
+            default = str(item.get("value") or "").strip() or (options[0] if options else "")
+            desc = "下拉控件" + ("，可选值：" + "、".join(options) if options else "")
+            required = bool(options)
+        else:
+            required = bool(item.get("required")) or unique
+            if related:
+                # 相关控件保留弹窗里的真实值；空值可能是用例要验证的点，不强制非空
+                default = str(item.get("value") or "").strip()
+                desc = "输入控件" + (f"，当前值 {default}" if default else "（弹窗内为空）")
+                required = False
+            else:
+                default = _auto_value(label, kind, options, "") if required else ""
+                desc = "输入控件，" + ("必填，已由系统自动填写" if required else "非必填，留空")
+        if unique and not default:
+            default = "auto@example.com" if ("邮箱" in raw_label or "email" in raw_label.lower()) else "auto"
+        if not related:
+            desc += "（未在用例步骤中提到，由系统自动处理）"
+        name = _param_name(label, index, used)
+        used.add(name)
+        entry = {
+            "name": name,
+            "label": label,
+            "type": kind,
+            "required": required,
+            "default": default,
+            "desc": desc,
+            "unique": unique,
+            "related": related,
+            "auto": not related,
+        }
+        if options:
+            entry["options"] = options
+        schema.append(entry)
+    return schema
+
+
+def _format_params(schema: list[dict]) -> str:
+    """把参数结构转成给模型看的说明：相关参数逐条列出，其余压成一行自动值。"""
+    related = [item for item in schema if item.get("related", True)]
+    auto = [item for item in schema if not item.get("related", True)]
+    lines: list[str] = []
+    if related:
+        lines.append("与本用例步骤相关的参数（可在参数面板查看/修改，脚本必须从这里取值）：")
+        for item in related:
+            default = item.get("default")
+            extra = f"，默认值={default}" if default not in (None, "") else "，默认空"
+            if item.get("options"):
+                extra += "，可选值：" + "、".join(str(o) for o in item["options"])
+            if item.get("unique"):
+                extra += "，每次运行自动追加唯一后缀"
+            lines.append(f'- params["{item["name"]}"] ← 「{item["label"]}」（{item["type"]}{extra}）')
+    else:
+        lines.append("本用例没有需要人工调整的参数，表单数据由系统自动处理。")
+    if auto:
+        pairs = []
+        for item in auto:
+            value = item.get("default")
+            pairs.append(f"{item['name']}={'空' if value in (None, '') else value}")
+        lines.append("其余控件由系统自动填充（必填项生成占位值、非必填留空），可直接读取但不要修改：")
+        lines.append("、".join(pairs))
+    return "\n".join(lines)
+
+
+def _used_params(tree) -> set[str]:
+    """收集源码里 ``params["x"]`` 与 ``params.get("x")`` 形式的参数引用。"""
+    import ast
+
+    used: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript):
+            value = node.value
+            key = node.slice
+            if (
+                isinstance(value, ast.Name)
+                and value.id == "params"
+                and isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+            ):
+                used.add(key.value)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "get"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "params"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                used.add(node.args[0].value)
+    return used
+
+
+def _check_params(source: str, schema: list[dict]) -> str:
+    """参数化静态校验：声明 params fixture、使用真实参数名、不引用结构外 key。"""
+    import ast
+
+    if not schema:
+        return ""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+    tests = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    ]
+    args = [a.arg for fn in tests for a in fn.args.args + fn.args.kwonlyargs]
+    used = _used_params(tree)
+    names = [str(item.get("name")) for item in schema if item.get("name")]
+    unknown = sorted(used - set(names))
+    if unknown:
+        return (
+            "脚本引用了参数结构外的 key："
+            + "、".join(unknown)
+            + "。可用参数名："
+            + "、".join(names)
+        )
+    # 既没有相关参数、也没有需要自动注入的值时（如纯点击取消类用例），不强制使用 params
+    needs_params = any(
+        item.get("related", True) or item.get("default") not in (None, "") for item in schema
+    )
+    if not needs_params:
+        return ""
+    if "params" not in args:
+        return (
+            "弹窗内存在与用例步骤相关的控件，测试函数必须声明 params fixture"
+            "（def test_xxx(page, params)），表单取值一律从 params 读取。"
+        )
+    if not used:
+        return (
+            "脚本没有使用 params fixture 取值；表单里的业务数据（用户名/邮箱/名称等）"
+            '必须写成 params["参数名"]，禁止写死。可用参数名：' + "、".join(names)
+        )
+    return ""
 
 
 PAGE_FACTS_LIMIT = 1200
@@ -1139,7 +1524,14 @@ class GenerationJob:
                 "写脚本前先看，避免重复踩坑）：\n"
                 + lesson_text
             )
-        self.corpus_chars = len(corpus_text) + len(lesson_text)
+        history_text = _case_failure_history(case, self.db)
+        if history_text:
+            user_parts.append(
+                "本用例历史失败记录（此前各轮生成在本地首跑/校验阶段真实失败的事实，"
+                "逐条核对，不要重复同样的定位与断言写法；与当前实测冲突时以实测为准）：\n"
+                + history_text
+            )
+        self.corpus_chars = len(corpus_text) + len(lesson_text) + len(history_text)
         if not is_fix:
             user_parts.append(
                 "弹窗打开后，系统会自动用 browser_evaluate 枚举其中的可编辑控件并以"
@@ -1244,7 +1636,7 @@ class GenerationJob:
         rounds = 0
         bad_json = 0
         early_finish = 0
-        pages_rounds = 0
+        static_rounds = 0
         last_source = ""
         budget_notice = False
         finish_nudged = False
@@ -1289,6 +1681,16 @@ class GenerationJob:
                 )
 
             concurrency.set_progress(self.case_id, "模型思考", f"已调用工具 {self.tool_calls} 次")
+            # 记录本轮请求规模：卡住时能直接从过程日志判断是模型端慢/超时，而不是无感空转
+            trimmed = _trim_messages(messages)
+            self._write_log(
+                {
+                    "type": "llm_request",
+                    "model": model_name,
+                    "messages": len(trimmed),
+                    "chars": sum(len(str(m.get("content") or "")) for m in trimmed),
+                }
+            )
             try:
                 reply = _chat(llm, messages, temperature=0.2)
             except Exception as e:
@@ -1454,8 +1856,8 @@ class GenerationJob:
                     and not last_source
                 ):
                     # 资产阶段本身也计入轮次，防止模型反复只交 pages 空转
-                    pages_rounds += 1
-                    if pages_rounds > MAX_FIX_ROUNDS:
+                    static_rounds += 1
+                    if static_rounds > MAX_STATIC_ROUNDS:
                         return {
                             "status": GenerationStatus.FAILED,
                             "error_category": ErrorCategory.SCRIPT,
@@ -1478,7 +1880,7 @@ class GenerationJob:
                     )
                     if pages_problem:
                         self._write_log({"type": "pages_invalid", "message": pages_problem})
-                        if pages_rounds > MAX_FIX_ROUNDS:
+                        if static_rounds > MAX_STATIC_ROUNDS:
                             discard_pages(staged)
                             return {
                                 "status": GenerationStatus.FAILED,
@@ -1525,10 +1927,10 @@ class GenerationJob:
                         continue
                     source, patch_problem = _apply_patches(last_source, patch_payload)
                     if patch_problem:
-                        rounds += 1
+                        static_rounds += 1
                         self.fix_rounds += 1
                         self._write_log({"type": "patch_invalid", "message": patch_problem})
-                        if rounds > MAX_FIX_ROUNDS:
+                        if static_rounds > MAX_STATIC_ROUNDS:
                             return {
                                 "status": GenerationStatus.FAILED,
                                 "error_category": ErrorCategory.SCRIPT,
@@ -1556,11 +1958,20 @@ class GenerationJob:
                 problem = _check_script(source)
                 if not problem:
                     problem = _compile(source)
+                # 生成期按实测控件结构要求脚本使用 params fixture（修复期沿用既有参数，不重提取）
+                param_schema = (
+                    _inventory_schema(inventory, _case_text(self.case))
+                    if (not is_fix and inventory)
+                    else []
+                )
+                param_values = {item["name"]: item.get("default") for item in param_schema}
+                if not problem and not is_fix:
+                    problem = _check_params(source, param_schema)
                 if problem:
-                    rounds += 1
+                    static_rounds += 1
                     self.fix_rounds += 1
                     self._write_log({"type": "script_invalid", "message": problem})
-                    if rounds > MAX_FIX_ROUNDS:
+                    if static_rounds > MAX_STATIC_ROUNDS:
                         return {
                             "status": GenerationStatus.FAILED,
                             "error_category": ErrorCategory.SCRIPT,
@@ -1587,9 +1998,9 @@ class GenerationJob:
                     reuse_staging=self._staged_pages is not None,
                 )
                 if pages_problem:
-                    pages_rounds += 1
+                    static_rounds += 1
                     self._write_log({"type": "pages_invalid", "message": pages_problem})
-                    if pages_rounds > MAX_FIX_ROUNDS:
+                    if static_rounds > MAX_STATIC_ROUNDS:
                         discard_pages(staged)
                         return {
                             "status": GenerationStatus.FAILED,
@@ -1615,8 +2026,14 @@ class GenerationJob:
 
                 last_source = source
                 concurrency.set_progress(self.case_id, "首跑验证", "本地执行脚本验证")
-                # 首跑用暂存资产，通过后才并入正式目录
-                result = self._validate(source, auth, pages_root=self._staged_pages)
+                # 首跑用暂存资产，通过后才并入正式目录；同时注入待固化的参数默认值
+                result = self._validate(
+                    source,
+                    auth,
+                    pages_root=self._staged_pages,
+                    params_schema=param_schema,
+                    params_values=param_values,
+                )
                 self._write_log(
                     {
                         "type": "validate",
@@ -1628,7 +2045,12 @@ class GenerationJob:
                 if result.get("run_status") == "passed":
                     adopt_pages(int(self.case.project_id), self._staged_pages)
                     self._staged_pages = None
-                    return self._solidify(source, ok=True)
+                    return self._solidify(
+                        source,
+                        ok=True,
+                        params=None if is_fix else param_values,
+                        schema=None if is_fix else param_schema,
+                    )
 
                 rounds += 1
                 self.fix_rounds += 1
@@ -1933,6 +2355,7 @@ class GenerationJob:
                 if items and _merge_inventory(inventory, items) and inventory_notices < 3:
                     inventory_notices += 1
                     self._write_log({"type": "controls", "items": inventory})
+                    param_schema = _inventory_schema(inventory, _case_text(self.case))
                     messages.append(
                         {
                             "role": "user",
@@ -1941,7 +2364,14 @@ class GenerationJob:
                                 "脚本里必须逐个覆盖这些控件（下拉用真实可选值，"
                                 "勾选项的初始状态以实测为准）：\n"
                                 + _format_inventory(inventory)
-                                + "\n清单之外的控件不要凭空编造。"
+                                + "\n\n【参数结构】系统按实测控件与用例步骤提取了参数："
+                                "与步骤相关的控件是可编辑参数，其余控件由系统自动填充"
+                                "（必填项生成占位值、非必填留空）。测试函数必须声明 params fixture："
+                                "def test_xxx(page, params)，控件的业务取值一律写成 params[\"参数名\"]，"
+                                "禁止写死；参数名必须原样使用：\n"
+                                + _format_params(param_schema)
+                                + "\nunique=true 的参数由运行器自动追加运行时间后缀，不要自己再拼时间戳。"
+                                "清单之外的控件不要凭空编造。"
                                 "下拉的真实可选值已由系统读好（面板未展开时也能读到），"
                                 "不要再自己点开下拉逐个读；弹窗内严禁按 Escape（实测会关闭整个弹窗）。"
                             ),
@@ -2006,7 +2436,28 @@ class GenerationJob:
 
     # ===== 落盘 =====
 
-    def _validate(self, source: str, auth, pages_root: Path | None = None) -> dict:
+    def _case_view(self, schema: list[dict] | None, values: dict | None):
+        """构造带参数取值的只读用例视图，供首跑注入 params.json。
+
+        首跑时参数还没固化到数据库，用视图代替 ORM 对象；runner 只读这几个字段。
+        """
+        return SimpleNamespace(
+            id=int(self.case.id),
+            project_id=int(self.case.project_id),
+            site=getattr(self.case, "site", "") or "",
+            title=getattr(self.case, "title", "") or "",
+            params_schema_json=list(schema or []),
+            params_json=dict(values or {}),
+        )
+
+    def _validate(
+        self,
+        source: str,
+        auth,
+        pages_root: Path | None = None,
+        params_schema: list[dict] | None = None,
+        params_values: dict | None = None,
+    ) -> dict:
         project_id = int(self.case.project_id)
         case_dir = paths.case_dir(project_id, int(self.case.id))
         case_dir.mkdir(parents=True, exist_ok=True)
@@ -2014,7 +2465,7 @@ class GenerationJob:
         tmp.write_text(source, encoding="utf-8")
         try:
             return run_script(
-                self.case,
+                self._case_view(params_schema, params_values),
                 self.env,
                 script_path=tmp,
                 run_dir=paths.new_run_dir(project_id, int(self.case.id)) / "validate",
@@ -2030,8 +2481,19 @@ class GenerationJob:
                 "error_message": f"{type(e).__name__}: {e}",
             }
 
-    def _solidify(self, source: str, ok: bool) -> dict:
-        """写入正式脚本并更新用例状态（版本自增，旧版归档）。"""
+    def _solidify(
+        self,
+        source: str,
+        ok: bool,
+        params: dict | None = None,
+        schema: list[dict] | None = None,
+    ) -> dict:
+        """写入正式脚本并更新用例状态（版本自增，旧版归档）。
+
+        schema 非 None 表示本次生成重新提取了参数结构：同步落库参数默认值，
+        前端参数面板即可展示/编辑，执行时由 runner 注入 params.json。
+        schema 为 None（修复场景）时保留已有参数不变。
+        """
         case = self.case
         project_id = int(case.project_id)
         case_id = int(case.id)
@@ -2055,6 +2517,13 @@ class GenerationJob:
             "script_hash": digest,
             "last_generated_at": _now(),
         }
+        if schema is not None:
+            # 参数结构随脚本一起固化：空列表表示本次未观察到弹窗控件（清掉旧参数）
+            fields.update(
+                params_schema_json=list(schema),
+                params_json=dict(params or {}),
+                params_updated_at=_now(),
+            )
         if ok:
             fields.update(
                 status=CaseStatus.IMPLEMENTED,

@@ -2,17 +2,17 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Play, Sparkles, Wrench, X, Copy, FileCode } from 'lucide-react';
-import { useAutomationStore, type AutomationCase, type GenerationRecord, type ScriptRun } from '../../store/automationStore';
+import { useAutomationStore, type AutomationCase, type GenerationRecord, type ParamSchemaItem, type ScriptRun } from '../../store/automationStore';
 import { Btn, ErrorCategoryTag, Field, StatusBadge, inputStyle, STATUS_META } from './common';
 
 const BASE = '/api/modules/ui/automation';
 const ACTIVE = new Set(['generating', 'fixing', 'running']);
-type Tab = 'snapshot' | 'script' | 'runs' | 'generations';
+type Tab = 'snapshot' | 'params' | 'script' | 'runs' | 'generations';
 type ScriptPreview = { content: string; version: number; pages: { name: string; path?: string; content: string }[] };
 
 export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; onClose: () => void }) {
   const { t } = useTranslation();
-  const { getCase, getScript, listRuns, listGenerations, updateCase, generate, fix, run } = useAutomationStore();
+  const { getCase, getScript, listRuns, listGenerations, updateCase, saveParams, generate, fix, run } = useAutomationStore();
   const [detail, setDetail] = useState<AutomationCase | null>(null);
   const [script, setScript] = useState<ScriptPreview>({ content: '', version: 0, pages: [] });
   const [runs, setRuns] = useState<ScriptRun[]>([]);
@@ -20,6 +20,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
   const [tab, setTab] = useState<Tab>('snapshot');
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ title: '', precondition: '', steps: '', expected: '' });
+  const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [preview, setPreview] = useState<{ url: string; label: string } | null>(null);
   const [openRunLog, setOpenRunLog] = useState<number | null>(null);
@@ -29,9 +30,22 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
   // 执行/生成记录里是否还有在跑的任务（决定是否继续轮询刷新列表与日志）
   const anyRunning = runs.some((r) => r.status === 'running') || gens.some((g) => g.status === 'running');
 
+  // 参数默认回填：本用例已填值优先，其次用生成时提取的默认值
+  const initParams = (c: AutomationCase) => {
+    const init: Record<string, string> = {};
+    for (const item of c.params_schema || []) {
+      const filled = c.params?.[item.name];
+      if (filled !== undefined && filled !== null) init[item.name] = String(filled);
+      else if (item.default !== undefined && item.default !== null) init[item.name] = String(item.default);
+      else init[item.name] = '';
+    }
+    setParamValues(init);
+  };
+
   const refresh = async (id: number) => {
     const c = await getCase(id);
     setDetail(c);
+    initParams(c);
     setForm({
       title: c.title,
       precondition: c.precondition,
@@ -87,6 +101,8 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
   if (caseId === null || detail === null) return null;
 
   const active = ACTIVE.has(detail.status);
+  // 与用例步骤无关的控件不进参数面板（必填项由系统生成占位值、非必填留空）
+  const paramSchema = (detail.params_schema || []).filter((item) => item.related !== false);
   const statusLabel = (s: string) => t(STATUS_META[s]?.labelKey || s, s);
   const errorLabel = (c: string | null) =>
     c === 'environment'
@@ -131,6 +147,52 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
     }
   };
 
+  const saveParamValues = async () => {
+    if (!detail) return;
+    // 只展示/保存与用例步骤相关的参数，其余控件由系统自动填充
+    const schema = (detail.params_schema || []).filter((item) => item.related !== false);
+    const missing = schema.filter((item) => item.required && !String(paramValues[item.name] ?? '').trim());
+    if (missing.length > 0) {
+      toast.error(
+        t('ui.auto.paramRequiredMissing', '必填参数不能为空：{{names}}', {
+          names: missing.map((item) => item.label || item.name).join('、'),
+        }),
+      );
+      return;
+    }
+    const values: Record<string, string | number | boolean> = {};
+    for (const item of schema) {
+      const raw = paramValues[item.name] ?? '';
+      if (item.type === 'int') {
+        const n = Number(raw);
+        values[item.name] = raw !== '' && Number.isFinite(n) ? n : raw;
+      } else if (item.type === 'bool') {
+        values[item.name] = raw === 'true';
+      } else {
+        values[item.name] = raw;
+      }
+    }
+    setSubmitting(true);
+    try {
+      await saveParams(detail.id, values);
+      toast.success(t('ui.auto.paramsSaved', '参数已保存，建议重新执行'));
+      await refresh(detail.id);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const paramSource = (item: ParamSchemaItem) => {
+    const filled = detail?.params?.[item.name];
+    const customized =
+      filled !== undefined && filled !== null && String(filled) !== String(item.default ?? '');
+    return customized
+      ? t('ui.auto.paramSourceCase', '本用例')
+      : t('ui.auto.paramSourceDefault', '生成默认');
+  };
+
   const siteLabel = (s: string) =>
     s === 'backend' ? t('ui.auto.siteBackend', '后台') : t('ui.auto.siteFrontend', '前台');
 
@@ -162,6 +224,12 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
 
   const tabs: { key: Tab; label: string }[] = [
     { key: 'snapshot', label: t('ui.auto.tabSnapshot', '用例快照') },
+    {
+      key: 'params',
+      label: paramSchema.length > 0
+        ? `${t('ui.auto.tabParams', '参数')}（${paramSchema.length}）`
+        : t('ui.auto.tabParams', '参数'),
+    },
     { key: 'script', label: t('ui.auto.tabScript', '脚本') },
     { key: 'runs', label: `${t('ui.auto.tabRuns', '执行记录')}（${runs.length}）` },
     { key: 'generations', label: `${t('ui.auto.tabGenerations', '生成记录')}（${gens.length}）` },
@@ -312,6 +380,96 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                   <div style={{ display: 'flex', gap: 8 }}>
                     <Btn variant="primary" onClick={save} disabled={submitting}>{t('ui.auto.save', '保存')}</Btn>
                     <Btn onClick={() => setEditing(false)}>{t('ui.auto.cancel', '取消')}</Btn>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {tab === 'params' && (
+            <div>
+              {paramSchema.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                  {t(
+                    'ui.auto.paramsNoSchema',
+                    '该用例没有提取到参数。生成脚本时若在弹窗中操作过表单，系统会按实测控件自动生成参数，可在此查看并修改取值。',
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                    {t(
+                      'ui.auto.paramsHint',
+                      '参数由生成时实测的弹窗控件自动提取，仅影响本用例下一次执行的注入值；唯一参数会自动追加运行时间后缀。',
+                    )}
+                  </div>
+                  <div style={{ overflowX: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
+                    <div style={paramGridStyle}>
+                      <span>{t('ui.auto.paramName', '参数')}</span>
+                      <span>{t('ui.auto.paramDesc', '含义')}</span>
+                      <span>{t('ui.auto.paramType', '类型')}</span>
+                      <span>{t('ui.auto.paramRequired', '必填')}</span>
+                      <span>{t('ui.auto.paramCurrent', '当前值')}</span>
+                      <span>{t('ui.auto.paramDefault', '默认值')}</span>
+                      <span>{t('ui.auto.paramUnique', '唯一')}</span>
+                      <span>{t('ui.auto.paramSource', '来源')}</span>
+                    </div>
+                    {paramSchema.map((item) => {
+                      const disabled = active || submitting;
+                      const value = paramValues[item.name] ?? '';
+                      const setValue = (next: string) => setParamValues((prev) => ({ ...prev, [item.name]: next }));
+                      return (
+                        <div key={item.name} style={paramRowStyle}>
+                          <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11 }} title={item.label}>
+                            {item.name}
+                          </span>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.desc || item.label}>
+                            {item.desc || item.label || '—'}
+                          </span>
+                          <span style={{ color: 'var(--text-muted)' }}>{item.type || 'str'}</span>
+                          <span style={{ color: item.required ? 'var(--error)' : 'var(--text-muted)' }}>
+                            {item.required ? t('ui.auto.yes', '是') : t('ui.auto.no', '否')}
+                          </span>
+                          {item.type === 'bool' ? (
+                            <select value={value} onChange={(e) => setValue(e.target.value)} style={inputStyle} disabled={disabled}>
+                              <option value="">—</option>
+                              <option value="true">{t('ui.auto.boolTrue', '是')}</option>
+                              <option value="false">{t('ui.auto.boolFalse', '否')}</option>
+                            </select>
+                          ) : item.type === 'select' ? (
+                            <select value={value} onChange={(e) => setValue(e.target.value)} style={inputStyle} disabled={disabled}>
+                              <option value="">—</option>
+                              {(item.options || []).map((opt) => (
+                                <option key={opt} value={opt}>{opt}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type="text"
+                              value={value}
+                              onChange={(e) => setValue(e.target.value)}
+                              style={inputStyle}
+                              disabled={disabled}
+                            />
+                          )}
+                          <span style={{ color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }} title={String(item.default ?? '')}>
+                            {item.default === undefined || item.default === null || item.default === '' ? '—' : String(item.default)}
+                          </span>
+                          <span style={{ color: item.unique ? 'var(--accent)' : 'var(--text-muted)' }}>
+                            {item.unique ? t('ui.auto.yes', '是') : t('ui.auto.no', '否')}
+                          </span>
+                          <span style={{ color: 'var(--text-muted)' }}>{paramSource(item)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                    <Btn variant="primary" onClick={saveParamValues} disabled={active || submitting}>
+                      {t('ui.auto.save', '保存')}
+                    </Btn>
+                    <Btn onClick={() => initParams(detail)} disabled={active || submitting}>
+                      {t('ui.auto.paramReset', '重置')}
+                    </Btn>
                   </div>
                 </>
               )}
@@ -579,6 +737,28 @@ const preStyle: CSSProperties = {
 };
 
 const textareaStyle: CSSProperties = { ...inputStyle, resize: 'vertical', fontFamily: 'inherit' };
+
+const PARAM_COLUMNS = '110px 1fr 64px 52px 160px 110px 56px 76px';
+const paramGridStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: PARAM_COLUMNS,
+  gap: 8,
+  padding: '8px 10px',
+  fontSize: 11,
+  color: 'var(--text-muted)',
+  borderBottom: '1px solid var(--border)',
+  background: 'var(--bg-card)',
+  whiteSpace: 'nowrap',
+};
+const paramRowStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: PARAM_COLUMNS,
+  gap: 8,
+  alignItems: 'center',
+  padding: '7px 10px',
+  fontSize: 12,
+  borderBottom: '1px solid var(--bg-card)',
+};
 
 const linkStyle: CSSProperties = { color: 'var(--accent)', fontSize: 11, textDecoration: 'none' };
 const linkButtonStyle: CSSProperties = {

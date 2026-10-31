@@ -42,6 +42,10 @@ class CasePatch(BaseModel):
     site: str | None = None
 
 
+class ParamsUpdate(BaseModel):
+    values: dict[str, str | int | float | bool | None] = {}
+
+
 def _case_out(case, db: UIAutomationDatabase) -> dict:
     progress = concurrency.get_progress(case.id)
     return {
@@ -57,6 +61,9 @@ def _case_out(case, db: UIAutomationDatabase) -> dict:
         "category_path": case.category_path,
         "kb_folder_id": case.kb_folder_id,
         "site": case.site,
+        "params": dict(case.params_json or {}),
+        "params_schema": list(case.params_schema_json or []),
+        "params_updated_at": case.params_updated_at.isoformat() if case.params_updated_at else None,
         "status": case.status,
         "script_version": case.script_version,
         "has_script": bool(case.script_rel_path),
@@ -172,6 +179,46 @@ def delete_case(
         raise HTTPException(409, "用例正在生成/执行中，无法删除")
     db.delete_case(case_id)
     return {"deleted": case_id}
+
+
+@router.get("/{case_id}/params")
+def get_case_params(
+    case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)
+) -> dict:
+    case = _get_or_404(case_id, db)
+    return {
+        "values": dict(case.params_json or {}),
+        "schema": list(case.params_schema_json or []),
+        "updated_at": case.params_updated_at.isoformat() if case.params_updated_at else None,
+    }
+
+
+@router.put("/{case_id}/params")
+def put_case_params(
+    case_id: int,
+    body: ParamsUpdate,
+    db: UIAutomationDatabase = Depends(get_automation_db),
+) -> dict:
+    """保存本用例参数值（不改脚本，只影响下一次执行的注入值）。"""
+    case = _get_or_404(case_id, db)
+    if case.status in (CaseStatus.GENERATING, CaseStatus.FIXING, CaseStatus.RUNNING):
+        raise HTTPException(409, "用例正在生成/执行中，请稍后再修改参数")
+    schema = list(case.params_schema_json or [])
+    if not schema:
+        raise HTTPException(400, "该用例没有可编辑的参数（未从弹窗控件提取到参数结构）")
+    names = {str(item.get("name")) for item in schema if isinstance(item, dict) and item.get("name")}
+    unknown = [key for key in body.values if key not in names]
+    if unknown:
+        raise HTTPException(400, f"参数不在参数结构内：{', '.join(unknown)}")
+    # 只合并提交的相关参数，无关控件由系统自动填充的值原样保留
+    merged = dict(case.params_json or {})
+    merged.update(body.values)
+    db.update_case(
+        case_id,
+        params_json=merged,
+        params_updated_at=datetime.now(),
+    )
+    return _case_out(db.get_case(case_id), db)
 
 
 @router.get("/{case_id}/script")

@@ -14,6 +14,11 @@ export interface AutomationCase {
   kb_folder_id: number | null;
   /** 端：frontend（根路径）/ backend（base_url + /manage） */
   site: string;
+  /** 本用例参数值（生成时由实测弹窗控件提取，可在参数面板修改） */
+  params: Record<string, string | number | boolean | null>;
+  /** 参数结构 */
+  params_schema: ParamSchemaItem[];
+  params_updated_at: string | null;
   status: string;
   script_version: number;
   has_script: boolean;
@@ -24,6 +29,21 @@ export interface AutomationCase {
   progress: { phase: string; message: string; updated_at: string } | null;
   created_at: string | null;
   updated_at: string | null;
+}
+
+export interface ParamSchemaItem {
+  name: string;
+  label?: string;
+  type?: 'str' | 'int' | 'bool' | 'select';
+  required?: boolean;
+  default?: string | number | boolean | null;
+  desc?: string;
+  unique?: boolean;
+  options?: string[];
+  /** 是否与用例步骤相关（相关才会展示在参数面板） */
+  related?: boolean;
+  /** 是否由系统自动填充（不展示、不可编辑） */
+  auto?: boolean;
 }
 
 export interface ImportableCase {
@@ -126,6 +146,10 @@ interface AutomationState {
   run: (caseId: number) => Promise<void>;
   getCase: (caseId: number) => Promise<AutomationCase>;
   updateCase: (caseId: number, data: Partial<AutomationCase>) => Promise<AutomationCase>;
+  saveParams: (
+    caseId: number,
+    values: Record<string, string | number | boolean | null>,
+  ) => Promise<AutomationCase>;
   deleteCase: (caseId: number) => Promise<void>;
   getScript: (caseId: number) => Promise<{
     content: string;
@@ -272,6 +296,18 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
+    });
+    if (!r.ok) throw new Error(await parseError(r));
+    const updated = await r.json();
+    set({ cases: get().cases.map((c) => (c.id === caseId ? updated : c)) });
+    return updated;
+  },
+
+  saveParams: async (caseId, values) => {
+    const r = await fetch(`${BASE}/cases/${caseId}/params`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values }),
     });
     if (!r.ok) throw new Error(await parseError(r));
     const updated = await r.json();

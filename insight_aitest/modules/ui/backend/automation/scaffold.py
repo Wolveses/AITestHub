@@ -102,9 +102,9 @@ def _insight_browser(_insight_playwright):
 
 @pytest.fixture
 def params():
-    """用例参数（流程 schema 默认值 + 本用例取值，由后端合并后写入 params.json）。
+    """用例参数（生成时从实测弹窗控件提取的 schema 默认值 + 本用例取值）。
 
-    独立脚本用例没有流程参数，直接返回空字典；unique 参数已由后端追加运行时间后缀。
+    没有参数结构的独立脚本用例直接返回空字典；unique 参数已由后端追加运行时间后缀。
     """
     path = os.environ.get("INSIGHT_UI_PARAMS") or ""
     if not path or not os.path.exists(path):
