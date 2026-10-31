@@ -30,12 +30,8 @@ export function AutomationPage() {
     setCategoryFilter,
     keyword,
     setKeyword,
-    flows,
-    flowFilter,
-    setFlowFilter,
     loadCases,
     loadEnvs,
-    loadFlows,
     generate,
     fix,
     run,
@@ -64,9 +60,8 @@ export function AutomationPage() {
     if (projectId !== null) {
       loadCases();
       loadEnvs();
-      loadFlows();
     }
-  }, [projectId, statusFilter, categoryFilter, flowFilter, loadCases, loadEnvs, loadFlows]);
+  }, [projectId, statusFilter, categoryFilter, loadCases, loadEnvs]);
 
   // 搜索防抖
   useEffect(() => {
@@ -208,20 +203,6 @@ export function AutomationPage() {
           <option value="running">{t('ui.auto.statusRunning', '执行中')}</option>
         </select>
 
-        <select
-          value={flowFilter ?? ''}
-          onChange={(e) => setFlowFilter(e.target.value === '' ? null : Number(e.target.value))}
-          style={{ ...inputStyle, width: 160 }}
-          title={t('ui.auto.flowFilterHint', '按流程筛选')}
-        >
-          <option value="">{t('ui.auto.allFlows', '全部流程')}</option>
-          {flows.map((f) => (
-            <option key={f.id} value={f.id}>
-              {f.title} (v{f.version})
-            </option>
-          ))}
-        </select>
-
         <div style={{ position: 'relative' }}>
           <Search size={13} style={{ position: 'absolute', left: 8, top: 8, color: 'var(--text-muted)' }} />
           <input
@@ -250,7 +231,7 @@ export function AutomationPage() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 150px 60px 110px 90px',
+              gridTemplateColumns: '1fr 60px 110px 90px',
               gap: 8,
               padding: '8px 16px',
               fontSize: 11,
@@ -261,7 +242,6 @@ export function AutomationPage() {
             }}
           >
             <span>{t('ui.auto.caseTitle', '用例标题')}</span>
-            <span>{t('ui.auto.flow', '流程')}</span>
             <span>{t('ui.auto.site', '端')}</span>
             <span>{t('ui.auto.status', '状态')}</span>
             <span>{t('ui.auto.actions', '操作')}</span>
@@ -281,7 +261,7 @@ export function AutomationPage() {
                     onClick={() => setDetailId(c.id)}
                     style={{
                       display: 'grid',
-                      gridTemplateColumns: '1fr 150px 60px 110px 90px',
+                      gridTemplateColumns: '1fr 60px 110px 90px',
                       gap: 8,
                       alignItems: 'center',
                       padding: '9px 16px',
@@ -303,31 +283,6 @@ export function AutomationPage() {
                         <ErrorCategoryTag category={c.last_error_category} label={errorLabel(c.last_error_category)} />
                       )}
                     </div>
-                    <span
-                      onClick={(e) => {
-                        if (!c.flow_id) return;
-                        e.stopPropagation();
-                        setFlowFilter(c.flow_id);
-                      }}
-                      title={
-                        c.flow_id && c.flow_title
-                          ? `${c.flow_title}（${t('ui.auto.flowChipHint', '点击按该流程筛选')}）`
-                          : ''
-                      }
-                      style={{
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        color: !c.flow_title
-                          ? 'var(--text-muted)'
-                          : c.flow_status === 'archived'
-                            ? 'var(--text-muted)'
-                            : 'var(--accent)',
-                        cursor: c.flow_id ? 'pointer' : 'default',
-                      }}
-                    >
-                      {c.flow_title || '—'}
-                    </span>
                     <span
                       onClick={(e) => {
                         e.stopPropagation();

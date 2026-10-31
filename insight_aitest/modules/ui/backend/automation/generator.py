@@ -14,7 +14,6 @@ import hashlib
 import json
 import logging
 import os
-import pprint
 import py_compile
 import re
 import shutil
@@ -25,8 +24,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from insight_aitest.modules.ui.backend.automation import concurrency, paths
-from insight_aitest.modules.ui.backend.automation import flows as flowlib
+from insight_aitest.modules.ui.backend.automation import concurrency, corpus, paths
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 from insight_aitest.modules.ui.backend.automation.env_service import prepare_auth, site_url
 from insight_aitest.modules.ui.backend.automation.models import (
@@ -34,7 +32,6 @@ from insight_aitest.modules.ui.backend.automation.models import (
     ErrorCategory,
     GenerationKind,
     GenerationStatus,
-    UiFlowStatus,
 )
 from insight_aitest.modules.ui.backend.automation.mcp_client import MCPError, PlaywrightMCPClient
 from insight_aitest.modules.ui.backend.automation.runner import EnvMissingError, run_script
@@ -145,7 +142,7 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
 - 每次只输出一个 JSON 对象，不要输出 Markdown 代码块、不要输出多余文字。
 - 探索阶段：{"thought": "查看当前页面结构", "tool": "browser_snapshot", "args": {}}
   （tool 必须是下面「可用工具」清单里的真实工具名；不要把示例文字原样抄回来）
-- 完成阶段：{"thought": "脚本已就绪", "tool": "finish", "args": {"script": "完整 Python 源码"}}
+- 完成阶段：{"thought": "脚本已就绪", "tool": "finish", "args": {"script": "完整 Python 源码", "pages": [...]}}
 
 脚本硬性要求：
 1. 同步 API：from playwright.sync_api import expect；禁止 async/await。
@@ -237,87 +234,35 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     等待一律用 expect(...) 自动轮询（to_be_visible / to_be_hidden / to_contain_text），
     或用 common 里已有的 wait_* 封装。
 29. 安全边界（违反会被静态校验直接拒绝）：
-    - 只允许 import：playwright、pytest、pages.*、common.*、flows.*、env，以及 time/json/re/tempfile/datetime/random/string/uuid/typing
+    - 只允许 import：playwright、pytest、pages.*、common.*、env，以及 time/json/re/tempfile/datetime/random/string/uuid/typing
     - 禁止 import os/sys/subprocess/pathlib/shutil/requests 等，禁止读取配置文件与环境凭证
     - 禁止调用 open/eval/exec/compile/getattr/setattr
     - 上传样例文件用 data_path("文件名")；产物落盘用 artifact_path("文件名")
-30. 本次必须同时产出「流程脚本」与「用例脚本」两段代码（同目录同流程的用例要复用同一套流程）：
-    - 流程脚本：把完整页面操作流程沉淀成 run(page, params)：跳转、填表、点击保存都写在这里，
-      数据一律取自 params["name"]，禁止写死任何业务数据。
-      流程 run() 末尾必须包含对本流程预期结果的断言，断言值一律取自 params，例如
-      expect(page.get_by_role("row").filter(has_text=params["username"])).to_be_visible()；
-      复用时同目录用例只换参数取值、不再写断言，所有校验都由流程承担。
-      流程元数据只写在 flow 的 key/title/route/keywords/params 字段（系统会自动合成 FLOW），
-      source 里不需要再写 FLOW 字面量（写了也以源码内容为准）。
-      其中 params 每项为 {"name","label","type","required","default","example","desc","unique","options"}，
-      type 取 str/int/bool/select；会重复冲突的数据（用户名/邮箱等）必须 unique=true。
-      **参数必须覆盖完整**：流程里出现的每一个可编辑控件都要有一个参数，run() 里用 params 控制其取值：
-      - 可输入控件：textbox、密码框、PIN、textarea、日期/时间输入框；
-      - 可勾选控件：checkbox/radio/开关（如「使用默认密码」「登录IP限制」「系统管理员」），type=bool；
-      - 下拉/选择控件：无输入框的纯下拉（如「部门」「用户等级」「有效期」）type=select，
-        **真实选项由系统在弹窗出现时自动枚举并随「自动枚举控件清单」下发**（面板即使未展开
-        也能从 DOM 读到），直接采用清单里的可选值写入 options（一个都不能少），
-        default 填界面当前显示值；不要自己点开下拉逐个读，更不要按 Escape 收起下拉。
-        既可输入又能选的下拉用 type=str，并在 desc 里列出可选值；
-      - 被禁用不可编辑的输入框本身可不建参数，但控制它启用的开关必须建参数；
-      - 纯展示文本与按钮不建参数。
-      bool 参数 default 必须与界面初始勾选状态一致。finish 之前逐个对照快照与下拉选项核对，
-      漏一个控件、少一个下拉选项都视为不合格。
-    - 用例脚本：只 import 流程的 run 并传本用例参数，再补本用例独有的断言：
-        from flows.<流程目录> import run
-        def test_xxx(page, params):
-            run(page, params)
-            expect(page.get_by_role("row").filter(has_text=params["username"])).to_be_visible()
-      导入路径不确定时写成 from flows.f_{目录id}.{key}_v1 import run（提示里会给出目录 id）。
-      用例脚本里禁止再写页面操作，禁止出现参数值字面量（断言必须用 params["name"]）。
-      参数 fixture 由运行脚手架注入（function 级 params fixture），直接用它即可。
-      流程脚本源码只能放在 flow.source；不要把流程脚本（含 def run）写进 pages/ 或 common/，
-      也不能 `from pages.xxx import run`。
-    - finish 的 args 结构：
-      {"script": "用例脚本", "flow": {"key","title","route","keywords","params","source"},
-       "params": {"name": "本用例取值"}, "pages": [...]}
-    - 按钮/文案以浏览器快照里真实出现的文本为准（用例步骤写「保存」时，界面按钮可能叫「确定」），
-      不要照抄用例描述里的字面文案。
-31. 流程 key 规则：英文小写字母开头，只含小写字母/数字/下划线，≤32 字符（如 create_user）。
-32. 本用例参数取值（args.params）必须覆盖流程 params 的**全部** name（单选/勾选项用 true/false，
-    下拉项取 options 中的一个），不允许只给必填项就省略其余项。
-33. 表单校验失败（控制台报错或字段下方出现红色提示）时，必须**在当前弹窗内直接修改该字段**，
+30. 「同目录参考脚本」是本项目同目录下已被验证通过的脚本：先用它们确认页面路由、定位写法
+    与断言风格，能直接沿用的直接沿用（同样的页面对象、common 函数、表格断言），减少重复探索。
+    但参考脚本只是历史经验，与当前用例步骤冲突时一律以当前用例与真实快照为准，
+    不要照抄参考脚本里的业务数据、固定账号或断言文案。
+    按钮/文案以浏览器快照里真实出现的文本为准（用例步骤写「保存」时，界面按钮可能叫「确定」），
+    不要照抄用例描述里的字面文案。
+31. 表单校验失败（控制台报错或字段下方出现红色提示）时，必须**在当前弹窗内直接修改该字段**，
     不要点取消/关闭再重新打开弹窗；提示里给出格式限制（如「6-32位字符，仅支持大小写字母、数字、中文、邮箱」）
     时，换成符合该限制的唯一值（例如 user + 时间戳，不要带下划线/符号），严禁重复提交同一非法值。
     同一步骤连续 2 次失败说明策略错了，换定位方式或换数据，不要原地重试。
-34. 工具调用有硬预算（60 次，含自动补快照），用尽即判定本次生成失败。
+32. 工具调用有硬预算（60 次，含自动补快照），用尽即判定本次生成失败。
     操作到「预期结果」并拿到关键选择器后就应立即 finish，不要为了再确认一遍而反复快照。
-35. ref 只能来自最近一次 browser_snapshot / browser_find 的输出。快照被截断看不到目标按钮时，
+33. ref 只能来自最近一次 browser_snapshot / browser_find 的输出。快照被截断看不到目标按钮时，
     用 browser_find(text="新增") 或再 browser_snapshot 取真实 ref，**禁止猜测或凭记忆写 e125
     这类 ref**（不存在的 ref 会被直接拒绝，反复猜会耗尽预算）。
-36. 弹窗表单的 label 常常只是普通文本、没有 for/id 关联，get_by_label() 会必然超时。下拉控件
+34. 弹窗表单的 label 常常只是普通文本、没有 for/id 关联，get_by_label() 会必然超时。下拉控件
     通常是自定义 combobox（div[role=combobox]，不是原生 select，也没有 ant-select 类名）：
     按顺序用 dialog.get_by_role('combobox').nth(0/1/2…) 定位并点击，再点
     page.get_by_role('option', name=选项文案) 选择。字段控件也优先按 role + 顺序定位
     （input 用 dialog.get_by_role('textbox').nth(i)、勾选用 get_by_role('checkbox', name=文案)）。
-37. 页面对象是普通类：必须 `UsersPage(page).open(dept=...)` 这样实例化后调用（方法签名里
+35. 页面对象是普通类：必须 `UsersPage(page).open(dept=...)` 这样实例化后调用（方法签名里
     没有 self）；不要写成 `UsersPage.open(page, ...)`。pages/ 下已存在的文件禁止覆盖，
     提交会被拒绝；需要新能力时新建文件，或直接复用已有方法签名。
 """
 
-# 复用已有流程时的提示词：不探索页面、不调用浏览器工具，一次产出用例脚本 + 参数取值
-REUSE_SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。当前用例所在目录已有可复用的流程脚本，
-你的任务不是重新探索页面，而是为该用例生成「薄用例脚本 + 参数取值」。
-交互协议：每次只输出一个 JSON 对象，不要输出 Markdown 代码块、不要输出多余文字。
-完成阶段：{"thought": "脚本已就绪", "tool": "finish", "args": {"script": "用例脚本", "params": {"name": "取值"}}}
-
-硬性要求：
-1. 绝对不要调用任何浏览器工具，你也没有工具；直接输出 finish。
-2. 用例脚本必须 from <给出的流程模块> import run，并在测试函数里调用 run(page, params)；
-   本用例独有的断言写在 run 之后，断言值一律取自 params["name"]，禁止出现参数值字面量。
-3. 只定义 def test_xxx(page, params) 函数，不要写 main、不要 launch 浏览器、禁止 async/await。
-4. 禁止固定睡眠（page.wait_for_timeout / time.sleep）；断言只用 expect(...) 正向校验。
-5. 只允许 import：playwright、pytest、pages.*、common.*、flows.*、env 与少量标准库；
-   禁止 import os/sys/subprocess/pathlib/shutil/requests，禁止 open/eval/exec/compile/getattr/setattr。
-6. args.params 必须覆盖流程 params 的**全部** name（含 bool 勾选项与 select 下拉项），
-   不允许只给必填项；unique 参数给稳定基准值（运行器会自动追加时间后缀）。
-7. 流程脚本已存在且被验证过，不要修改流程脚本本身，也不要提交 pages。
-"""
 
 
 def _now() -> datetime:
@@ -411,7 +356,7 @@ def _parse_json_reply(content: str) -> dict | None:
             pass
         start = raw.find("{", start + 1)
     for obj in found:
-        if isinstance(obj.get("tool"), str) or "script" in obj or "flow" in obj:
+        if isinstance(obj.get("tool"), str) or "script" in obj:
             return obj
     # 没有一个像真实回复：说明整段 JSON 被截断（通常是输出长度打满），
     # 不要退化成脚本里的碎片对象，否则会被误判成「工具名无效」
@@ -424,7 +369,7 @@ CHAT_MAX_TOKENS = 8192
 def _chat(llm, messages: list[dict], **kwargs) -> str:
     """统一模型调用：显式给足输出预算。
 
-    finish 一轮要吐完整流程脚本 + 用例脚本，模型默认输出上限常把 JSON 截断成非法内容。
+    finish 一轮要吐完整用例脚本（含 pages），模型默认输出上限常把 JSON 截断成非法内容。
     """
     kwargs.setdefault("max_tokens", CHAT_MAX_TOKENS)
     try:
@@ -473,7 +418,6 @@ _ALLOWED_IMPORTS = {
     "pytest",
     "pages",
     "common",
-    "flows",
     "time",
     "json",
     "re",
@@ -520,227 +464,6 @@ def _check_sandbox(source: str, kind: str) -> str:
     return ""
 
 
-def _used_params(tree) -> set[str]:
-    """收集源码里 ``params["x"]`` 与 ``params.get("x")`` 形式的参数引用。"""
-    import ast
-
-    used: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Subscript):
-            value = node.value
-            key = node.slice
-            if (
-                isinstance(value, ast.Name)
-                and value.id == "params"
-                and isinstance(key, ast.Constant)
-                and isinstance(key.value, str)
-            ):
-                used.add(key.value)
-        elif isinstance(node, ast.Call):
-            func = node.func
-            if (
-                isinstance(func, ast.Attribute)
-                and func.attr == "get"
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "params"
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
-            ):
-                used.add(node.args[0].value)
-    return used
-
-
-def _check_flow_source(source: str) -> tuple[str, dict | None]:
-    """流程脚本静态校验：FLOW 字面量 + run(page, params) + 沙箱。"""
-    import ast
-
-    src = _clean_script(source)
-    if not src.strip():
-        return "流程脚本为空", None
-    meta = flowlib.read_flow_meta(src)
-    if meta is None:
-        got = (src.strip().splitlines() or [""])[0][:120]
-        try:
-            ast.parse(src)
-        except SyntaxError as e:
-            return (
-                f"流程脚本语法错误：{e.msg}（第 {e.lineno} 行）。"
-                "常见原因是字符串里出现真实换行/未转义引号，请保证 source 是可直接编译的 Python 源码。"
-                f"首行：{got}",
-                None,
-            )
-        return (
-            "flow.source 必须是完整流程脚本源码（模块级 FLOW = {...} + def run(page, params)），"
-            f"不能是函数名或标题；流程脚本也不要放进 pages/。当前收到：{got}",
-            None,
-        )
-    problem = flowlib.validate_flow_key(meta["key"])
-    if problem:
-        return problem, None
-    if not meta["title"]:
-        return "流程缺少 title（如「新增用户」）", None
-    try:
-        tree = ast.parse(src)
-    except SyntaxError as e:
-        return f"流程脚本语法错误: {e.msg}", None
-    run_fn = next(
-        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run"), None
-    )
-    if run_fn is None:
-        return "流程脚本必须定义 run(page, params)", None
-    if len(run_fn.args.args) < 2:
-        return "流程入口必须是 run(page, params)（两个参数）", None
-    problem = _check_sandbox(src, kind="流程脚本 ")
-    if problem:
-        return problem, None
-    if "get_by_label(" in src:
-        return (
-            "流程脚本里用了 get_by_label()：被测表单的 label 往往没有与控件关联，这行必然超时。"
-            "下拉改用 dialog.get_by_role('combobox').nth(n) 展开后点 get_by_role('option', "
-            "name=选项文案)；输入框用 get_by_role('textbox').nth(i) 或 dialog.locator('input[type=...]').nth(i)。",
-            None,
-        )
-    if re.search(r"\w+Page\.\w+\s*\(\s*page\b", src):
-        return (
-            "流程脚本把页面对象的实例方法当成静态方法调用了（XxxPage.method(page, ...)）。"
-            "正确写法是 XxxPage(page).method(...)，页面对象构造时已经接收了 page。",
-            None,
-        )
-    empty_options = [
-        p["name"] for p in meta["params"] if p["type"] == "select" and not p["options"]
-    ]
-    if empty_options:
-        return (
-            "以下下拉参数缺少 options："
-            + "、".join(empty_options)
-            + "。纯下拉控件必须先用浏览器工具展开下拉、读取真实选项文本后写进 options，"
-            "不能留空或凭空编造。",
-            None,
-        )
-    unused = sorted({p["name"] for p in meta["params"]} - _used_params(tree))
-    if unused:
-        return (
-            "以下流程参数已声明但没有在 run() 中使用："
-            + "、".join(unused)
-            + "。每个参数都必须在 run() 里真正驱动对应控件（params[\"name\"]），"
-            "不能只用一部分；确实不需要的参数请删掉，不要为了凑数量声明。",
-            None,
-        )
-    return "", meta
-
-
-_FLOW_IMPORT_RE = re.compile(r"from\s+flows\.[A-Za-z0-9_.]*\s+import\s+run")
-
-
-def _rewrite_flow_import(source: str, module: str) -> str:
-    """把用例脚本里的 flows.* import 改写为实际模块路径。
-
-    模型不知道真实的 ``f_<目录id>.<key>_v1`` 路径，常猜成 flows.f_usm；
-    这里直接改写而不是报错重试，避免把生成轮次浪费在路径猜测上。
-    """
-    fixed, replaced = _FLOW_IMPORT_RE.subn(f"from {module} import run", source)
-    return fixed if replaced else source
-
-
-def _check_case_flow_source(source: str, module: str, schema: list) -> str:
-    """复用例脚本校验：必须 import 流程 run、使用 params、且参数 key 在 schema 内。"""
-    import ast
-
-    try:
-        tree = ast.parse(source)
-    except SyntaxError as e:
-        return f"用例脚本语法错误: {e.msg}"
-    imported = False
-    used: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and (node.module or "") == module:
-            if any(alias.name == "run" for alias in node.names):
-                imported = True
-        elif isinstance(node, ast.Subscript):
-            value = node.value
-            if isinstance(value, ast.Name) and value.id == "params":
-                key = node.slice
-                if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                    used.add(key.value)
-    if not imported:
-        return f"用例脚本必须 `from {module} import run`，页面操作全部收敛在流程脚本里"
-    names = {p["name"] for p in flowlib.normalize_params(schema)}
-    unknown = sorted(used - names)
-    if unknown:
-        return f"用例脚本引用了流程参数结构外的 key：{', '.join(unknown)}"
-    # 流程复用约定：断言写在流程 run() 里，用例脚本只负责把 params 传给 run，
-    # 因此用例侧不强制出现 params 下标访问。
-    return _check_sandbox(source, kind="用例脚本 ")
-
-
-_EMPTY_HINTS = ("不填", "留空", "为空", "空值", "置空", "不输入", "输入为空", "为空串")
-_EMPTY_NEGATIONS = ("不能", "不可", "不得", "不应", "禁止", "不允许", "勿")
-_UNCHECK_HINTS = ("不勾选", "取消勾选", "去掉勾选", "不选中", "关闭")
-
-
-def _alias_hits(text: str, aliases: list[str], hints: tuple[str, ...], negations: tuple[str, ...] = ()):
-    """别名附近 20 字窗口内是否命中提示词（且未出现否定词）。"""
-    for raw_alias in aliases:
-        alias = (raw_alias or "").strip()
-        if not alias:
-            continue
-        idx = text.find(alias)
-        while idx != -1:
-            window = text[max(0, idx - 8) : idx + len(alias) + 12]
-            if any(h in window for h in hints) and not any(n in window for n in negations):
-                return True
-            idx = text.find(alias, idx + len(alias))
-    return False
-
-
-def _mentions_empty(text: str, aliases: list[str]) -> bool:
-    """判断文本中是否有「某字段留空/不填」的明确要求（排除「不能为空」这类断言）。"""
-    return _alias_hits(text, aliases, _EMPTY_HINTS, _EMPTY_NEGATIONS)
-
-
-def _mentions_unchecked(text: str, aliases: list[str]) -> bool:
-    """判断文本中是否有「不勾选某开关」的明确要求。"""
-    return _alias_hits(text, aliases, _UNCHECK_HINTS)
-
-
-def _auto_param_value(item: dict, case) -> str:
-    """必填参数缺取值时的自动注入值。
-
-    - 布尔取 False，下拉取第一个选项，整型取 1；
-    - ``unique=true`` 的字符串给稳定基准值（运行器会追加时间后缀保证唯一）；
-    - 邮箱类给合法占位邮箱；
-    - 其余文本用用例标题兜底（显示名称类更可读）。
-    """
-    kind = str(item.get("type") or "str")
-    name = str(item.get("name") or "").lower()
-    if kind == "bool":
-        return False
-    if kind == "select":
-        options = [str(o) for o in (item.get("options") or []) if str(o).strip()]
-        return options[0] if options else ""
-    if kind == "int":
-        return 1
-    if item.get("unique"):
-        return "auto"
-    if "mail" in name:
-        return "auto@example.com"
-    title = str(getattr(case, "title", "") or "").strip()
-    return title[:30] or "auto"
-
-
-def _case_template(case, module: str) -> str:
-    """复用流程时的用例脚本模板：只有 import + run(page, params)，不含任何页面操作。"""
-    title = str(getattr(case, "title", "") or "").strip().replace('"""', "'''")
-    case_id = int(getattr(case, "id", 0) or 0)
-    return (
-        f"from {module} import run\n\n\n"
-        f"def test_case_{case_id}(page, params):\n"
-        f'    """{title}"""\n'
-        "    run(page, params)\n"
-    )
-
-
 def _compile(source: str) -> str:
     """py_compile 校验，返回错误信息（空串为通过）。"""
     fd, tmp = tempfile.mkstemp(suffix=".py", dir=str(paths.workspace_root()))
@@ -770,11 +493,8 @@ def _chromium_installed() -> bool:
     return any(p.exists() and any(p.glob("chromium*")) for p in candidates)
 
 
-def doctor(env, need_mcp: bool = True) -> str:
-    """环境自检，返回错误信息；空串表示通过。
-
-    need_mcp=False 时（复用已有流程）不要求 Node/npx，因为不启动 playwright MCP。
-    """
+def doctor(env) -> str:
+    """环境自检，返回错误信息；空串表示通过。"""
     if env is None:
         return "项目未配置环境，请先在「环境管理」中新增"
     if not (env.base_url or "").strip():
@@ -785,7 +505,7 @@ def doctor(env, need_mcp: bool = True) -> str:
     cfg = get_llm_config()
     if not cfg.llm_api_key:
         return "未配置 LLM API Key，无法生成脚本"
-    if need_mcp and shutil.which("npx") is None:
+    if shutil.which("npx") is None:
         return "未检测到 Node.js/npx，playwright MCP 无法启动（请安装 Node 18+）"
     if not _chromium_installed():
         return "未安装 playwright chromium 浏览器，请执行 python -m playwright install chromium"
@@ -1022,18 +742,12 @@ def _copy_assets(src: Path, dst: Path) -> None:
         init.write_text("# -*- coding: utf-8 -*-\n", encoding="utf-8")
 
 
-def _real_flows_dir(project_id: int) -> Path:
-    return paths.project_scripts_dir(project_id) / "flows"
-
-
 def _prepare_staging(project_id: int, case_id: int) -> Path:
-    """重建暂存目录：正式 common/pages/flows 的副本，首跑用它（已验证才并入正式目录）。"""
+    """重建暂存目录：正式 common/pages 的副本，首跑用它（已验证才并入正式目录）。"""
     staging = paths.staging_root(project_id, case_id)
     shutil.rmtree(staging, ignore_errors=True)
     for package in ASSET_DIRS:
         _copy_assets(_asset_root(project_id, package), staging / package)
-    # 复用路径要在暂存目录里 import 已存在的流程，必须一并复制 flows/
-    _copy_assets(_real_flows_dir(project_id), staging / "flows")
     return staging
 
 
@@ -1073,103 +787,6 @@ def stage_pages(project_id: int, case_id: int, payload) -> tuple[str, Path | Non
     return "", staging
 
 
-def _ensure_flow_meta(source: str, payload: dict) -> str:
-    """模型常把流程元数据只填在 flow.key/title/... 里，source 只写 run()。
-
-    源码缺少模块级 ``FLOW`` 时用 payload 元数据补出合法字面量（追加在文件末尾，
-    避免破坏可能存在的 __future__ 导入），保证流程文件可被 AST 读取与复用匹配。
-    """
-    if flowlib.read_flow_meta(source) is not None:
-        return source
-    meta = {
-        "key": str(payload.get("key") or "").strip(),
-        "title": str(payload.get("title") or "").strip(),
-        "route": str(payload.get("route") or "").strip(),
-        "keywords": [str(k).strip() for k in (payload.get("keywords") or []) if str(k).strip()],
-        "params": flowlib.normalize_params(payload.get("params")),
-    }
-    if not meta["key"] or not meta["title"]:
-        return source
-    return source.rstrip() + "\n\n\nFLOW = " + pprint.pformat(meta, width=100, sort_dicts=False) + "\n"
-
-
-def stage_flow(db, project_id: int, case_id: int, payload, case) -> tuple[str, Path | None, dict | None]:
-    """校验并暂存新流程脚本（首跑通过后才由 adopt_flow 落正式目录 + 建库）。
-
-    返回 (错误信息, 暂存根目录, 流程信息)。
-    """
-    if not isinstance(payload, dict) or not payload:
-        return "", None, None
-    folder_id = int(getattr(case, "kb_folder_id", None) or 0)
-    source = _ensure_flow_meta(str(payload.get("source") or ""), payload)
-    problem, meta = _check_flow_source(source)
-    if problem:
-        return problem, None, None
-    key = meta["key"]
-    # 同 key 重新生成（force_new_flow）走版本递增，而不是报冲突逼模型改名：
-    # 否则同一目录会散落多个近似流程，参数结构也随之分裂。
-    existing = db.get_flow_by_key(project_id, folder_id, key)
-    version = int(existing.version or 1) + 1 if existing is not None else 1
-    staging = paths.staging_root(project_id, case_id)
-    # staging_root 自带 mkdir，exists() 恒为真；必须确认 common/pages 包已复制，
-    # 否则暂存目录只有 flows，首跑会报 ModuleNotFoundError: No module named 'common'
-    if not all((staging / pkg / "__init__.py").exists() for pkg in ASSET_DIRS):
-        staging = _prepare_staging(project_id, case_id)
-    target = staging / "flows" / f"f_{folder_id}" / f"{key}_v{version}.py"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    init = target.parent / "__init__.py"
-    if not init.exists():
-        init.write_text("# -*- coding: utf-8 -*-\n", encoding="utf-8")
-    target.write_text(_clean_script(source), encoding="utf-8")
-    info = {
-        "meta": meta,
-        "module": paths.flow_module(folder_id, key, version),
-        "folder_id": folder_id,
-        "version": version,
-        "file": target,
-    }
-    return "", staging, info
-
-
-def adopt_flow(db, project_id: int, info: dict | None) -> int | None:
-    """首跑通过后把流程脚本写入正式 flows/ 目录并建库（文件只增不覆盖）。"""
-    if not info:
-        return None
-    meta = info["meta"]
-    folder_id = int(info["folder_id"])
-    version = int(info.get("version") or 1)
-    target = paths.flow_script(project_id, folder_id, meta["key"], version)
-    source = info["file"].read_text(encoding="utf-8")
-    if target.exists() and target.read_text(encoding="utf-8") != source:
-        # 仅可能来自失败任务遗留的孤儿文件（库里无记录），覆盖即可
-        logger.warning("流程脚本已存在且内容不同，按新版本内容覆盖：%s", target)
-    target.write_text(source, encoding="utf-8")
-    existing = db.get_flow_by_key(project_id, folder_id, meta["key"])
-    if existing is not None:
-        # 同 key 重新生成：更新原流程记录到新版本（旧版本脚本文件保留，可回溯）
-        db.update_flow(
-            int(existing.id),
-            title=meta.get("title") or meta["key"],
-            route=meta.get("route") or "",
-            keywords=meta.get("keywords") or [],
-            params_schema=meta.get("params") or [],
-            module=info["module"],
-            script_rel_path=paths.to_rel(target),
-            version=version,
-            status=UiFlowStatus.ACTIVE,
-        )
-        return int(existing.id)
-    return flowlib.create_flow_record(
-        db,
-        project_id=project_id,
-        folder_id=folder_id,
-        meta=meta,
-        module=info["module"],
-        script_rel_path=paths.to_rel(target),
-        version=version,
-    )
-
-
 def adopt_pages(project_id: int, staging: Path | None) -> None:
     """首跑通过后，把暂存资产并入正式目录（common 覆盖前备份，pages 只增）。"""
     if staging is None:
@@ -1206,17 +823,9 @@ def discard_pages(staging: Path | None) -> None:
 class GenerationJob:
     """一次生成/修复任务（后台线程执行）。"""
 
-    def __init__(
-        self,
-        case_id: int,
-        kind: str,
-        reuse_flow_id: int | None = None,
-        force_new_flow: bool = False,
-    ) -> None:
+    def __init__(self, case_id: int, kind: str) -> None:
         self.case_id = case_id
         self.kind = kind
-        self.reuse_flow_id = reuse_flow_id
-        self.force_new_flow = force_new_flow
         self.db = get_automation_db()
         self.case = self.db.get_case(case_id)
         self.env = self.db.default_env(self.case.project_id) if self.case else None
@@ -1226,7 +835,6 @@ class GenerationJob:
         self.started = time.time()
         self.tool_calls = 0
         self.model_name = ""
-        self.flow = None
         self._log = None
         self._staged_pages: Path | None = None
 
@@ -1309,19 +917,8 @@ class GenerationJob:
         llm = get_llm()
         self.model_name = get_llm_config().chat_model
 
-        # 复用判定在启动 MCP 之前完成：命中则完全跳过浏览器探索
-        concurrency.set_progress(self.case_id, "匹配流程", "查找同目录可复用流程")
-        flow, flow_error = self._resolve_flow(llm, is_fix)
-        if flow_error:
-            return {
-                "status": GenerationStatus.FAILED,
-                "error_category": ErrorCategory.CASE,
-                "message": flow_error,
-            }
-        self.flow = flow
-
         concurrency.set_progress(self.case_id, "自检", "检查 Node/浏览器/模型配置")
-        problem = doctor(self.env, need_mcp=flow is None)
+        problem = doctor(self.env)
         if problem:
             return {
                 "status": GenerationStatus.FAILED,
@@ -1337,9 +934,6 @@ class GenerationJob:
                 "error_category": ErrorCategory.ENV,
                 "message": f"登录态准备失败：{auth.message}",
             }
-
-        if flow is not None:
-            return self._reuse_generate(flow, llm, auth, is_fix)
 
         client = PlaywrightMCPClient(
             storage_state=auth.storage_state_path,
@@ -1360,442 +954,6 @@ class GenerationJob:
             return self._react_loop(client, llm, self.model_name, auth, is_fix)
         finally:
             client.close()
-
-    # ===== 流程复用 =====
-
-    def _resolve_flow(self, llm, is_fix: bool) -> tuple[object | None, str]:
-        """确定本次生成复用的流程；返回 (flow, 错误信息)。"""
-        case = self.case
-        project_id = int(case.project_id)
-        if self.reuse_flow_id is not None:
-            flow = self.db.get_flow(int(self.reuse_flow_id))
-            if flow is None or int(flow.project_id) != project_id:
-                return None, "指定的复用流程不存在或不属于当前项目"
-            if flow.status != UiFlowStatus.ACTIVE:
-                return None, "指定的复用流程已归档，无法复用"
-            return flow, ""
-        if self.force_new_flow:
-            return None, ""
-        # 修复 & 已挂流程的用例：沿用原流程，不再匹配到别的流程
-        if is_fix or case.flow_id:
-            if case.flow_id:
-                flow = self.db.get_flow(int(case.flow_id))
-                if flow is not None and flow.status == UiFlowStatus.ACTIVE:
-                    return flow, ""
-            if is_fix:
-                return None, ""
-            # 原流程已归档/删除：继续按同目录匹配，匹配不到再新建
-
-        candidates = flowlib.match_candidates(self.db, case)
-        if not candidates:
-            return None, ""
-        best_flow, best_score, detail = candidates[0]
-        if best_score >= flowlib.AUTO_THRESHOLD:
-            self._write_log(
-                {"type": "flow_auto_match", "flow_id": best_flow.id, "score": best_score, "detail": detail}
-            )
-            return best_flow, ""
-        if best_score >= flowlib.GRAY_LOW:
-            chosen = flowlib.classify_match(llm, case, candidates[:3])
-            self._write_log(
-                {
-                    "type": "flow_classify",
-                    "score": best_score,
-                    "detail": detail,
-                    "chosen": chosen.id if chosen is not None else None,
-                }
-            )
-            return chosen, ""
-        return None, ""
-
-    def _reuse_generate(self, flow, llm, auth, is_fix: bool) -> dict:
-        """复用已有流程：不启动 MCP、不探索页面，单次产出用例脚本 + 参数取值。"""
-        case = self.case
-        project_id = int(case.project_id)
-        case_id = int(case.id)
-        schema = flowlib.normalize_params(flow.params_schema)
-        module = flow.module or paths.flow_module(flow.folder_id, flow.flow_key, flow.version)
-        flow_path = paths.resolve_rel(flow.script_rel_path)
-        if not flow_path.exists():
-            return {
-                "status": GenerationStatus.FAILED,
-                "error_category": ErrorCategory.SCRIPT,
-                "message": f"流程脚本文件不存在：{flow.script_rel_path}",
-            }
-        flow_source = flow_path.read_text(encoding="utf-8")
-        concurrency.set_progress(
-            self.case_id, "复用流程", f"复用「{flow.title}」，跳过浏览器探索"
-        )
-        self._write_log(
-            {"type": "reuse_flow", "flow_id": flow.id, "module": module, "version": flow.version}
-        )
-
-        # 约定：复用=全部复用（流程脚本、页面对象、common 一并沿用），用例只靠参数取值区分，
-        # 因此非修复场景完全不调用模型，直接套模板 + 参数首跑。
-        if not is_fix:
-            return self._reuse_parameterized(flow, module, schema, auth)
-
-        site = getattr(case, "site", "") or ""
-        site_label = "后台管理端" if site == "backend" else "前台用户端"
-        parts = [
-            f"任务：{'修复' if is_fix else '生成'}下面的用例脚本，直接复用已有流程，不要重新探索页面。",
-            f"当前端：{site_label}",
-            f"流程模块：{module}（用例脚本必须 `from {module} import run`，运行脚手架已注入 page 与 params fixture）",
-            f"流程标题：{flow.title}\n流程路由：{flow.route or '（未记录）'}",
-            "流程参数结构：\n" + json.dumps(schema, ensure_ascii=False, indent=2),
-            f"本用例当前参数取值：\n{json.dumps(dict(case.params_json or {}), ensure_ascii=False)}",
-            "流程脚本源码：\n```python\n" + flow_source + "\n```",
-            "用例信息：\n" + _case_brief(case),
-        ]
-        if is_fix and case.last_error_message:
-            parts.append(
-                f"上次执行失败（{case.last_error_category or '未知'}）：\n{case.last_error_message[:4000]}"
-            )
-        if is_fix:
-            current = paths.case_script(project_id, case_id)
-            if current.exists():
-                parts.append(
-                    "当前用例脚本：\n```python\n" + current.read_text(encoding="utf-8") + "\n```"
-                )
-            parts.append("请先分析失败原因，再输出修复后的完整用例脚本。")
-
-        messages = [
-            {"role": "system", "content": REUSE_SYSTEM_PROMPT},
-            {"role": "user", "content": "\n\n".join(parts)},
-        ]
-
-        rounds = 0
-        bad_json = 0
-        while True:
-            if time.time() - self.started > MAX_SECONDS:
-                return {
-                    "status": GenerationStatus.FAILED,
-                    "error_category": ErrorCategory.MODEL,
-                    "message": "生成超时，已终止。可稍后重试",
-                }
-            concurrency.set_progress(self.case_id, "模型思考", "复用流程，生成用例脚本")
-            try:
-                reply = _chat(llm, messages, temperature=0.2)
-            except Exception as e:
-                return {
-                    "status": GenerationStatus.FAILED,
-                    "error_category": ErrorCategory.MODEL,
-                    "message": f"模型调用失败：{type(e).__name__}: {e}",
-                }
-            parsed = _parse_json_reply(reply)
-            if parsed is None:
-                bad_json += 1
-                self._write_log({"type": "bad_json", "content": _truncate(reply)})
-                if bad_json >= 3:
-                    return {
-                        "status": GenerationStatus.FAILED,
-                        "error_category": ErrorCategory.MODEL,
-                        "message": "模型连续输出非 JSON，无法解析",
-                    }
-                messages.append({"role": "assistant", "content": reply})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "输出不是合法 JSON（也可能是输出被长度上限截断了）。请只输出一个 JSON 对象，"
-                            "不要任何解释段落、不要用 ``` 包裹、不要在 JSON 前后写文字；"
-                            "字符串内部换行必须写成 \\n，双引号必须转义为 \\\"，"
-                            "代码整体作为 script / flow.source 的字符串值。"
-                            "如果内容太长，请删掉重复贴的已有公共代码，只输出本次真正新增/修改的部分。"
-                            '只输出 {"thought": "...", "tool": "browser_snapshot" 或 "finish", "args": {...}}。'
-                        ),
-                    }
-                )
-                continue
-
-            self._write_log({"type": "assistant", "content": reply})
-            tool = str(parsed.get("tool") or "").strip()
-            args = parsed.get("args") or {}
-            if not isinstance(args, dict):
-                args = {}
-            if tool != "finish":
-                messages.append({"role": "assistant", "content": reply})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "当前没有浏览器工具可用，请不要输出工具调用，直接输出 finish JSON（script + params）。",
-                    }
-                )
-                continue
-
-            source = _clean_script(str(args.get("script") or ""))
-            values, intentional = self._prepare_values(schema, args.get("params"))
-            problem = _check_script(source)
-            if not problem:
-                problem = _compile(source)
-            if not problem:
-                problem = _check_case_flow_source(source, module, schema)
-            if not problem:
-                missing = [
-                    p["name"]
-                    for p in schema
-                    if p.get("required")
-                    and values.get(p["name"]) in (None, "")
-                    and p["name"] not in intentional
-                ]
-                if missing:
-                    problem = f"必填参数缺少取值：{', '.join(missing)}"
-            if problem:
-                rounds += 1
-                self._write_log({"type": "script_invalid", "message": problem})
-                if rounds > MAX_FIX_ROUNDS:
-                    return {
-                        "status": GenerationStatus.FAILED,
-                        "error_category": ErrorCategory.SCRIPT,
-                        "message": f"模型产出脚本不可用：{problem}",
-                    }
-                messages.append({"role": "assistant", "content": reply})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"用例脚本未通过校验：{problem}\n"
-                            "请修正后重新输出完整 finish JSON（script + params）。"
-                        ),
-                    }
-                )
-                continue
-
-            concurrency.set_progress(self.case_id, "首跑验证", "本地执行脚本验证")
-            result = self._validate(
-                source, auth, case_override=self._case_with_params(values, schema)
-            )
-            self._write_log(
-                {
-                    "type": "validate",
-                    "status": result.get("run_status"),
-                    "category": result.get("error_category"),
-                    "message": _truncate(result.get("error_message") or ""),
-                }
-            )
-            if result.get("run_status") == "passed":
-                return self._solidify(
-                    source,
-                    ok=True,
-                    extra_fields={
-                        "flow_id": flow.id,
-                        "flow_version": int(flow.version or 1),
-                        "params_json": values,
-                        "params_schema_json": schema,
-                        "params_updated_at": _now(),
-                    },
-                )
-            rounds += 1
-            if rounds > MAX_FIX_ROUNDS:
-                self._solidify(source, ok=False)
-                return {
-                    "status": GenerationStatus.FAILED,
-                    "error_category": result.get("error_category") or ErrorCategory.SCRIPT,
-                    "message": "脚本首跑未通过：" + (result.get("error_message") or "未知错误"),
-                    "script_saved": True,
-                }
-            messages.append({"role": "assistant", "content": reply})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "用例脚本已写入但本地首跑失败。请分析失败信息，修正断言或参数取值后重新输出完整 finish JSON。\n"
-                        f"失败分类：{result.get('error_category')}\n"
-                        f"失败信息：\n{(result.get('error_message') or '')[:4000]}"
-                    ),
-                }
-            )
-            continue
-
-    def _reuse_parameterized(self, flow, module: str, schema: list, auth) -> dict:
-        """全部复用：不重新生成流程/页面对象/公共函数，用例脚本模板化，仅参数取值不同。"""
-        raw = dict(getattr(self.case, "params_json", None) or {})
-        # 复用流程的取值以用例步骤为准：明确留空的字段置空，其余缺省值自动注入
-        values, intentional = self._prepare_values(schema, raw, respect_raw_empty=True)
-        missing = [
-            p["name"]
-            for p in schema
-            if p.get("required")
-            and values.get(p["name"]) in ("", None)
-            and p["name"] not in intentional
-        ]
-        if missing:
-            return {
-                "status": GenerationStatus.FAILED,
-                "error_category": ErrorCategory.CASE,
-                "message": "复用流程缺少必填参数取值："
-                + "、".join(missing)
-                + "，请在参数页补充后重新生成",
-            }
-        source = _case_template(self.case, module)
-        problem = (
-            _check_script(source)
-            or _compile(source)
-            or _check_case_flow_source(source, module, schema)
-        )
-        if problem:
-            return {
-                "status": GenerationStatus.FAILED,
-                "error_category": ErrorCategory.SCRIPT,
-                "message": f"复用用例脚本模板不可用：{problem}",
-            }
-        concurrency.set_progress(self.case_id, "首跑验证", "复用流程 + 参数取值，本地执行验证")
-        result = self._validate(
-            source, auth, case_override=self._case_with_params(values, schema)
-        )
-        self._write_log(
-            {
-                "type": "validate",
-                "status": result.get("run_status"),
-                "category": result.get("error_category"),
-                "message": _truncate(result.get("error_message") or ""),
-            }
-        )
-        if result.get("run_status") == "passed":
-            return self._solidify(
-                source,
-                ok=True,
-                extra_fields={
-                    "flow_id": flow.id,
-                    "flow_version": int(flow.version or 1),
-                    "params_json": values,
-                    "params_schema_json": schema,
-                    "params_updated_at": _now(),
-                },
-            )
-        return {
-            "status": GenerationStatus.FAILED,
-            "error_category": result.get("error_category") or ErrorCategory.SCRIPT,
-            "message": "复用流程首跑未通过："
-            + (result.get("error_message") or "未知错误")
-            + "\n未消耗模型额度，仅调参数取值或修复流程后重试",
-        }
-
-    def _merge_values(self, schema: list, raw) -> dict:
-        """用例取值 ← schema 默认值/示例值（保留显式空串，表示刻意不填）。"""
-        values: dict = {}
-        raw = raw if isinstance(raw, dict) else {}
-        for item in schema:
-            name = item["name"]
-            kind = str(item.get("type") or "str")
-            value = raw.get(name) if name in raw else None
-            # 字符串型显式空串表示「刻意不填」；非字符串的空值仍按默认值处理
-            if value == "" and kind != "str":
-                value = None
-            if value is not None:
-                values[name] = value
-                continue
-            value = item.get("default")
-            if value is None or value == "":
-                value = item.get("example")
-            values[name] = "" if value is None else value
-        return values
-
-    def _fill_required(
-        self,
-        schema: list,
-        values: dict,
-        raw=None,
-        skip: set[str] | None = None,
-        respect_raw_empty: bool = False,
-    ) -> dict:
-        """必填参数没有任何取值时自动注入可用值，避免生成被参数缺失阻断。
-
-        - 用例标题/步骤要求留空的字段（``skip``）→ 保持为空；
-        - ``respect_raw_empty=True``（复用已有流程）时，参数页里显式留空视为刻意不填；
-        - 注入结果随生成成功写入 params_json，参数页可随时人工修改。
-        """
-        raw = raw if isinstance(raw, dict) else {}
-        skip = skip or set()
-        for item in schema:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name") or "")
-            if not name or not item.get("required") or name in skip:
-                continue
-            raw_value = raw.get(name) if name in raw else None
-            if respect_raw_empty:
-                if raw_value is not None:
-                    continue
-            elif raw_value not in (None, ""):
-                continue
-            if values.get(name) not in ("", None):
-                continue
-            values[name] = _auto_param_value(item, self.case)
-        return values
-
-    def _prepare_values(
-        self, schema: list, raw, respect_raw_empty: bool = False
-    ) -> tuple[dict, set[str]]:
-        """合并取值 + 按用例语义置空 + 补齐必填，返回 (取值, 刻意留空的参数名)。"""
-        values = self._merge_values(schema, raw)
-        intentional = self._apply_case_empties(schema, values)
-        if respect_raw_empty and isinstance(raw, dict):
-            for item in schema:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name") or "")
-                if name in raw and isinstance(raw.get(name), str) and raw.get(name) == "":
-                    intentional.add(name)
-        self._fill_required(
-            schema, values, raw=raw, skip=intentional, respect_raw_empty=respect_raw_empty
-        )
-        return values, intentional
-
-    def _apply_case_empties(self, schema: list, values: dict) -> set[str]:
-        """用例标题/步骤明确「留空/不填」的字段，强制置空。
-
-        复用流程时若一味沿用流程默认值，负向用例（如用户名留空）会变成正向用例。
-        """
-        case = self.case
-        parts = [
-            str(getattr(case, "title", "") or ""),
-            str(getattr(case, "precondition", "") or ""),
-            " ".join(str(s) for s in (getattr(case, "steps", None) or [])),
-            str(getattr(case, "expected", "") or ""),
-        ]
-        text = " ".join(p for p in parts if p)
-        marked: set[str] = set()
-        for item in schema:
-            if not isinstance(item, dict):
-                continue
-            kind = str(item.get("type") or "str")
-            name = str(item.get("name") or "")
-            if not name:
-                continue
-            aliases = [str(item.get("label") or ""), name]
-            if kind == "bool":
-                # 「不勾选使用默认密码」这类开关，按用例要求置为未勾选
-                if _mentions_unchecked(text, aliases):
-                    values[name] = False
-                    marked.add(name)
-                continue
-            if kind != "str":
-                continue
-            if _mentions_empty(text, aliases):
-                values[name] = ""
-                marked.add(name)
-        return marked
-
-    def _case_with_params(self, values: dict, schema: list):
-        """首跑用的只读用例视图（带上本次参数，不写库）。"""
-        import types
-
-        case = self.case
-        return types.SimpleNamespace(
-            id=case.id,
-            project_id=case.project_id,
-            title=case.title,
-            precondition=case.precondition,
-            steps=list(case.steps or []),
-            expected=case.expected,
-            site=case.site,
-            params_json=dict(values or {}),
-            params_schema_json=list(schema or []),
-            script_version=case.script_version,
-            kb_folder_id=case.kb_folder_id,
-            flow_id=case.flow_id,
-        )
 
     def _react_loop(self, client, llm, model_name: str, auth, is_fix: bool) -> dict:
         case = self.case
@@ -1827,15 +985,16 @@ class GenerationJob:
             "可用工具：\n" + catalog,
             "用例信息：\n" + _case_brief(case),
         ]
-        if not is_fix:
-            folder_id = int(getattr(case, "kb_folder_id", None) or 0)
+        corpus_text = corpus.reference_scripts(case, self.db)
+        if corpus_text:
             user_parts.append(
-                f"流程模块导入路径固定为：from flows.f_{folder_id}.<流程key>_v1 import run "
-                f"（当前用例目录 id = {folder_id}，路径只用这个数字，禁止用目录名/拼音拼路径）。"
+                "同目录参考脚本（同项目同目录下已通过首跑的脚本，优先沿用其中的路由、定位与断言写法）：\n"
+                + corpus_text
             )
+        if not is_fix:
             user_parts.append(
                 "弹窗打开后，系统会自动用 browser_evaluate 枚举其中的可编辑控件并以"
-                "「自动枚举控件清单」发给你；流程参数必须与该清单逐条对应，不要漏项。"
+                "「自动枚举控件清单」发给你；脚本必须逐个覆盖清单里的控件，不要漏项。"
             )
         catalog_pages = pages_catalog(int(case.project_id))
         if catalog_pages:
@@ -1984,11 +1143,11 @@ class GenerationJob:
             args = parsed.get("args") or {}
             if not isinstance(args, dict):
                 args = {}
-            # 模型常省略 thought/tool，直接给出 finish 内容（script/flow/params）：按 finish 处理
-            if not raw_tool and any(k in parsed for k in ("script", "flow", "params")):
+            # 模型常省略 thought/tool，直接给出 finish 内容（script/pages）：按 finish 处理
+            if not raw_tool and any(k in parsed for k in ("script", "pages")):
                 raw_tool = "finish"
                 args = parsed
-            elif not raw_tool and any(k in args for k in ("script", "flow")):
+            elif not raw_tool and "script" in args:
                 raw_tool = "finish"
             tool = _normalize_tool_name(raw_tool)
             if tool not in ("finish", "browser_close", "browser_kill") and tool not in known_tools:
@@ -2051,7 +1210,7 @@ class GenerationJob:
                             + "、".join(sorted(known_tools))
                             + "\n请只输出 JSON 对象：探索阶段用 "
                             '{"thought": "查看页面结构", "tool": "browser_snapshot", "args": {}}；'
-                            '完成阶段用 {"thought": "...", "tool": "finish", "args": {"script": "...", "flow": {...}, "params": {...}}}。'
+                            '完成阶段用 {"thought": "...", "tool": "finish", "args": {"script": "...", "pages": [...]}}。'
                         ),
                     }
                 )
@@ -2101,19 +1260,6 @@ class GenerationJob:
                 pages_problem, staged = stage_pages(
                     int(self.case.project_id), int(self.case.id), args.get("pages")
                 )
-                if not pages_problem:
-                    misplaced = [
-                        str(item.get("path") or "")
-                        for item in (args.get("pages") or [])
-                        if isinstance(item, dict) and "FLOW = {" in str(item.get("content") or "")
-                    ]
-                    if misplaced:
-                        pages_problem = (
-                            f"流程脚本不允许写进 pages/common（发现 {', '.join(misplaced)}），"
-                            "完整流程源码必须放在 flow.source"
-                        )
-                        discard_pages(staged)
-                        staged = None
                 if pages_problem:
                     pages_rounds += 1
                     self._write_log({"type": "pages_invalid", "message": pages_problem})
@@ -2141,147 +1287,9 @@ class GenerationJob:
                         {"type": "pages_staged", "count": len(args.get("pages") or [])}
                     )
 
-                # 新流程：暂存流程脚本，并要求用例脚本确实复用它（参数化差异）
-                flow_info = None
-                schema: list = []
-                values: dict = {}
-                case_for_run = self.case
-                if not is_fix:
-                    flow_payload = args.get("flow")
-                    declared = [
-                        str(item.get("name") or "")
-                        for item in (flow_payload.get("params") if isinstance(flow_payload, dict) else []) or []
-                        if isinstance(item, dict)
-                    ]
-                    # 参数完整性以弹窗内真实 DOM 枚举结果为准，不依赖模型自述
-                    if inventory and len(declared) < len(inventory):
-                        rounds += 1
-                        self._write_log(
-                            {"type": "params_incomplete", "declared": declared, "controls": inventory}
-                        )
-                        if rounds > MAX_FIX_ROUNDS:
-                            discard_pages(self._staged_pages)
-                            self._staged_pages = None
-                            return {
-                                "status": GenerationStatus.FAILED,
-                                "error_category": ErrorCategory.SCRIPT,
-                                "message": (
-                                    f"流程参数不完整：弹窗内实测 {len(inventory)} 个可编辑控件，"
-                                    f"但 flow.params 只声明了 {len(declared)} 个，已终止以免固化残缺流程"
-                                ),
-                            }
-                        messages.append({"role": "assistant", "content": reply})
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"参数不完整：弹窗内实测 {len(inventory)} 个可编辑控件，"
-                                    f"当前 flow.params 只有 {len(declared)} 个。每个控件都必须建参数并在 run() 中使用：\n"
-                                    + _format_inventory(inventory)
-                                    + "\n请重新输出完整 finish JSON（script + flow + params）。"
-                                ),
-                            }
-                        )
-                        continue
-                    flow_problem, flow_staging, flow_info = stage_flow(
-                        self.db,
-                        int(self.case.project_id),
-                        int(self.case.id),
-                        args.get("flow"),
-                        self.case,
-                    )
-                    if flow_problem:
-                        rounds += 1
-                        self._write_log({"type": "flow_invalid", "message": flow_problem})
-                        if rounds > MAX_FIX_ROUNDS:
-                            discard_pages(self._staged_pages)
-                            self._staged_pages = None
-                            return {
-                                "status": GenerationStatus.FAILED,
-                                "error_category": ErrorCategory.SCRIPT,
-                                "message": f"流程脚本不可用：{flow_problem}",
-                            }
-                        messages.append({"role": "assistant", "content": reply})
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"流程脚本未通过校验：{flow_problem}\n"
-                                    "请把完整流程源码写进 flow.source（只需 def run(page, params)，"
-                                    "FLOW 元数据由 flow 字段自动合成）；"
-                                    "用例脚本从 flows 模块 import run；重新输出完整 finish JSON（script + flow + params）。"
-                                ),
-                            }
-                        )
-                        continue
-                    if flow_staging is not None:
-                        self._staged_pages = flow_staging
-                    if flow_info is None:
-                        rounds += 1
-                        if rounds > MAX_FIX_ROUNDS:
-                            discard_pages(self._staged_pages)
-                            self._staged_pages = None
-                            return {
-                                "status": GenerationStatus.FAILED,
-                                "error_category": ErrorCategory.SCRIPT,
-                                "message": "未提交流程脚本（flow），无法沉淀可复用流程",
-                            }
-                        messages.append({"role": "assistant", "content": reply})
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    "finish 缺少 flow 字段。请按规则 30 同时提交流程脚本：\n"
-                                    '{"script": "用例脚本", "flow": {"key","title","route","keywords","params","source"}, '
-                                    '"params": {...}, "pages": [...]}'
-                                ),
-                            }
-                        )
-                        continue
-                    schema = list(flow_info["meta"]["params"])
-                    values, intentional = self._prepare_values(schema, args.get("params"))
-                    # 模型常把目录名/拼音当包名（如 flows.f_usm），这里统一改写为实际模块路径
-                    source = _rewrite_flow_import(source, flow_info["module"])
-                    problem = _check_case_flow_source(source, flow_info["module"], schema)
-                    if not problem:
-                        missing = [
-                            p["name"]
-                            for p in schema
-                            if p.get("required")
-                            and values.get(p["name"]) in (None, "")
-                            and p["name"] not in intentional
-                        ]
-                        if missing:
-                            problem = f"必填参数缺少取值：{', '.join(missing)}"
-                    if problem:
-                        rounds += 1
-                        self._write_log({"type": "script_invalid", "message": problem})
-                        if rounds > MAX_FIX_ROUNDS:
-                            discard_pages(self._staged_pages)
-                            self._staged_pages = None
-                            return {
-                                "status": GenerationStatus.FAILED,
-                                "error_category": ErrorCategory.SCRIPT,
-                                "message": f"用例脚本不可用：{problem}",
-                            }
-                        messages.append({"role": "assistant", "content": reply})
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"用例脚本未通过校验：{problem}\n"
-                                    "请修正后重新输出完整 finish JSON（script + flow + params）。"
-                                ),
-                            }
-                        )
-                        continue
-                    case_for_run = self._case_with_params(values, schema)
-
                 concurrency.set_progress(self.case_id, "首跑验证", "本地执行脚本验证")
                 # 首跑用暂存资产，通过后才并入正式目录
-                result = self._validate(
-                    source, auth, case_override=case_for_run, pages_root=self._staged_pages
-                )
+                result = self._validate(source, auth, pages_root=self._staged_pages)
                 self._write_log(
                     {
                         "type": "validate",
@@ -2293,28 +1301,14 @@ class GenerationJob:
                 if result.get("run_status") == "passed":
                     adopt_pages(int(self.case.project_id), self._staged_pages)
                     self._staged_pages = None
-                    if flow_info is not None:
-                        flow_id = adopt_flow(self.db, int(self.case.project_id), flow_info)
-                        self.flow = self.db.get_flow(flow_id) if flow_id else None
-                        return self._solidify(
-                            source,
-                            ok=True,
-                            extra_fields={
-                                "flow_id": flow_id,
-                                "flow_version": int(flow_info["version"]),
-                                "params_json": values,
-                                "params_schema_json": schema,
-                                "params_updated_at": _now(),
-                            },
-                        )
                     return self._solidify(source, ok=True)
 
                 rounds += 1
                 if rounds > MAX_FIX_ROUNDS:
                     discard_pages(self._staged_pages)
                     self._staged_pages = None
-                    # 失败脚本不落正式目录：它引用尚未 adopt 的 flows 模块，会变成不可执行脚本。
-                    # 修复流程不涉及 flows，可保留失败版本供人工查看。
+                    # 失败脚本不落正式目录，避免留下不可执行的半成品；
+                    # 修复场景保留失败版本供人工查看。
                     if is_fix:
                         self._solidify(source, ok=False)
                     return {
@@ -2603,8 +1597,8 @@ class GenerationJob:
                             "role": "user",
                             "content": (
                                 "【自动枚举控件清单】系统已在弹窗内实测以下可编辑控件，"
-                                "流程参数必须逐条覆盖（每个控件一个参数，下拉写真实可选值，"
-                                "勾选项用 bool 且默认值与实测一致）：\n"
+                                "脚本里必须逐个覆盖这些控件（下拉用真实可选值，"
+                                "勾选项的初始状态以实测为准）：\n"
                                 + _format_inventory(inventory)
                                 + "\n清单之外的控件不要凭空编造。"
                                 "下拉的真实可选值已由系统读好（面板未展开时也能读到），"
@@ -2665,7 +1659,7 @@ class GenerationJob:
 
     # ===== 落盘 =====
 
-    def _validate(self, source: str, auth, case_override=None, pages_root: Path | None = None) -> dict:
+    def _validate(self, source: str, auth, pages_root: Path | None = None) -> dict:
         project_id = int(self.case.project_id)
         case_dir = paths.case_dir(project_id, int(self.case.id))
         case_dir.mkdir(parents=True, exist_ok=True)
@@ -2673,7 +1667,7 @@ class GenerationJob:
         tmp.write_text(source, encoding="utf-8")
         try:
             return run_script(
-                case_override or self.case,
+                self.case,
                 self.env,
                 script_path=tmp,
                 run_dir=paths.new_run_dir(project_id, int(self.case.id)) / "validate",
@@ -2689,7 +1683,7 @@ class GenerationJob:
                 "error_message": f"{type(e).__name__}: {e}",
             }
 
-    def _solidify(self, source: str, ok: bool, extra_fields: dict | None = None) -> dict:
+    def _solidify(self, source: str, ok: bool) -> dict:
         """写入正式脚本并更新用例状态（版本自增，旧版归档）。"""
         case = self.case
         project_id = int(case.project_id)
@@ -2722,8 +1716,6 @@ class GenerationJob:
             )
         else:
             fields.update(status=self.prev_status or CaseStatus.NOT_IMPLEMENTED)
-        if extra_fields:
-            fields.update(extra_fields)
         self.db.update_case(case_id, **fields)
         self.case = self.db.get_case(case_id)
         if ok:
@@ -2769,12 +1761,7 @@ class GenerationJob:
         )
 
 
-def start_job(
-    case_id: int,
-    kind: str,
-    reuse_flow_id: int | None = None,
-    force_new_flow: bool = False,
-) -> None:
+def start_job(case_id: int, kind: str) -> None:
     """在后台线程启动生成/修复（调用方需已通过 acquire 抢到项目锁）。"""
-    job = GenerationJob(case_id, kind, reuse_flow_id=reuse_flow_id, force_new_flow=force_new_flow)
+    job = GenerationJob(case_id, kind)
     threading.Thread(target=job.run, daemon=True, name=f"ui-gen-{case_id}").start()

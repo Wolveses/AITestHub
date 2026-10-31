@@ -89,26 +89,6 @@ def _ensure_pkg(d: Path) -> Path:
     return d
 
 
-def flows_root(project_id: int) -> Path:
-    """项目级流程资产根目录（``flows/`` 包）。"""
-    return _ensure_pkg(project_scripts_dir(project_id) / "flows")
-
-
-def flow_folder_dir(project_id: int, folder_id: int) -> Path:
-    """按用例目录 id 分层的流程目录（``flows/f_<folder_id>``，无语录归 f_0）。"""
-    return _ensure_pkg(flows_root(project_id) / f"f_{int(folder_id or 0)}")
-
-
-def flow_module(folder_id: int, flow_key: str, version: int) -> str:
-    """流程脚本的 import 路径（case 脚本按此 import run）。"""
-    return f"flows.f_{int(folder_id or 0)}.{flow_key}_v{int(version or 1)}"
-
-
-def flow_script(project_id: int, folder_id: int, flow_key: str, version: int) -> Path:
-    """流程脚本文件（文件名带版本，重建只增不覆盖）。"""
-    return flow_folder_dir(project_id, folder_id) / f"{flow_key}_v{int(version or 1)}.py"
-
-
 def staging_root(project_id: int, case_id: int) -> Path:
     """生成期暂存目录：页面对象先落这里，首跑通过后再原子并入正式 pages/。"""
     d = workspace_root() / "staging" / str(project_id) / str(case_id)

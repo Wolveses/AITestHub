@@ -7,7 +7,7 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 
-from insight_aitest.modules.ui.backend.automation.models import UiCase, UiEnv, UiFlow, UiGeneration
+from insight_aitest.modules.ui.backend.automation.models import UiCase, UiEnv, UiGeneration
 from insight_aitest.modules.ui.backend.persistence.models import RunRecord
 from insight_aitest.platform.persistence import Base, ensure_schema, get_engine, session_scope
 
@@ -44,7 +44,7 @@ def _ensure_ui_cases_site(db_path: str) -> None:
 
 
 def _ensure_ui_cases_params(db_path: str) -> None:
-    """给旧 ui_cases 表补流程复用与参数化列（幂等；存量用例保持独立脚本语义）。"""
+    """给旧 ui_cases 表补参数化列（幂等）。"""
     import sqlite3
 
     with sqlite3.connect(db_path) as conn:
@@ -52,14 +52,30 @@ def _ensure_ui_cases_params(db_path: str) -> None:
         if not cols:
             return
         for name, ddl in (
-            ("flow_id", "INTEGER"),
-            ("flow_version", "INTEGER"),
             ("params_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("params_schema_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("params_updated_at", "DATETIME"),
         ):
             if name not in cols:
                 conn.execute(f"ALTER TABLE ui_cases ADD COLUMN {name} {ddl}")
+        conn.commit()
+
+
+def _drop_flow_assets(db_path: str) -> None:
+    """移除流程复用机制留下的表与列（幂等；旧版 SQLite 不支持 DROP COLUMN 时跳过）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE IF EXISTS ui_flows")
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ui_cases)")}
+        for name in ("flow_id", "flow_version"):
+            if name not in cols:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE ui_cases DROP COLUMN {name}")
+            except sqlite3.OperationalError:
+                # SQLite < 3.35 不支持 DROP COLUMN：保留空列不影响新模型读写
+                pass
         conn.commit()
 
 
@@ -71,13 +87,13 @@ class UIAutomationDatabase:
             tables=[
                 UiCase.__table__,
                 UiEnv.__table__,
-                UiFlow.__table__,
                 UiGeneration.__table__,
                 RunRecord.__table__,
             ],
         )
         ensure_schema(
-            db_path, [_ensure_run_script_columns, _ensure_ui_cases_site, _ensure_ui_cases_params]
+            db_path,
+            [_ensure_run_script_columns, _ensure_ui_cases_site, _ensure_ui_cases_params, _drop_flow_assets],
         )
 
     # ===== 用例 =====
@@ -100,7 +116,6 @@ class UIAutomationDatabase:
         status: str | None = None,
         category_path: str | None = None,
         keyword: str | None = None,
-        flow_id: int | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[UiCase], int]:
@@ -116,8 +131,6 @@ class UIAutomationDatabase:
             conds.append(UiCase.category_path.like(f"{category_path}%"))
         if keyword:
             conds.append(UiCase.title.ilike(f"%{keyword}%"))
-        if flow_id is not None:
-            conds.append(UiCase.flow_id == flow_id)
         for c in conds:
             stmt = stmt.where(c)
             count_stmt = count_stmt.where(c)
@@ -168,73 +181,6 @@ class UIAutomationDatabase:
             stmt = stmt.where(UiCase.project_id == project_id)
         with session_scope(self.db_path) as s:
             return s.scalar(stmt) or 0
-
-    # ===== 流程资产 =====
-
-    def get_flow(self, flow_id: int) -> UiFlow | None:
-        with session_scope(self.db_path) as s:
-            return s.get(UiFlow, flow_id)
-
-    def get_flow_by_key(self, project_id: int, folder_id: int, flow_key: str) -> UiFlow | None:
-        with session_scope(self.db_path) as s:
-            return s.scalar(
-                select(UiFlow).where(
-                    UiFlow.project_id == project_id,
-                    UiFlow.folder_id == int(folder_id or 0),
-                    UiFlow.flow_key == flow_key,
-                )
-            )
-
-    def get_flow_by_module(self, project_id: int, module: str) -> UiFlow | None:
-        with session_scope(self.db_path) as s:
-            return s.scalar(
-                select(UiFlow).where(
-                    UiFlow.project_id == project_id, UiFlow.module == module
-                )
-            )
-
-    def list_flows(
-        self,
-        project_id: int,
-        folder_id: int | None = None,
-        status: str | None = None,
-    ) -> list[UiFlow]:
-        stmt = select(UiFlow).where(UiFlow.project_id == project_id)
-        if folder_id is not None:
-            stmt = stmt.where(UiFlow.folder_id == int(folder_id or 0))
-        if status:
-            stmt = stmt.where(UiFlow.status == status)
-        stmt = stmt.order_by(UiFlow.updated_at.desc(), UiFlow.id.desc())
-        with session_scope(self.db_path) as s:
-            return list(s.scalars(stmt))
-
-    def create_flow(self, **fields) -> int:
-        flow = UiFlow(**fields)
-        with session_scope(self.db_path) as s:
-            s.add(flow)
-            s.flush()
-            return flow.id
-
-    def update_flow(self, flow_id: int, **fields) -> UiFlow | None:
-        with session_scope(self.db_path) as s:
-            flow = s.get(UiFlow, flow_id)
-            if flow is None:
-                return None
-            for k, v in fields.items():
-                if hasattr(flow, k):
-                    setattr(flow, k, v)
-            flow.updated_at = datetime.now()
-            return flow
-
-    def flow_case_counts(self, project_id: int) -> dict[int, int]:
-        """每个流程下挂的用例数（前端流程卡片/筛选展示）。"""
-        with session_scope(self.db_path) as s:
-            rows = s.execute(
-                select(UiCase.flow_id, func.count(UiCase.id))
-                .where(UiCase.project_id == project_id, UiCase.flow_id.isnot(None))
-                .group_by(UiCase.flow_id)
-            ).all()
-            return {int(flow_id): int(count) for flow_id, count in rows}
 
     # ===== 环境 =====
 

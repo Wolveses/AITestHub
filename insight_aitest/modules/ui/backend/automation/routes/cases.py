@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from insight_aitest.modules.ui.backend.automation import concurrency, flows as flowlib, paths
+from insight_aitest.modules.ui.backend.automation import concurrency, paths
 from insight_aitest.modules.ui.backend.automation.database import UIAutomationDatabase
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 from insight_aitest.modules.ui.backend.automation.generator import ASSET_DIRS, start_job
@@ -21,7 +21,6 @@ from insight_aitest.modules.ui.backend.automation.models import (
     CaseStatus,
     GenerationKind,
     Site,
-    UiFlowStatus,
 )
 from insight_aitest.modules.ui.backend.automation.runner import EnvMissingError, finish_run, run_script, start_run
 from insight_aitest.modules.ui.backend.persistence.models import RunStatus
@@ -43,22 +42,8 @@ class CasePatch(BaseModel):
     site: str | None = None
 
 
-class ParamsUpdate(BaseModel):
-    values: dict[str, str | int | float | bool | None] = {}
-
-
-class GenerateRequest(BaseModel):
-    """生成参数：可显式指定复用流程，或强制新建流程。"""
-
-    reuse_flow_id: int | None = None
-    force_new_flow: bool = False
-
-
-def _case_out(case, db: UIAutomationDatabase, flow_cache: dict | None = None) -> dict:
+def _case_out(case, db: UIAutomationDatabase) -> dict:
     progress = concurrency.get_progress(case.id)
-    flow = None
-    if case.flow_id:
-        flow = flow_cache.get(case.flow_id) if flow_cache is not None else db.get_flow(case.flow_id)
     return {
         "id": case.id,
         "project_id": case.project_id,
@@ -72,13 +57,6 @@ def _case_out(case, db: UIAutomationDatabase, flow_cache: dict | None = None) ->
         "category_path": case.category_path,
         "kb_folder_id": case.kb_folder_id,
         "site": case.site,
-        "flow_id": case.flow_id,
-        "flow_version": case.flow_version,
-        "flow_title": flow.title if flow is not None else "",
-        "flow_status": flow.status if flow is not None else None,
-        "params": dict(case.params_json or {}),
-        "params_schema": list(case.params_schema_json or []),
-        "params_updated_at": case.params_updated_at.isoformat() if case.params_updated_at else None,
         "status": case.status,
         "script_version": case.script_version,
         "has_script": bool(case.script_rel_path),
@@ -105,7 +83,6 @@ def list_cases(
     status: str | None = Query(None),
     category_path: str | None = Query(None),
     keyword: str | None = Query(None),
-    flow_id: int | None = Query(None),
     page: int = 1,
     page_size: int = 50,
     db: UIAutomationDatabase = Depends(get_automation_db),
@@ -115,15 +92,11 @@ def list_cases(
         status=status,
         category_path=category_path,
         keyword=keyword,
-        flow_id=flow_id,
         page=page,
         page_size=page_size,
     )
-    flow_cache = (
-        {f.id: f for f in db.list_flows(project_id)} if project_id is not None else None
-    )
     return {
-        "items": [_case_out(c, db, flow_cache) for c in items],
+        "items": [_case_out(c, db) for c in items],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -201,45 +174,6 @@ def delete_case(
     return {"deleted": case_id}
 
 
-@router.get("/{case_id}/params")
-def get_case_params(
-    case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)
-) -> dict:
-    case = _get_or_404(case_id, db)
-    return {
-        "flow_id": case.flow_id,
-        "flow_version": case.flow_version,
-        "values": dict(case.params_json or {}),
-        "schema": list(case.params_schema_json or []),
-        "updated_at": case.params_updated_at.isoformat() if case.params_updated_at else None,
-    }
-
-
-@router.put("/{case_id}/params")
-def put_case_params(
-    case_id: int,
-    body: ParamsUpdate,
-    db: UIAutomationDatabase = Depends(get_automation_db),
-) -> dict:
-    """保存本用例参数值（不改脚本与流程，只影响下一次执行的注入值）。"""
-    case = _get_or_404(case_id, db)
-    if case.status in (CaseStatus.GENERATING, CaseStatus.FIXING, CaseStatus.RUNNING):
-        raise HTTPException(409, "用例正在生成/执行中，请稍后再修改参数")
-    schema = list(case.params_schema_json or [])
-    if not schema:
-        raise HTTPException(400, "该用例使用独立脚本，没有可编辑的流程参数")
-    names = {str(item.get("name")) for item in schema if isinstance(item, dict) and item.get("name")}
-    unknown = [key for key in body.values if key not in names]
-    if unknown:
-        raise HTTPException(400, f"参数不在流程参数结构内：{', '.join(unknown)}")
-    db.update_case(
-        case_id,
-        params_json=dict(body.values),
-        params_updated_at=datetime.now(),
-    )
-    return _case_out(db.get_case(case_id), db)
-
-
 @router.get("/{case_id}/script")
 def get_script(
     case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)
@@ -259,7 +193,7 @@ def get_script(
 
 
 def _referenced_pages(project_id: int, source: str) -> list[dict]:
-    """返回脚本实际 import 的项目资产源码（flows/、pages/、common/，含一层传递依赖）。
+    """返回脚本实际 import 的项目资产源码（pages/、common/，含一层传递依赖）。
 
     按 import 语句反查，不返回无关文件；页面对象 import 的 common 也会一并带出，
     否则预览只看到页面对象、看不到它依赖的通用能力。
@@ -275,25 +209,16 @@ def _referenced_pages(project_id: int, source: str) -> list[dict]:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
                 parts = node.module.split(".")
-                if parts[0] in ASSET_DIRS:
-                    if len(parts) >= 2:
-                        refs.add((parts[0], parts[1]))
-                elif parts[0] == "flows" and len(parts) >= 3:
-                    # flows.f_<folder>.<module>：按目录 + 模块名定位流程脚本
-                    refs.add(("flows", f"{parts[1]}/{parts[2]}"))
+                if parts[0] in ASSET_DIRS and len(parts) >= 2:
+                    refs.add((parts[0], parts[1]))
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     parts = alias.name.split(".")
                     if parts[0] in ASSET_DIRS and len(parts) >= 2:
                         refs.add((parts[0], parts[1]))
-                    elif parts[0] == "flows" and len(parts) >= 3:
-                        refs.add(("flows", f"{parts[1]}/{parts[2]}"))
         return refs
 
     def locate(package: str, stem: str) -> Path | None:
-        if package == "flows":
-            folder, _, module = stem.partition("/")
-            return paths.flows_root(project_id) / folder / f"{module}.py"
         root = paths.common_dir(project_id) if package == "common" else paths.pages_dir(project_id)
         return root / f"{stem}.py"
 
@@ -310,40 +235,21 @@ def _referenced_pages(project_id: int, source: str) -> list[dict]:
             if f is None or not f.exists():
                 continue
             content = f.read_text(encoding="utf-8")
-            label = f"{stem}.py" if package == "flows" else f.name
-            rel = f"flows/{stem}.py" if package == "flows" else f"{package}/{f.name}"
-            out.append({"name": label, "path": rel, "content": content})
+            out.append({"name": f.name, "path": f"{package}/{f.name}", "content": content})
             queue.append(content)
     return sorted(out, key=lambda x: x["path"])
 
 
-def _start_generate(
-    case_id: int,
-    kind: str,
-    db: UIAutomationDatabase,
-    reuse_flow_id: int | None = None,
-    force_new_flow: bool = False,
-) -> dict:
+def _start_generate(case_id: int, kind: str, db: UIAutomationDatabase) -> dict:
     case = _get_or_404(case_id, db)
     if kind == GenerationKind.FIX and not case.script_rel_path:
         raise HTTPException(400, "该用例还没有脚本，无法自动修复，请先生成脚本")
     project_id = int(case.project_id)
-    if reuse_flow_id is not None:
-        flow = db.get_flow(reuse_flow_id)
-        if flow is None or int(flow.project_id) != project_id:
-            raise HTTPException(400, "指定的复用流程不存在或不属于该项目")
-        if flow.status != UiFlowStatus.ACTIVE:
-            raise HTTPException(400, "指定的复用流程已归档")
     if not concurrency.acquire(project_id):
         raise HTTPException(409, "该项目已有任务在执行（生成/修复/运行），请稍后重试")
     concurrency.set_progress(case_id, "排队", "任务已提交")
     try:
-        start_job(
-            case_id,
-            kind,
-            reuse_flow_id=reuse_flow_id,
-            force_new_flow=force_new_flow,
-        )
+        start_job(case_id, kind)
     except Exception:
         concurrency.release(project_id)
         raise
@@ -351,53 +257,13 @@ def _start_generate(
 
 
 @router.post("/{case_id}/generate")
-def generate(
-    case_id: int,
-    body: GenerateRequest | None = None,
-    db: UIAutomationDatabase = Depends(get_automation_db),
-) -> dict:
-    reuse_flow_id = body.reuse_flow_id if body else None
-    force_new_flow = bool(body.force_new_flow) if body else False
-    return _start_generate(
-        case_id,
-        GenerationKind.GENERATE,
-        db,
-        reuse_flow_id=reuse_flow_id,
-        force_new_flow=force_new_flow,
-    )
+def generate(case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)) -> dict:
+    return _start_generate(case_id, GenerationKind.GENERATE, db)
 
 
 @router.post("/{case_id}/fix")
 def fix(case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)) -> dict:
     return _start_generate(case_id, GenerationKind.FIX, db)
-
-
-@router.post("/{case_id}/match-flow")
-def match_flow(
-    case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)
-) -> dict:
-    """纯规则打分：同目录（kb_folder_id）下可复用的流程候选（不调用模型）。"""
-    case = _get_or_404(case_id, db)
-    candidates = flowlib.match_candidates(db, case)
-    counts = db.flow_case_counts(int(case.project_id))
-    items = [
-        {
-            "flow": flowlib.flow_out(flow, counts.get(flow.id, 0)),
-            "score": score,
-            "detail": detail,
-            "auto_reusable": score >= flowlib.AUTO_THRESHOLD,
-        }
-        for flow, score, detail in candidates[:5]
-    ]
-    recommended = next(
-        (
-            item["flow"]
-            for item in items
-            if item["score"] >= flowlib.GRAY_LOW
-        ),
-        None,
-    )
-    return {"recommended": recommended, "candidates": items}
 
 
 def _run_worker(case_id: int) -> None:
@@ -540,7 +406,7 @@ def _format_generation_log(text: str, tail: int) -> str:
             items = ev.get("items") or []
             names = "、".join(str(i.get("label") or "") for i in items)
             lines.append(f"[控件清单] 共 {len(items)} 项：{names}")
-        elif kind in ("params_incomplete", "flow_invalid", "validate"):
+        elif kind in ("validate",):
             lines.append(f"[校验] {kind}：{str(ev.get('message') or ev)[:500]}")
         elif kind in ("bad_ref", "unknown_tool", "bad_json", "llm_error"):
             lines.append(f"[异常] {kind}：{str(ev)[:500]}")
