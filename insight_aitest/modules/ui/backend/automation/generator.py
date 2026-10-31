@@ -674,6 +674,61 @@ def _check_case_flow_source(source: str, module: str, schema: list) -> str:
     return _check_sandbox(source, kind="用例脚本 ")
 
 
+_EMPTY_HINTS = ("不填", "留空", "为空", "空值", "置空", "不输入", "输入为空", "为空串")
+_EMPTY_NEGATIONS = ("不能", "不可", "不得", "不应", "禁止", "不允许", "勿")
+_UNCHECK_HINTS = ("不勾选", "取消勾选", "去掉勾选", "不选中", "关闭")
+
+
+def _alias_hits(text: str, aliases: list[str], hints: tuple[str, ...], negations: tuple[str, ...] = ()):
+    """别名附近 20 字窗口内是否命中提示词（且未出现否定词）。"""
+    for raw_alias in aliases:
+        alias = (raw_alias or "").strip()
+        if not alias:
+            continue
+        idx = text.find(alias)
+        while idx != -1:
+            window = text[max(0, idx - 8) : idx + len(alias) + 12]
+            if any(h in window for h in hints) and not any(n in window for n in negations):
+                return True
+            idx = text.find(alias, idx + len(alias))
+    return False
+
+
+def _mentions_empty(text: str, aliases: list[str]) -> bool:
+    """判断文本中是否有「某字段留空/不填」的明确要求（排除「不能为空」这类断言）。"""
+    return _alias_hits(text, aliases, _EMPTY_HINTS, _EMPTY_NEGATIONS)
+
+
+def _mentions_unchecked(text: str, aliases: list[str]) -> bool:
+    """判断文本中是否有「不勾选某开关」的明确要求。"""
+    return _alias_hits(text, aliases, _UNCHECK_HINTS)
+
+
+def _auto_param_value(item: dict, case) -> str:
+    """必填参数缺取值时的自动注入值。
+
+    - 布尔取 False，下拉取第一个选项，整型取 1；
+    - ``unique=true`` 的字符串给稳定基准值（运行器会追加时间后缀保证唯一）；
+    - 邮箱类给合法占位邮箱；
+    - 其余文本用用例标题兜底（显示名称类更可读）。
+    """
+    kind = str(item.get("type") or "str")
+    name = str(item.get("name") or "").lower()
+    if kind == "bool":
+        return False
+    if kind == "select":
+        options = [str(o) for o in (item.get("options") or []) if str(o).strip()]
+        return options[0] if options else ""
+    if kind == "int":
+        return 1
+    if item.get("unique"):
+        return "auto"
+    if "mail" in name:
+        return "auto@example.com"
+    title = str(getattr(case, "title", "") or "").strip()
+    return title[:30] or "auto"
+
+
 def _case_template(case, module: str) -> str:
     """复用流程时的用例脚本模板：只有 import + run(page, params)，不含任何页面操作。"""
     title = str(getattr(case, "title", "") or "").strip().replace('"""', "'''")
@@ -1469,7 +1524,7 @@ class GenerationJob:
                 continue
 
             source = _clean_script(str(args.get("script") or ""))
-            values = self._merge_values(schema, args.get("params"))
+            values, intentional = self._prepare_values(schema, args.get("params"))
             problem = _check_script(source)
             if not problem:
                 problem = _compile(source)
@@ -1479,7 +1534,9 @@ class GenerationJob:
                 missing = [
                     p["name"]
                     for p in schema
-                    if p.get("required") and values.get(p["name"]) in (None, "")
+                    if p.get("required")
+                    and values.get(p["name"]) in (None, "")
+                    and p["name"] not in intentional
                 ]
                 if missing:
                     problem = f"必填参数缺少取值：{', '.join(missing)}"
@@ -1553,15 +1610,14 @@ class GenerationJob:
     def _reuse_parameterized(self, flow, module: str, schema: list, auth) -> dict:
         """全部复用：不重新生成流程/页面对象/公共函数，用例脚本模板化，仅参数取值不同。"""
         raw = dict(getattr(self.case, "params_json", None) or {})
-        values = self._merge_values(schema, raw)
-        for item in schema:
-            name = item["name"]
-            if values.get(name) in ("", None):
-                values[name] = item.get("example") or item.get("default") or ""
+        # 复用流程的取值以用例步骤为准：明确留空的字段置空，其余缺省值自动注入
+        values, intentional = self._prepare_values(schema, raw, respect_raw_empty=True)
         missing = [
             p["name"]
             for p in schema
-            if p.get("required") and values.get(p["name"]) in ("", None)
+            if p.get("required")
+            and values.get(p["name"]) in ("", None)
+            and p["name"] not in intentional
         ]
         if missing:
             return {
@@ -1616,16 +1672,110 @@ class GenerationJob:
         }
 
     def _merge_values(self, schema: list, raw) -> dict:
-        """schema 默认值 ← 模型给的取值（丢弃 schema 之外的 key）。"""
+        """用例取值 ← schema 默认值/示例值（保留显式空串，表示刻意不填）。"""
         values: dict = {}
         raw = raw if isinstance(raw, dict) else {}
         for item in schema:
             name = item["name"]
-            value = raw.get(name)
+            kind = str(item.get("type") or "str")
+            value = raw.get(name) if name in raw else None
+            # 字符串型显式空串表示「刻意不填」；非字符串的空值仍按默认值处理
+            if value == "" and kind != "str":
+                value = None
+            if value is not None:
+                values[name] = value
+                continue
+            value = item.get("default")
             if value is None or value == "":
-                value = item.get("default")
+                value = item.get("example")
             values[name] = "" if value is None else value
         return values
+
+    def _fill_required(
+        self,
+        schema: list,
+        values: dict,
+        raw=None,
+        skip: set[str] | None = None,
+        respect_raw_empty: bool = False,
+    ) -> dict:
+        """必填参数没有任何取值时自动注入可用值，避免生成被参数缺失阻断。
+
+        - 用例标题/步骤要求留空的字段（``skip``）→ 保持为空；
+        - ``respect_raw_empty=True``（复用已有流程）时，参数页里显式留空视为刻意不填；
+        - 注入结果随生成成功写入 params_json，参数页可随时人工修改。
+        """
+        raw = raw if isinstance(raw, dict) else {}
+        skip = skip or set()
+        for item in schema:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")
+            if not name or not item.get("required") or name in skip:
+                continue
+            raw_value = raw.get(name) if name in raw else None
+            if respect_raw_empty:
+                if raw_value is not None:
+                    continue
+            elif raw_value not in (None, ""):
+                continue
+            if values.get(name) not in ("", None):
+                continue
+            values[name] = _auto_param_value(item, self.case)
+        return values
+
+    def _prepare_values(
+        self, schema: list, raw, respect_raw_empty: bool = False
+    ) -> tuple[dict, set[str]]:
+        """合并取值 + 按用例语义置空 + 补齐必填，返回 (取值, 刻意留空的参数名)。"""
+        values = self._merge_values(schema, raw)
+        intentional = self._apply_case_empties(schema, values)
+        if respect_raw_empty and isinstance(raw, dict):
+            for item in schema:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "")
+                if name in raw and isinstance(raw.get(name), str) and raw.get(name) == "":
+                    intentional.add(name)
+        self._fill_required(
+            schema, values, raw=raw, skip=intentional, respect_raw_empty=respect_raw_empty
+        )
+        return values, intentional
+
+    def _apply_case_empties(self, schema: list, values: dict) -> set[str]:
+        """用例标题/步骤明确「留空/不填」的字段，强制置空。
+
+        复用流程时若一味沿用流程默认值，负向用例（如用户名留空）会变成正向用例。
+        """
+        case = self.case
+        parts = [
+            str(getattr(case, "title", "") or ""),
+            str(getattr(case, "precondition", "") or ""),
+            " ".join(str(s) for s in (getattr(case, "steps", None) or [])),
+            str(getattr(case, "expected", "") or ""),
+        ]
+        text = " ".join(p for p in parts if p)
+        marked: set[str] = set()
+        for item in schema:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or "str")
+            name = str(item.get("name") or "")
+            if not name:
+                continue
+            aliases = [str(item.get("label") or ""), name]
+            if kind == "bool":
+                # 「不勾选使用默认密码」这类开关，按用例要求置为未勾选
+                if _mentions_unchecked(text, aliases):
+                    values[name] = False
+                    marked.add(name)
+                continue
+            if kind != "str":
+                continue
+            if _mentions_empty(text, aliases):
+                values[name] = ""
+                marked.add(name)
+        return marked
 
     def _case_with_params(self, values: dict, schema: list):
         """首跑用的只读用例视图（带上本次参数，不写库）。"""
@@ -2089,7 +2239,7 @@ class GenerationJob:
                         )
                         continue
                     schema = list(flow_info["meta"]["params"])
-                    values = self._merge_values(schema, args.get("params"))
+                    values, intentional = self._prepare_values(schema, args.get("params"))
                     # 模型常把目录名/拼音当包名（如 flows.f_usm），这里统一改写为实际模块路径
                     source = _rewrite_flow_import(source, flow_info["module"])
                     problem = _check_case_flow_source(source, flow_info["module"], schema)
@@ -2097,7 +2247,9 @@ class GenerationJob:
                         missing = [
                             p["name"]
                             for p in schema
-                            if p.get("required") and values.get(p["name"]) in (None, "")
+                            if p.get("required")
+                            and values.get(p["name"]) in (None, "")
+                            and p["name"] not in intentional
                         ]
                         if missing:
                             problem = f"必填参数缺少取值：{', '.join(missing)}"
