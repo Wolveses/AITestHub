@@ -93,6 +93,17 @@ export interface ImportableCase {
   suggested_site: string;
 }
 
+export interface ImportablePage {
+  items: ImportableCase[];
+  total: number;
+  page: number;
+  page_size: number;
+  /** 当前搜索条件下全部用例数（不受目录过滤影响） */
+  all_total: number;
+  /** 当前搜索条件下的目录聚合计数，供左侧目录树 */
+  folders: { path: string; count: number }[];
+}
+
 export interface UIEnv {
   id: number;
   project_id: number;
@@ -152,7 +163,12 @@ interface AutomationState {
   loadCases: () => Promise<void>;
   loadEnvs: () => Promise<void>;
   loadFlows: () => Promise<void>;
-  importable: () => Promise<ImportableCase[]>;
+  importable: (opts?: {
+    search?: string;
+    categoryPath?: string | null;
+    page?: number;
+    pageSize?: number;
+  }) => Promise<ImportablePage>;
   importCases: (
     documentIds: number[],
     siteMap?: Record<number, string>,
@@ -274,12 +290,27 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
     set({ flows: data.items || [] });
   },
 
-  importable: async () => {
+  importable: async (opts) => {
     const projectId = get().projectId;
-    if (projectId === null) return [];
-    const r = await fetch(`${BASE}/cases/importable?project_id=${projectId}`);
+    const empty: ImportablePage = {
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: opts?.pageSize ?? 200,
+      all_total: 0,
+      folders: [],
+    };
+    if (projectId === null) return empty;
+    const q = new URLSearchParams({
+      project_id: String(projectId),
+      page: String(opts?.page ?? 1),
+      page_size: String(opts?.pageSize ?? 200),
+    });
+    if (opts?.search?.trim()) q.set('search', opts.search.trim());
+    if (opts?.categoryPath) q.set('category_path', opts.categoryPath);
+    const r = await fetch(`${BASE}/cases/importable?${q.toString()}`);
     if (!r.ok) throw new Error(await parseError(r));
-    return (await r.json()).items || [];
+    return await r.json();
   },
 
   importCases: async (documentIds, siteMap) => {

@@ -133,9 +133,20 @@ def list_cases(
 @router.get("/importable")
 def get_importable(
     project_id: int = Query(...),
+    search: str = "",
+    category_path: str = "",
+    page: int = 1,
+    page_size: int = 200,
     db: UIAutomationDatabase = Depends(get_automation_db),
 ) -> dict:
-    return {"items": list_importable(project_id, db)}
+    return list_importable(
+        project_id,
+        db,
+        search=search,
+        category_path=category_path,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.post("/import")

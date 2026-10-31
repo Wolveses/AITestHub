@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 
 from insight_aitest.platform.persistence import Base, get_engine, session_scope
 from insight_aitest.platform.services.kb.models import (
@@ -807,6 +807,74 @@ class KBDatabase:
         stmt = select(CaseMeta).where(CaseMeta.document_id.in_(document_ids))
         with session_scope(self.db_path) as s:
             return {m.document_id: m for m in s.scalars(stmt)}
+
+    def _case_stmt(self, project_id: int, search: str = ""):
+        """用例文档 + 元数据的公共查询条件：排除已删除标签、按关键字模糊匹配。"""
+        stmt = (
+            select(Document, CaseMeta)
+            .join(CaseMeta, CaseMeta.document_id == Document.id)
+            .where(
+                Document.project_id == project_id,
+                Document.kind == "case",
+                func.coalesce(Document.tags, "").notlike("%deleted-in-tapd%"),
+            )
+        )
+        if search:
+            like = f"%{search}%"
+            stmt = stmt.where(
+                or_(
+                    CaseMeta.title.ilike(like),
+                    CaseMeta.case_id.ilike(like),
+                    CaseMeta.category_path.ilike(like),
+                    Document.filename.ilike(like),
+                )
+            )
+        return stmt
+
+    def list_case_documents(
+        self,
+        project_id: int,
+        search: str = "",
+        category_path: str = "",
+        page: int = 1,
+        page_size: int = 200,
+    ) -> tuple[list[tuple[Document, CaseMeta]], int]:
+        """分页查询用例文档（含元数据），返回 ((doc, meta) 列表, 总条数)。
+
+        ``category_path`` 按目录全路径过滤，同时包含其子目录（"A / B" 前缀）。
+        """
+        stmt = self._case_stmt(project_id, search)
+        if category_path:
+            stmt = stmt.where(
+                or_(
+                    CaseMeta.category_path == category_path,
+                    CaseMeta.category_path.startswith(f"{category_path} / "),
+                )
+            )
+        total_stmt = stmt.with_only_columns(func.count())
+        p = max(1, page or 1)
+        ps = max(1, min(page_size or 200, 5000))
+        stmt = stmt.order_by(CaseMeta.category_path, CaseMeta.title).offset((p - 1) * ps).limit(ps)
+        with session_scope(self.db_path) as s:
+            total = int(s.scalar(total_stmt) or 0)
+            rows = [(row[0], row[1]) for row in s.execute(stmt).all()]
+        return rows, total
+
+    def count_case_documents(self, project_id: int, search: str = "") -> int:
+        """用例总数（不受目录过滤影响），用于「全部用例」计数。"""
+        stmt = self._case_stmt(project_id, search).with_only_columns(func.count())
+        with session_scope(self.db_path) as s:
+            return int(s.scalar(stmt) or 0)
+
+    def case_category_counts(self, project_id: int, search: str = "") -> list[tuple[str, int]]:
+        """按目录全路径聚合用例数，供导入弹窗目录树展示。"""
+        stmt = (
+            self._case_stmt(project_id, search)
+            .with_only_columns(CaseMeta.category_path, func.count())
+            .group_by(CaseMeta.category_path)
+        )
+        with session_scope(self.db_path) as s:
+            return [(p or "", int(n)) for p, n in s.execute(stmt).all()]
 
     # ===== TAPD 同步水位 =====
 

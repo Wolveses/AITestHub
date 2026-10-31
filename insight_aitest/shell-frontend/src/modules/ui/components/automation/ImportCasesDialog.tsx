@@ -1,73 +1,117 @@
-import { useEffect, useMemo, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { ArrowLeftRight, CheckSquare, Square, Search } from 'lucide-react';
 import { Modal } from '../../../../components/ui/modal';
 import { useAutomationStore, type ImportableCase } from '../../store/automationStore';
-import { CategoryTree, matchCategory } from './CategoryTree';
+import { CategoryTree } from './CategoryTree';
 import { Btn, inputStyle } from './common';
 
 type Step = 'select' | 'classify';
 
 const SITE_FRONTEND = 'frontend';
 const SITE_BACKEND = 'backend';
+/** 每页条数：服务端分页，目录树计数与搜索都在后端做（用例库可达数万条） */
+const PAGE_SIZE = 200;
 
 export function ImportCasesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { t } = useTranslation();
   const { importable, importCases } = useAutomationStore();
   const [items, setItems] = useState<ImportableCase[]>([]);
+  const [total, setTotal] = useState(0);
+  const [allTotal, setAllTotal] = useState(0);
+  const [folders, setFolders] = useState<{ path: string; count: number }[]>([]);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [search, setSearch] = useState('');
   const [folder, setFolder] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  /** document_id → 条目快照：翻页/换搜索后已选项仍能取到完整信息 */
+  const [rowCache, setRowCache] = useState<Record<number, ImportableCase>>({});
   const [step, setStep] = useState<Step>('select');
   /** document_id → frontend/backend；进入分类页时用后端推断结果初始化，人工调整后保留 */
   const [siteMap, setSiteMap] = useState<Record<number, string>>({});
   /** 分类页里用于批量拖动的勾选集合 */
   const [checked, setChecked] = useState<Set<number>>(new Set());
   const [dragOver, setDragOver] = useState<string | null>(null);
+  /** 请求序号：搜索/目录切换时丢弃过期响应 */
+  const seqRef = useRef(0);
+
+  const load = useCallback(
+    async (opts: { page: number; append: boolean; search: string; categoryPath: string | null }) => {
+      const seq = ++seqRef.current;
+      if (opts.append) setLoadingMore(true);
+      else setLoading(true);
+      try {
+        const res = await importable({
+          search: opts.search,
+          categoryPath: opts.categoryPath,
+          page: opts.page,
+          pageSize: PAGE_SIZE,
+        });
+        if (seq !== seqRef.current) return;
+        setItems((prev) => (opts.append ? [...prev, ...res.items] : res.items));
+        setRowCache((prev) => {
+          const next = { ...prev };
+          res.items.forEach((i) => (next[i.document_id] = i));
+          return next;
+        });
+        setTotal(res.total);
+        setAllTotal(res.all_total);
+        setFolders(res.folders || []);
+        setPage(res.page);
+      } catch (e) {
+        if (seq === seqRef.current) toast.error((e as Error).message);
+      } finally {
+        if (seq === seqRef.current) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
+      }
+    },
+    [importable]
+  );
 
   useEffect(() => {
     if (!open) return;
     setSearch('');
     setFolder(null);
     setSelected(new Set());
+    setRowCache({});
     setStep('select');
     setSiteMap({});
     setChecked(new Set());
     setDragOver(null);
+    setItems([]);
+    setTotal(0);
+    setAllTotal(0);
+    setFolders([]);
     setLoading(true);
-    importable()
-      .then((rows) => setItems(rows))
-      .catch((e) => toast.error((e as Error).message))
-      .finally(() => setLoading(false));
-  }, [open, importable]);
+  }, [open]);
 
-  /** 搜索命中的条目，目录树按它统计数量。 */
-  const searched = useMemo(() => {
-    const kw = search.trim().toLowerCase();
-    if (!kw) return items;
-    return items.filter(
-      (i) =>
-        i.title.toLowerCase().includes(kw) ||
-        (i.category_path || '').toLowerCase().includes(kw) ||
-        (i.case_id || '').toLowerCase().includes(kw)
-    );
-  }, [items, search]);
+  // 搜索 300ms 防抖、目录切换立即生效；打开弹窗后的首次加载也走这里
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setTimeout(() => {
+      load({ page: 1, append: false, search, categoryPath: folder });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [open, search, folder, load]);
 
-  /** 右侧列表：搜索命中 + 当前目录（含子目录）。 */
-  const filtered = useMemo(
-    () => searched.filter((i) => matchCategory(i.category_path, folder)),
-    [searched, folder]
-  );
+  const loadMore = () =>
+    load({ page: page + 1, append: true, search, categoryPath: folder });
 
-  const available = filtered.filter((i) => !i.imported);
+  const available = items.filter((i) => !i.imported);
   const allSelected = available.length > 0 && available.every((i) => selected.has(i.document_id));
 
   const selectedItems = useMemo(
-    () => items.filter((i) => selected.has(i.document_id)),
-    [items, selected]
+    () =>
+      Array.from(selected)
+        .map((id) => rowCache[id])
+        .filter((i): i is ImportableCase => !!i),
+    [selected, rowCache]
   );
 
   const toggle = (id: number) => {
@@ -297,7 +341,8 @@ export function ImportCasesDialog({ open, onClose }: { open: boolean; onClose: (
               }}
             >
               <CategoryTree
-                items={searched}
+                items={folders.map((f) => ({ category_path: f.path, count: f.count }))}
+                allCount={allTotal}
                 active={folder}
                 onSelect={setFolder}
                 allLabel={t('ui.auto.allCases', '全部用例')}
@@ -335,16 +380,14 @@ export function ImportCasesDialog({ open, onClose }: { open: boolean; onClose: (
                     <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
                       {t('ui.auto.loading', '加载中…')}
                     </div>
-                  ) : searched.length === 0 ? (
+                  ) : items.length === 0 ? (
                     <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
-                      {t('ui.auto.noImportable', '该项目下暂无可导入的知识库用例')}
-                    </div>
-                  ) : filtered.length === 0 ? (
-                    <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
-                      {t('ui.auto.noCasesInFolder', '该目录下暂无用例')}
+                      {search.trim() || folder
+                        ? t('ui.auto.noCasesInFolder', '该目录下暂无用例')
+                        : t('ui.auto.noImportable', '该项目下暂无可导入的知识库用例')}
                     </div>
                   ) : (
-                    filtered.map((i) => {
+                    items.map((i) => {
                       const disabled = i.imported;
                       const isChecked = selected.has(i.document_id);
                       return (
@@ -383,6 +426,17 @@ export function ImportCasesDialog({ open, onClose }: { open: boolean; onClose: (
                         </div>
                       );
                     })
+                  )}
+                  {!loading && items.length > 0 && items.length < total && (
+                    <div style={{ padding: '10px 12px', textAlign: 'center' }}>
+                      <Btn size="sm" onClick={loadMore} disabled={loadingMore}>
+                        {loadingMore
+                          ? t('ui.auto.loading', '加载中…')
+                          : t('ui.auto.loadMore', '加载更多（剩余 {{count}} 条）', {
+                              count: total - items.length,
+                            })}
+                      </Btn>
+                    </div>
                   )}
                 </div>
               </div>

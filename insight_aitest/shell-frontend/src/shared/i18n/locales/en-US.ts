@@ -1526,6 +1526,7 @@ export default {
         loading: 'Loading…',
         noImportable: 'No importable KB cases in this project',
         noCasesInFolder: 'No cases in this folder',
+        loadMore: 'Load more ({{count}} remaining)',
         alreadyImported: 'Imported',
         uncategorized: 'Uncategorized',
         stepCount: '{{count}} steps',

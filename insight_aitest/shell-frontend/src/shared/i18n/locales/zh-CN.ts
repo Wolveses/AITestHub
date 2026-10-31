@@ -1526,6 +1526,7 @@ export default {
         loading: '加载中…',
         noImportable: '该项目下暂无可导入的知识库用例',
         noCasesInFolder: '该目录下暂无用例',
+        loadMore: '加载更多（剩余 {{count}} 条）',
         alreadyImported: '已导入',
         uncategorized: '未分类',
         stepCount: '{{count}} 步',

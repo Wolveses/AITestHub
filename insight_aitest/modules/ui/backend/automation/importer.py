@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 
@@ -17,7 +16,6 @@ from insight_aitest.modules.ui.backend.automation.models import CaseStatus, Site
 
 logger = logging.getLogger(__name__)
 
-DELETED_TAG = "deleted-in-tapd"
 _STEP_PREFIX = re.compile(r"^\s*(?:\d+[.、)）]|[-*])\s*")
 
 # 端关键字词典：后台优先级更高（后台命名通常更明确），命中后台即归后台
@@ -76,55 +74,62 @@ def parse_case_markdown(body: str) -> dict:
     }
 
 
-def _has_deleted_tag(tags: str) -> bool:
-    try:
-        vals = json.loads(tags) if tags else []
-        return isinstance(vals, list) and DELETED_TAG in [str(v) for v in vals]
-    except (json.JSONDecodeError, TypeError):
-        return False
+def list_importable(
+    project_id: int,
+    db: UIAutomationDatabase,
+    search: str = "",
+    category_path: str = "",
+    page: int = 1,
+    page_size: int = 200,
+) -> dict:
+    """知识库中可导入的用例（分页 + 服务端搜索/目录过滤）。
 
-
-def _case_rows(project_id: int):
-    """返回 (documents, case_meta_map)；过滤源端已删除/废弃用例。"""
+    已导入的带 imported=True 标记，前端置灰；目录树计数按当前搜索条件聚合，
+    不受目录过滤影响，便于左侧树展示各目录数量。
+    """
     from insight_aitest.platform.services.kb.deps import get_kb_db
 
     kb = get_kb_db()
-    docs, _total = kb.list_documents(
-        project_id=project_id, kind="case", page=1, page_size=500, return_total=True
+    rows, total = kb.list_case_documents(
+        project_id,
+        search=search,
+        category_path=category_path,
+        page=page,
+        page_size=page_size,
     )
-    docs = [d for d in docs if not _has_deleted_tag(getattr(d, "tags", "") or "")]
-    meta_map = kb.list_case_meta([d.id for d in docs]) if docs else {}
-    return docs, meta_map
-
-
-def list_importable(project_id: int, db: UIAutomationDatabase) -> list[dict]:
-    """知识库中可导入的用例（已导入的带 imported=True 标记，前端置灰）。"""
-    docs, meta_map = _case_rows(project_id)
     imported = db.imported_doc_ids(project_id)
-    rows = []
-    for d in docs:
-        meta = meta_map.get(d.id)
-        rows.append(
+    items = []
+    for d, meta in rows:
+        title = (meta.title or d.filename) or ""
+        items.append(
             {
                 "document_id": d.id,
-                "title": (meta.title if meta and meta.title else d.filename) or "",
-                "case_id": meta.case_id if meta else "",
-                "workspace_id": meta.workspace_id if meta else "",
-                "category_path": meta.category_path if meta else "",
-                "status": meta.status if meta else "",
-                "priority": meta.priority if meta else "",
-                "step_count": meta.step_count if meta else 0,
+                "title": title,
+                "case_id": meta.case_id,
+                "workspace_id": meta.workspace_id,
+                "category_path": meta.category_path,
+                "status": meta.status,
+                "priority": meta.priority,
+                "step_count": meta.step_count,
                 "folder_id": getattr(d, "folder_id", None),
                 "imported": d.id in imported,
                 # 端推断结果，导入弹窗的二次分类确认页直接使用
-                "suggested_site": classify_site(
-                    (meta.title if meta and meta.title else d.filename) or "",
-                    meta.category_path if meta else "",
-                ),
+                "suggested_site": classify_site(title, meta.category_path),
             }
         )
-    rows.sort(key=lambda r: (r["category_path"], r["title"]))
-    return rows
+    folders = [
+        {"path": path, "count": count}
+        for path, count in kb.case_category_counts(project_id, search=search)
+        if path
+    ]
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "all_total": kb.count_case_documents(project_id, search=search),
+        "folders": folders,
+    }
 
 
 def import_cases(

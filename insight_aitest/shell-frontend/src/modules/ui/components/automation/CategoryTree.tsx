@@ -8,8 +8,14 @@ interface Node {
   children: Node[];
 }
 
+interface CountedItem {
+  category_path: string;
+  /** 该路径自身条目数；缺省按 1 条（逐条传入条目时） */
+  count?: number;
+}
+
 /** 目录树直接由条目的 category_path（"A / B / C"）聚合，避免依赖知识库目录接口。 */
-function buildTree(items: ReadonlyArray<{ category_path: string }>): Node[] {
+function buildTree(items: ReadonlyArray<CountedItem>): Node[] {
   const root: Node = { name: '', path: '', count: 0, children: [] };
   const ensure = (parent: Node, name: string, path: string): Node => {
     let node = parent.children.find((n) => n.name === name);
@@ -22,13 +28,14 @@ function buildTree(items: ReadonlyArray<{ category_path: string }>): Node[] {
   for (const c of items) {
     const raw = (c.category_path || '').trim();
     if (!raw) continue; // 无目录的条目只在「全部」里展示
+    const weight = c.count ?? 1;
     const parts = raw.split(/\s*\/\s*/).filter(Boolean);
     let parent = root;
     let path = '';
     for (const part of parts) {
       path = path ? `${path} / ${part}` : part;
       parent = ensure(parent, part, path);
-      parent.count += 1;
+      parent.count += weight;
     }
   }
   const sort = (nodes: Node[]) => {
@@ -37,13 +44,6 @@ function buildTree(items: ReadonlyArray<{ category_path: string }>): Node[] {
   };
   sort(root.children);
   return root.children;
-}
-
-/** 判断条目是否属于选中目录（含子目录）。 */
-export function matchCategory(categoryPath: string, active: string | null): boolean {
-  if (active === null) return true;
-  const raw = (categoryPath || '').trim();
-  return raw === active || raw.startsWith(`${active} / `);
 }
 
 function TreeRow({
@@ -109,18 +109,22 @@ function TreeRow({
   );
 }
 
-export function CategoryTree<T extends { category_path: string }>({
+export function CategoryTree({
   items,
   active,
   onSelect,
   allLabel,
+  allCount,
 }: {
-  items: T[];
+  items: CountedItem[];
   active: string | null;
   onSelect: (path: string | null) => void;
   allLabel: string;
+  /** 「全部」计数；缺省用条目数（树内无目录条目不计入） */
+  allCount?: number;
 }) {
   const tree = useMemo(() => buildTree(items), [items]);
+  const total = allCount ?? items.reduce((sum, i) => sum + (i.count ?? 1), 0);
   return (
     <div style={{ width: 230, flexShrink: 0, borderRight: '1px solid var(--border)', overflowY: 'auto', padding: '8px 6px' }}>
       <div
@@ -136,7 +140,7 @@ export function CategoryTree<T extends { category_path: string }>({
           marginBottom: 4,
         }}
       >
-        {allLabel}（{items.length}）
+        {allLabel}（{total}）
       </div>
       {tree.map((n) => (
         <TreeRow key={n.path || n.name} node={n} depth={0} active={active} onSelect={onSelect} />
