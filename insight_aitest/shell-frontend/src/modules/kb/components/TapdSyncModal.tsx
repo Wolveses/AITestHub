@@ -6,6 +6,14 @@ import { useKnowledgeStore } from '../store/knowledgeStore';
 
 export interface TapdProgress {
   running: boolean;
+  /** scan=扫描源数据（total 未知）/ folders=同步目录 / sync=写入需更新条目 / done=结束 */
+  phase?: string;
+  /** 扫描阶段已拉取条目数 */
+  scanned?: number;
+  /** 用例同步的目录阶段计数 */
+  folders_total?: number;
+  folders_done?: number;
+  /** 需更新条目数（新增 + 源已变更） */
   total: number;
   done: number;
   created: number;
@@ -51,21 +59,22 @@ async function readError(r: Response): Promise<string> {
 const LAST_SYNC_KEY = 'insight_aitest.tapd_last_sync';
 const LAST_SYNC_KEY_CASE = 'insight_aitest.tapd_last_sync.case';
 
-function loadLastSync(key: string): { workspaceId: string; backfillDays: number } | null {
+function loadLastSync(key: string): { workspaceId: string; backfillDays: number | null } | null {
   try {
     const raw = window.localStorage.getItem(key);
     if (!raw) return null;
-    const data = JSON.parse(raw) as { workspace_id?: string; backfill_days?: number };
+    const data = JSON.parse(raw) as { workspace_id?: string; backfill_days?: number | null };
     const workspaceId = (data.workspace_id || '').trim();
     if (!workspaceId) return null;
     const days = Number(data.backfill_days);
-    return { workspaceId, backfillDays: Number.isFinite(days) && days > 0 ? days : 30 };
+    // 空值/非法值表示上次选择的是全量同步，回显时保持为空
+    return { workspaceId, backfillDays: Number.isFinite(days) && days > 0 ? days : null };
   } catch {
     return null;
   }
 }
 
-function saveLastSync(key: string, workspaceId: string, backfillDays: number): void {
+function saveLastSync(key: string, workspaceId: string, backfillDays: number | null): void {
   try {
     window.localStorage.setItem(
       key,
@@ -93,7 +102,8 @@ export function TapdSyncModal({ open, onOpenChange, mode = 'bug', onSynced }: Ta
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [loadingConfig, setLoadingConfig] = useState(false);
   const [workspaceId, setWorkspaceId] = useState('');
-  const [backfillDays, setBackfillDays] = useState(30);
+  // 空值表示全量同步（不按天数过滤）
+  const [backfillDays, setBackfillDays] = useState<number | ''>('');
   const [submitting, setSubmitting] = useState(false);
   const [polling, setPolling] = useState(false);
   const [progress, setProgress] = useState<TapdProgress | null>(null);
@@ -118,7 +128,7 @@ export function TapdSyncModal({ open, onOpenChange, mode = 'bug', onSynced }: Ta
     const last = loadLastSync(lastSyncKey);
     if (last) {
       setWorkspaceId(last.workspaceId);
-      setBackfillDays(last.backfillDays);
+      setBackfillDays(last.backfillDays ?? '');
     }
 
     setLoadingConfig(true);
@@ -183,9 +193,14 @@ export function TapdSyncModal({ open, onOpenChange, mode = 'bug', onSynced }: Ta
 
   if (!open) return null;
 
+  // 扫描阶段（总量未知）显示不确定态；写入阶段用「需更新条目数」作分母，百分比取整
+  const phase = progress?.phase ?? '';
+  const scanning = !!progress?.running && (phase === 'scan' || phase === 'folders');
   const progressPercent = progress && progress.total > 0
-    ? Math.min(100, Math.round((progress.done / progress.total) * 100))
+    ? Math.min(100, Math.floor((progress.done / progress.total) * 100))
     : 0;
+  // 后端初始进度是全零（未开跑）：此时既不算「无需更新」也不算「已完成」，整块隐藏
+  const hasProgress = !!progress && (progress.running || progress.total > 0 || !!progress.message);
   const canStart = !!configured && !submitting && !polling && !!workspaceId.trim() && currentProjectId !== null;
 
   const handleStart = async () => {
@@ -203,6 +218,7 @@ export function TapdSyncModal({ open, onOpenChange, mode = 'bug', onSynced }: Ta
     }
     setSubmitting(true);
     setError('');
+    const days = backfillDays === '' ? null : Number(backfillDays);
     try {
       const r = await fetch(syncUrl, {
         method: 'POST',
@@ -210,7 +226,7 @@ export function TapdSyncModal({ open, onOpenChange, mode = 'bug', onSynced }: Ta
         body: JSON.stringify({
           workspace_id: workspaceId.trim(),
           project_id: currentProjectId,
-          backfill_days: backfillDays,
+          backfill_days: days,
         }),
       });
       if (!r.ok) {
@@ -219,7 +235,7 @@ export function TapdSyncModal({ open, onOpenChange, mode = 'bug', onSynced }: Ta
         return;
       }
       // 仅在成功发起后记忆参数，下次打开弹窗默认回显
-      saveLastSync(lastSyncKey, workspaceId.trim(), backfillDays);
+      saveLastSync(lastSyncKey, workspaceId.trim(), days);
       setProgress(null);
       setPolling(true);
     } catch (e) {
@@ -367,21 +383,47 @@ export function TapdSyncModal({ open, onOpenChange, mode = 'bug', onSynced }: Ta
               type="number"
               min={1}
               value={backfillDays}
-              onChange={(e) => setBackfillDays(Number(e.target.value))}
+              placeholder={t('kb.tapdBackfillPlaceholder', '留空 = 全量同步')}
+              onChange={(e) => setBackfillDays(e.target.value === '' ? '' : Number(e.target.value))}
               style={inputStyle}
             />
             <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>
-              {isCase
-                ? t('kb.tapdCaseBackfillHint', '仅同步最近 {{days}} 天内更新的用例', { days: backfillDays })
-                : t('kb.tapdBackfillHint', '仅同步最近 {{days}} 天内更新的缺陷', { days: backfillDays })}
+              {backfillDays === ''
+                ? isCase
+                  ? t('kb.tapdCaseFullSyncHint', '留空将全量同步所有用例（范围大时耗时较长）')
+                  : t('kb.tapdFullSyncHint', '留空将全量同步所有缺陷（范围大时耗时较长）')
+                : isCase
+                  ? t('kb.tapdCaseBackfillHint', '仅同步最近 {{days}} 天内更新的用例', { days: backfillDays })
+                  : t('kb.tapdBackfillHint', '仅同步最近 {{days}} 天内更新的缺陷', { days: backfillDays })}
             </span>
           </div>
 
           {/* 进度 */}
-          {progress && (
+          {progress && hasProgress && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-secondary)' }}>
-                <span>{t('kb.tapdProgress', '进度 {{done}}/{{total}}', { done: progress.done, total: progress.total })}</span>
+                <span>
+                  {progress.running
+                    ? scanning
+                      ? phase === 'folders'
+                        ? t('kb.tapdPhaseFolders', '同步目录 {{done}}/{{total}}', {
+                            done: progress.folders_done ?? 0,
+                            total: progress.folders_total ?? 0,
+                          })
+                        : t('kb.tapdPhaseScan', '扫描中 · 已读取 {{n}} 条', { n: progress.scanned ?? 0 })
+                      : t('kb.tapdProgressPct', '进度 {{done}}/{{total}}（{{pct}}%）', {
+                          done: progress.done,
+                          total: progress.total,
+                          pct: progressPercent,
+                        })
+                    : progress.total === 0
+                      ? t('kb.tapdNoChanges', '无需更新')
+                      : t('kb.tapdProgressPct', '进度 {{done}}/{{total}}（{{pct}}%）', {
+                          done: progress.done,
+                          total: progress.total,
+                          pct: progressPercent,
+                        })}
+                </span>
                 {progress.running ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--accent)' }}>
                     <RefreshCw size={11} className="animate-spin" />
@@ -392,14 +434,22 @@ export function TapdSyncModal({ open, onOpenChange, mode = 'bug', onSynced }: Ta
                 )}
               </div>
               <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-card, #f1f5f9)', overflow: 'hidden' }}>
-                <div
-                  style={{
-                    width: `${progressPercent}%`,
-                    height: '100%',
-                    background: 'var(--accent, #3b82f6)',
-                    transition: 'width 0.3s ease',
-                  }}
-                />
+                {progress.running && (scanning || progress.total === 0) ? (
+                  // 总量未知（扫描中）时用脉冲满条表达「正在进行」，避免长时间停在 0%
+                  <div
+                    className="animate-pulse"
+                    style={{ width: '100%', height: '100%', background: 'var(--accent, #3b82f6)', opacity: 0.4 }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: `${progressPercent}%`,
+                      height: '100%',
+                      background: 'var(--accent, #3b82f6)',
+                      transition: 'width 0.3s ease',
+                    }}
+                  />
+                )}
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, fontSize: 11, color: 'var(--text-muted)' }}>
                 <span>{t('kb.tapdCreated', '新增 {{n}}', { n: progress.created })}</span>

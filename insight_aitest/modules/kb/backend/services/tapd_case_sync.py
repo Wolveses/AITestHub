@@ -22,7 +22,6 @@ import json
 import logging
 import os
 import threading
-import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -52,9 +51,10 @@ _FOLDER_SOURCE = "tapd_case"
 _progress = {
     "running": False,
     "phase": "",
+    "scanned": 0,  # 扫描阶段已拉取用例数（此时需更新总量未知）
     "folders_total": 0,
     "folders_done": 0,
-    "total": 0,
+    "total": 0,  # 需更新条目数（新增 + 源已变更 + 已废弃待清理），作进度分母
     "done": 0,
     "created": 0,
     "updated": 0,
@@ -80,6 +80,7 @@ def try_acquire_case_sync() -> bool:
             {
                 "running": True,
                 "phase": "folders",
+                "scanned": 0,
                 "folders_total": 0,
                 "folders_done": 0,
                 "total": 0,
@@ -321,13 +322,33 @@ def sync_tcase_workspace(
                 logger.warning("清理已废弃用例向量失败 doc_id=%s", doc_id)
             db.delete_document(doc_id)
 
-        # 2. 用例拉取（有水位走 modified 窗口，否则按创建时间回填）
-        _set(phase="cases")
+        # 2. 用例拉取：回填天数为空走全量（忽略水位、不带日期过滤），否则按水位/回填窗口
+        _set(phase="scan")
         end = date.today()
-        watermark = db.get_tapd_watermark(workspace_id, project_id, "case") if max_cases is None else ""
+        full = backfill_days is None
+        watermark = "" if (full or max_cases is not None) else db.get_tapd_watermark(
+            workspace_id, project_id, "case"
+        )
         cases: dict[str, dict] = {}
         truncated = False
-        if watermark:
+        if full:
+            # 全量：用极宽创建时间范围一次翻页拉完；带 max_cases 时无法判断是否还有更多，
+            # 按截断处理跳过删除差集
+            fetched = client.list_tcases(
+                workspace_id,
+                created_from="2000-01-01",
+                created_to=end.isoformat(),
+                page_size=200,
+                limit=max_cases,
+                on_page=lambda n: _set(scanned=n),
+            )
+            for case in fetched:
+                cid = _s(case.get("id"))
+                if cid:
+                    cases[cid] = case
+            _set(scanned=len(cases))
+            truncated = max_cases is not None
+        elif watermark:
             try:
                 start_wm = datetime.strptime(watermark, "%Y-%m-%d %H:%M:%S") - timedelta(minutes=5)
                 start = start_wm.date()
@@ -350,10 +371,9 @@ def sync_tcase_workspace(
                     cid = _s(case.get("id"))
                     if cid:
                         cases[cid] = case
-                time.sleep(0.5)
+                _set(scanned=len(cases))
         else:
-            days = backfill_days or cfg.tapd_backfill_days
-            start = end - timedelta(days=days)
+            start = end - timedelta(days=backfill_days)
             for w_start, w_end in reversed(_date_windows(start, end)):
                 remaining = None if max_cases is None else max(0, max_cases - len(cases))
                 if remaining == 0:
@@ -370,21 +390,41 @@ def sync_tcase_workspace(
                     cid = _s(case.get("id"))
                     if cid:
                         cases[cid] = case
+                _set(scanned=len(cases))
                 if max_cases is not None and len(cases) >= max_cases:
                     truncated = True
                     break
-                time.sleep(0.5)
 
-        _set(total=len(cases))
-
-        # 3. 逐条落库
+        # 预筛：新增 / 源已变更 / 已废弃待清理 三类计入进度分母；未变更的只记 skipped。
+        # seen_external 在此登记全部用例（未变更的也必须算「见过」，否则删除差集会误删）；
+        # 水位 max_modified 一并在此计算（原写循环内计算，预筛后循环只剩候选）。
+        targets: list[tuple[str, dict, Any]] = []
         seen_external: set[str] = set()
+        unchanged = 0
         max_modified = ""
         for case_id, case in cases.items():
+            external_id = f"tapd:{workspace_id}:{project_id}:{case_id}"
+            seen_external.add(external_id)
+            doc = db.find_by_external_id(external_id)
+            status = _s(case.get("status"))
+            modified = _s(case.get("modified"))
+            if status == "abandon":
+                # 仅本地存在时才有清理动作，否则不需要计入进度分母
+                if doc is not None:
+                    targets.append((case_id, case, doc))
+                continue
+            if modified > max_modified:
+                max_modified = modified
+            if doc is None or doc.source_modified_at != modified:
+                targets.append((case_id, case, doc))
+            else:
+                unchanged += 1
+        _set(total=len(targets), done=0, skipped=unchanged, phase="sync")
+
+        # 3. 逐条落库
+        for case_id, case, doc in targets:
             try:
                 external_id = f"tapd:{workspace_id}:{project_id}:{case_id}"
-                seen_external.add(external_id)
-                doc = db.find_by_external_id(external_id)
 
                 # 已废弃用例不入库；此前已同步过的旧文档一并清理，避免继续被检索命中
                 if _s(case.get("status")) == "abandon":
@@ -402,13 +442,6 @@ def sync_tcase_workspace(
                     continue
 
                 modified = _s(case.get("modified"))
-                if modified > max_modified:
-                    max_modified = modified
-
-                if doc and doc.source_modified_at == modified:
-                    _inc("skipped")
-                    continue
-
                 title = _s(case.get("name")) or "未命名用例"
                 category_id = _s(case.get("category_id"))
                 category_path = _category_path(category_id, cat_map)
@@ -540,14 +573,18 @@ def sync_tcase_workspace(
             "failed": _progress["failed"],
         }
     finally:
+        hits = int(getattr(client, "rate_limit_hits", 0) or 0)
         if client is not None:
             client.close()
         if owned:
             with _lock:
                 _progress["running"] = False
                 _progress["phase"] = "done"
-                _progress["message"] = (
+                message = (
                     f"目录 {_progress['folders_done']} / 新增 {_progress['created']}"
                     f" / 更新 {_progress['updated']} / 跳过 {_progress['skipped']}"
                     f" / 失败 {_progress['failed']}"
                 )
+                if hits:
+                    message += f"（限流重试 {hits} 次）"
+                _progress["message"] = message

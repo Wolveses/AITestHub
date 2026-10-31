@@ -43,7 +43,9 @@ logger = logging.getLogger(__name__)
 
 _progress = {
     "running": False,
-    "total": 0,
+    "phase": "",  # scan=扫描源数据 / sync=写入需更新条目 / done=结束
+    "scanned": 0,  # 扫描阶段已拉取条目数（此时总量未知）
+    "total": 0,  # 需更新条目数（新增 + 源已变更），作进度分母
     "done": 0,
     "created": 0,
     "updated": 0,
@@ -79,6 +81,8 @@ def try_acquire_sync() -> bool:
         _progress.update(
             {
                 "running": True,
+                "phase": "scan",
+                "scanned": 0,
                 "total": 0,
                 "done": 0,
                 "created": 0,
@@ -91,9 +95,14 @@ def try_acquire_sync() -> bool:
         return True
 
 
-def _inc(field: str) -> None:
+def _inc(field: str, n: int = 1) -> None:
     with _lock:
-        _progress[field] += 1
+        _progress[field] += n
+
+
+def _set(**kwargs: Any) -> None:
+    with _lock:
+        _progress.update(kwargs)
 
 
 def _s(value: Any) -> str:
@@ -251,27 +260,46 @@ def sync_workspace(
         vector_store = get_vector_store()
         llm = get_llm()
 
-        end = date.today()
-        start = end - timedelta(days=backfill_days or cfg.tapd_backfill_days)
-
         bugs: dict[str, dict] = {}
-        for w_start, w_end in _date_windows(start, end):
-            for bug in client.list_bugs(workspace_id, w_start.isoformat(), w_end.isoformat()):
+        if backfill_days is None:
+            # 回填天数为空 → 全量同步：用极宽创建时间范围（接口要求带 created 过滤），一次翻页拉完
+            for bug in client.list_bugs(
+                workspace_id,
+                "2000-01-01",
+                date.today().isoformat(),
+                on_page=lambda n: _set(scanned=n),
+            ):
                 bug_id = _s(bug.get("id"))
                 if bug_id:
                     bugs[bug_id] = bug
-        with _lock:
-            _progress["total"] = len(bugs)
+            _set(scanned=len(bugs))
+        else:
+            end = date.today()
+            start = end - timedelta(days=backfill_days)
+            for w_start, w_end in _date_windows(start, end):
+                for bug in client.list_bugs(workspace_id, w_start.isoformat(), w_end.isoformat()):
+                    bug_id = _s(bug.get("id"))
+                    if bug_id:
+                        bugs[bug_id] = bug
+                _set(scanned=len(bugs))
 
+        # 预筛：只把「本地不存在」或「源修改时间已变化」的缺陷计入进度分母，
+        # 顺带缓存已有文档，写循环不再重复查库。未变更的计入 skipped，口径与原来一致。
+        targets: list[tuple[str, dict, Any]] = []
+        unchanged = 0
         for bug_id, bug in bugs.items():
+            external_id = f"tapd:{workspace_id}:{bug_id}"
+            doc = db.find_by_external_id(external_id)
+            if doc is not None and doc.source_modified_at == _s(bug.get("modified")):
+                unchanged += 1
+                continue
+            targets.append((bug_id, bug, doc))
+        _set(total=len(targets), done=0, skipped=unchanged, phase="sync")
+
+        for bug_id, bug, doc in targets:
             try:
                 external_id = f"tapd:{workspace_id}:{bug_id}"
-                doc = db.find_by_external_id(external_id)
                 modified = _s(bug.get("modified"))
-
-                if doc and doc.source_modified_at == modified:
-                    _inc("skipped")
-                    continue
 
                 try:
                     comments = client.list_comments(workspace_id, bug_id)
@@ -385,15 +413,20 @@ def sync_workspace(
             finally:
                 _inc("done")
     finally:
+        hits = int(getattr(client, "rate_limit_hits", 0) or 0)
         if client is not None:
             client.close()
         if owned:
             with _lock:
                 _progress["running"] = False
-                _progress["message"] = (
+                _progress["phase"] = "done"
+                message = (
                     f"新增 {_progress['created']} / 更新 {_progress['updated']}"
                     f" / 跳过 {_progress['skipped']} / 失败 {_progress['failed']}"
                 )
+                if hits:
+                    message += f"（限流重试 {hits} 次）"
+                _progress["message"] = message
 
     return {
         "workspace_id": workspace_id,

@@ -89,6 +89,8 @@ class LLMConfig:
     tapd_auth_pwd: str = ""
     tapd_base_url: str = "https://api.tapd.cn"
     tapd_backfill_days: int = 90
+    # TAPD 全局请求速率上限（次/分钟），用于全量同步时避免触发平台限流
+    tapd_rate_limit_per_min: int = 60
 
     # ===== 多 Provider 管理（Cursor 风格灵活切换）=====
     # providers 是用户保存的所有 Provider 配置列表；active_provider_id 指向当前生效的那一个。
@@ -152,6 +154,7 @@ _ENV_KEYS = {
     "tapd_auth_pwd": "INSIGHT_EYE_AI_TAPD_AUTH_PWD",
     "tapd_base_url": "INSIGHT_EYE_AI_TAPD_BASE_URL",
     "tapd_backfill_days": "INSIGHT_EYE_AI_TAPD_BACKFILL_DAYS",
+    "tapd_rate_limit_per_min": "INSIGHT_EYE_AI_TAPD_RATE_LIMIT_PER_MIN",
     "ui_workspace_dir": "INSIGHT_EYE_AI_UI_WORKSPACE_DIR",
 }
 
@@ -168,6 +171,7 @@ _INT_FIELDS = {
     "max_chunks_per_doc",
     "rerank_fetch_k",
     "tapd_backfill_days",
+    "tapd_rate_limit_per_min",
 }
 # 需要转 float 的字段
 _FLOAT_FIELDS = {"min_score", "semantic_breakpoint"}

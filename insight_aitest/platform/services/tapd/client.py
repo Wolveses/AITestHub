@@ -9,16 +9,20 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.tapd.cn"
-_MAX_RETRIES = 2  # 首次失败后最多再重试 2 次（退避 1s、2s）
+_MAX_RETRIES = 2  # 非限流类失败：首次失败后最多再重试 2 次（退避 1s、2s）
 _RETRY_BACKOFF = (1.0, 2.0)
+# 限流（429）单独走指数退避 + 抖动，最多再试 5 次
+_RATE_LIMIT_RETRIES = 5
+_RATE_LIMIT_BASE = 2.0
 
 
 class TapdError(Exception):
@@ -32,6 +36,7 @@ class TapdClient:
         auth_pwd: str,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 20.0,
+        rate_limit_per_min: int = 60,
     ) -> None:
         self._base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._client = httpx.Client(
@@ -39,6 +44,11 @@ class TapdClient:
             timeout=timeout,
             headers={"Accept": "application/json"},
         )
+        # 全局最小请求间隔：TAPD 按分钟限流，全量同步时不做兜底会持续 429
+        per_min = max(1, int(rate_limit_per_min or 60))
+        self._min_interval = 60.0 / per_min
+        self._last_request_at = 0.0
+        self.rate_limit_hits = 0  # 累计 429 次数，供同步进度展示
 
     @classmethod
     def from_config(cls, cfg: Any) -> "TapdClient | None":
@@ -48,7 +58,8 @@ class TapdClient:
         if not auth_user or not auth_pwd:
             return None
         base_url = str(getattr(cfg, "tapd_base_url", "") or DEFAULT_BASE_URL)
-        return cls(auth_user, auth_pwd, base_url)
+        rate_limit_per_min = int(getattr(cfg, "tapd_rate_limit_per_min", 60) or 60)
+        return cls(auth_user, auth_pwd, base_url, rate_limit_per_min=rate_limit_per_min)
 
     def close(self) -> None:
         self._client.close()
@@ -61,14 +72,25 @@ class TapdClient:
 
     # ===== 底层请求 =====
 
+    def _throttle(self) -> None:
+        """按配置的最小间隔串行化请求（进程内全局节流）。"""
+        now = time.monotonic()
+        wait = self._min_interval - (now - self._last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_request_at = time.monotonic()
+
     def _request(self, path: str, params: dict[str, Any]) -> httpx.Response:
-        """GET 请求：5xx 与超时重试 2 次（1s、2s 退避），4xx 直接失败。
+        """GET 请求：先按速率节流；5xx 与超时重试 2 次（1s、2s 退避），429 指数退避 + 抖动。
 
         异常消息只包含 path 与状态码，不包含认证信息（认证在 header，不在 params）。
         """
         url = f"{self._base_url}{path}"
         last_error: TapdError | None = None
-        for attempt in range(_MAX_RETRIES + 1):
+        attempt = 0
+        rate_attempt = 0
+        while True:
+            self._throttle()
             try:
                 res = self._client.get(url, params=params)
             except httpx.TimeoutException:
@@ -84,18 +106,22 @@ class TapdClient:
                 )
             else:
                 if res.status_code == 429:
-                    # TAPD 按分钟限流：退避后重试，仍失败则上报
-                    if attempt < _MAX_RETRIES:
-                        wait = 20 * (attempt + 1)
+                    # TAPD 按分钟限流：指数退避 + 抖动，独立预算，不占用普通失败重试次数
+                    self.rate_limit_hits += 1
+                    if rate_attempt < _RATE_LIMIT_RETRIES:
+                        wait = _RATE_LIMIT_BASE * (2 ** rate_attempt) + random.uniform(0, 1)
+                        rate_attempt += 1
                         logger.warning(
-                            "TAPD 请求被限流 path=%s attempt=%d，%ds 后重试",
+                            "TAPD 请求被限流 path=%s 第 %d 次，%.1fs 后重试",
                             path,
-                            attempt + 1,
+                            rate_attempt,
                             wait,
                         )
                         time.sleep(wait)
                         continue
-                    raise TapdError(f"TAPD 请求被限流 path={path} HTTP 429")
+                    raise TapdError(
+                        f"TAPD 请求被限流 path={path} HTTP 429（已重试 {_RATE_LIMIT_RETRIES} 次）"
+                    )
                 if res.status_code < 400:
                     return res
                 if res.status_code < 500:
@@ -113,6 +139,9 @@ class TapdClient:
                 )
             if attempt < _MAX_RETRIES:
                 time.sleep(_RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)])
+                attempt += 1
+                continue
+            break
         raise last_error or TapdError(f"TAPD 请求失败 path={path}")
 
     def _get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -137,9 +166,13 @@ class TapdClient:
         workspace_id: str,
         created_from: str,
         created_to: str,
-        page_size: int = 100,
+        page_size: int = 200,
+        on_page: Callable[[int], None] | None = None,
     ) -> list[dict]:
-        """按创建时间区间拉取缺陷列表（自动翻页），返回扁平后的 Bug dict 列表。"""
+        """按创建时间区间拉取缺陷列表（自动翻页），返回扁平后的 Bug dict 列表。
+
+        ``on_page`` 每翻完一页回调当前累计条数，供上层展示扫描进度。
+        """
         bugs: list[dict] = []
         page = 1
         while True:
@@ -160,6 +193,8 @@ class TapdClient:
                 bug = item.get("Bug") if isinstance(item, dict) else None
                 if isinstance(bug, dict):
                     bugs.append(bug)
+            if on_page is not None:
+                on_page(len(bugs))
             if len(items) < page_size:
                 break
             page += 1
@@ -239,11 +274,13 @@ class TapdClient:
         modified_to: str | None = None,
         page_size: int = 200,
         limit: int | None = None,
+        on_page: Callable[[int], None] | None = None,
     ) -> list[dict]:
         """拉取测试用例（自动翻页），返回扁平后的 Tcase dict 列表。
 
         ``created`` 与 ``modified`` 二选一：首次回填按创建时间，增量按修改时间；
         ``limit`` 为本次最多拉取的条数（用于首次小批量验证）。
+        ``on_page`` 每翻完一页回调当前累计条数，供上层展示扫描进度。
         """
         cases: list[dict] = []
         page = 1
@@ -268,12 +305,12 @@ class TapdClient:
                     cases.append(case)
                     if limit is not None and len(cases) >= limit:
                         break
+            if on_page is not None:
+                on_page(len(cases))
             if len(items) < page_size:
                 break
             if limit is not None and len(cases) >= limit:
                 break
             page += 1
-            # 主动节流，避免触发 TAPD 每分钟调用上限
-            time.sleep(0.4)
         logger.info("TAPD 用例拉取完成 workspace_id=%s count=%d", workspace_id, len(cases))
         return cases
