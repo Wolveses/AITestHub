@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Code2, Play, PlugZap, Plus, Star, Trash2 } from 'lucide-react';
+import { Code2, FileCode, Play, PlugZap, Plus, Star, Trash2 } from 'lucide-react';
 import { Modal } from '../../../../components/ui/modal';
 import { useAutomationStore, type UIEnv, type ScriptTemplate } from '../../store/automationStore';
 import { Btn, Field, inputStyle } from './common';
@@ -159,13 +159,12 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
     }
   };
 
-  const handleApplyTemplate = (tmplId: string) => {
-    const tmpl = templates.find((t) => t.id === tmplId);
+  const handleApplyTemplate = (tmplId?: string) => {
+    const tmpl = tmplId ? templates.find((t) => t.id === tmplId) : templates[0];
     if (!tmpl) return;
     setForm((f) => ({
       ...f,
       auth_script: tmpl.code,
-      token_inject: tmpl.id === 'custom_dict' || tmpl.id === 'builtin_zone' ? 'custom' : f.token_inject,
     }));
     toast.info(t('ui.auto.templateApplied', `已载入模板：${tmpl.name}`));
   };
@@ -282,27 +281,31 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
                 <span>{t('ui.auto.authScriptTitle', '前置获取 Token 脚本 (Python)')}</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('ui.auto.insertTemplate', '载入预置模板:')}</span>
-                <select
-                  style={{ ...inputStyle, width: 'auto', padding: '2px 6px', fontSize: 11, height: 26 }}
-                  onChange={(e) => {
-                    if (e.target.value) {
-                      handleApplyTemplate(e.target.value);
-                      e.target.value = '';
-                    }
+                <button
+                  type="button"
+                  onClick={() => handleApplyTemplate()}
+                  style={{
+                    padding: '3px 8px',
+                    fontSize: 11,
+                    background: 'var(--bg-muted)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 4,
+                    color: 'var(--text-primary)',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 4,
                   }}
-                  defaultValue=""
+                  title={t('ui.auto.insertGenericTemplate', '插入通用登录脚本模板')}
                 >
-                  <option value="" disabled>-- 选择模板 --</option>
-                  {templates.map((tpl) => (
-                    <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
-                  ))}
-                </select>
+                  <FileCode size={12} />
+                  <span>{t('ui.auto.applyTemplateBtn', '载入通用模板')}</span>
+                </button>
               </div>
             </div>
 
             <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
-              {t('ui.auto.authScriptHint', '需定义函数 def get_token(base_url, username, password)，返回值可以是 Token 字符串，或包含 headers/cookies/local_storage 的字典。')}
+              {t('ui.auto.authScriptHint', '需定义函数 def get_token(base_url, username, password)，返回值支持 Token 字符串（自动注入浏览器）或复合字典。')}
             </div>
 
             <textarea

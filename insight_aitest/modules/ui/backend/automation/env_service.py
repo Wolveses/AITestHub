@@ -1,14 +1,25 @@
 # -*- coding: utf-8 -*-
-"""环境配置服务：CRUD 辅助 + 登录换 token + storageState 生成。
+"""环境配置服务：CRUD 辅助 + 自定义脚本前置获取 Token + 浏览器 storageState 生成与公共封装。
 
-安全约定：
-- 密码存 ``~/.insight_eye/ui/envs.json``（与数据库分离），DB 只存 ``password_ref``；
-- 接口/日志/异常消息都不输出密码与 token 明文。
+架构设计与浏览器登录态传递机制：
+1. 固定输入契约：
+   用户在页面定义 Python 脚本，固定提供函数签名：
+   ``def get_token(base_url: str, username: str, password: str) -> str | dict``
+   - base_url: 环境根地址（如 https://example.com）
+   - username: 登录账号名
+   - password: 明文密码（在子进程安全沙箱中执行，异常信息自动密码脱敏）
 
-token 注入三态：
-- cookie：登录响应 Cookie → storageState（MCP 与脚本共用）；
-- localStorage：用 playwright 打开站点写入 token → storageState；
-- header：登录响应 token 作为请求头，脚本执行时注入（MCP 探索场景首版不保证支持）。
+2. 固定输出契约：
+   - 模式 1（通用/常用）：返回纯 Token 字符串（str），平台根据环境配置自动组装为 Cookie、LocalStorage 或 Header。
+   - 模式 2（高级复合）：返回字典（dict），包含 token、headers、cookies 或 local_storage，平台自动规范化补齐。
+
+3. 如何封装与传给浏览器（公共流程）：
+   - 由公共封装器 ``BrowserAuthPacker`` 将 Token 与登录态打包为 Playwright 标准的 ``storageState.json``；
+   - 落盘存储至 ``~/.insight_eye/ui/projects/{project_id}/envs/{env_id}/storageState.json``；
+   - Playwright 执行引擎通过 ``browser.new_context(storage_state=path)`` 启动浏览器，
+     无需每次通过 UI 重复点击登录，打开页面即自动处于已登录状态；
+   - 测试执行子进程（pytest）自动注入环境变量 ``INSIGHT_UI_TOKEN`` 与 ``INSIGHT_UI_STORAGE_STATE``，
+     供用例代码直接读取使用。
 """
 
 from __future__ import annotations
@@ -26,78 +37,6 @@ _SECRET_LOCK = threading.Lock()
 
 # 后台入口相对路径：前台为根路径，后台为 base_url + 该路径
 BACKEND_PATH = "/manage"
-
-# ===== 项目001 被测系统的登录协议（写死，仅 base_url/用户名/密码 可变） =====
-_BASIC_AUTH = "Basic ZGlnaWJpcmRfd2ViX2NsaWVudDpkaWdpYmlyZF93ZWJfc2VjcmV0"
-_CLIENT_ID = "874477ff396f4df8b9cc29c37665d8e8"
-_ZONE_API = "/resource/api/local"
-_LOGIN_API = "/usm/api/oauth/token/get"
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
-)
-# 实测该接口返回 {"id": "...", "name": "..."}，zoneId 即顶层 id
-_ZONE_KEYS = ("zoneid", "zone_id", "zone", "id")
-
-
-def _login_headers(base: str) -> dict:
-    return {
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Authorization": _BASIC_AUTH,
-        "Client-Timezone-Offset": "GMT+0800",
-        "Connection": "keep-alive",
-        "Referer": f"{base}/login",
-        "User-Agent": _USER_AGENT,
-        "X-CLIENT-ID": _CLIENT_ID,
-    }
-
-
-def encrypt_password(user: str, password: str) -> str:
-    """被测系统登录密码加密，与线上前端一致：MD5(MD5(用户名) + 明文密码)。
-
-    依据：前端 vendor 的 MD5 包装为 `SparkMD5.hash(str).toUpperCase()`，
-    登录调用为 `password: MD5(MD5(username) + password)`。
-    """
-    import hashlib
-
-    md5 = lambda s: hashlib.md5(s.encode("utf-8")).hexdigest().upper()  # noqa: E731
-    return md5(md5(user) + password)
-
-
-def _error_message(resp) -> str:
-    """从错误响应里取服务端提示（只可能是账号错误等提示，不含凭证明文）。"""
-    try:
-        body = resp.json()
-    except ValueError:
-        return ""
-    if isinstance(body, dict):
-        err = body.get("error")
-        if isinstance(err, dict) and err.get("message"):
-            return str(err["message"])
-        if body.get("message"):
-            return str(body["message"])
-    return ""
-
-
-def _find_value(data, keys: tuple[str, ...]) -> str:
-    """在 JSON 里按 keys 优先级递归找第一个命中的标量值（键名不区分大小写）。"""
-    if isinstance(data, dict):
-        lowered = {str(k).lower(): v for k, v in data.items()}
-        for key in keys:
-            v = lowered.get(key)
-            if isinstance(v, (str, int)) and str(v).strip():
-                return str(v)
-        for v in data.values():
-            found = _find_value(v, keys)
-            if found:
-                return found
-    elif isinstance(data, list):
-        for item in data:
-            found = _find_value(item, keys)
-            if found:
-                return found
-    return ""
 
 
 def site_url(env, site: str) -> str:
@@ -184,193 +123,25 @@ class AuthResult:
     storage_state_path: str = ""
 
 
-def _dig(data: dict, path: str):
-    cur = data
-    for key in [p for p in path.split(".") if p]:
-        if isinstance(cur, dict) and key in cur:
-            cur = cur[key]
-        elif isinstance(cur, list) and key.isdigit():
-            cur = cur[int(key)]
-        else:
-            return None
-    return cur
-
-
-def _extract_token(payload, token_path: str) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    if token_path:
-        v = _dig(payload, token_path)
-        return str(v) if isinstance(v, (str, int)) else ""
-    for path in ("access_token", "token", "data.token", "data.access_token", "result.token"):
-        v = _dig(payload, path)
-        if isinstance(v, (str, int)) and str(v):
-            return str(v)
-    return ""
-
-
-def _pick(payload, *keys):
-    """按顶层 → data/result 的顺序取字段。"""
-    for key in keys:
-        for path in (key, f"data.{key}", f"result.{key}"):
-            v = _dig(payload, path)
-            if v is not None:
-                return v
-    return None
-
-
-def _build_storage_state(env, payload, token: str, zone_id: str, zone_name: str) -> dict:
-    """按线上前端的做法合成登录态：登录 Cookie + local-zone-info localStorage。
-
-    前端逻辑（static/usm/index.js）：
-    - Cookie 名 = btoa("darwin_oauth_token")，值 = encodeURIComponent(JSON.stringify({...token})),
-      domain = 当前 hostname，path = "/"；
-    - localStorage["local-zone-info"] = {id, name}，SPA 依赖它判断所属 zone。
-    """
-    import base64
-    import time
-    import urllib.parse
-    from urllib.parse import urlparse
-
-    u = urlparse((env.base_url or "").rstrip("/"))
-    host = u.hostname or ""
-    origin = f"{u.scheme}://{u.netloc}"
-    secure = u.scheme == "https"
-    expires_in = int(_pick(payload, "expires_in") or 900)
-    now_ms = int(time.time() * 1000)
-    token_obj = {
-        "expirationTime": now_ms + expires_in * 1000,
-        "expires_in": expires_in,
-        "access_token": token,
-        "refresh_token": _pick(payload, "refresh_token") or "",
-        "scope": _pick(payload, "scope") or "",
-        "isCrossZone": bool(_pick(payload, "isCrossZone")),
-    }
-    cookie_name = base64.b64encode(b"darwin_oauth_token").decode()
-    cookie_value = urllib.parse.quote(
-        json.dumps(token_obj, separators=(",", ":"), ensure_ascii=False), safe=""
-    )
-    zone = json.dumps({"id": zone_id, "name": zone_name}, ensure_ascii=False)
-    return {
-        "cookies": [
-            {
-                "name": cookie_name,
-                "value": cookie_value,
-                "domain": host,
-                "path": "/",
-                "expires": int(time.time()) + expires_in,
-                "httpOnly": False,
-                "secure": secure,
-                "sameSite": "Lax",
-            }
-        ],
-        "origins": [
-            {
-                "origin": origin,
-                "localStorage": [{"name": "local-zone-info", "value": zone}],
-            }
-        ],
-    }
-
-
-def _dump_state(project_id: int, env_id: int, state: dict) -> str:
-    path = paths.storage_state_path(project_id, env_id)
-    path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    return str(path)
-
-
-def _login(env) -> AuthResult:
-    """项目001 登录流程：获取 zoneId → 加密密码 → 换取 token。
-
-    接口、请求头、加密算法全部写死，环境里只保留 base_url/用户名/密码。
-    不输出密码与 token 明文，异常只抛状态码或异常类型。
-    """
-    import time
-
-    import httpx
-
-    base = (env.base_url or "").rstrip("/")
-    if not base:
-        return AuthResult(False, "未配置环境地址 base_url")
-    username = env.username or ""
-    password = get_password(env.password_ref)
-    if not username or not password:
-        return AuthResult(False, "环境用户名/密码未配置")
-
-    headers = _login_headers(base)
-    try:
-        # 内部系统常见自签证书，跳过校验
-        with httpx.Client(follow_redirects=True, timeout=30, verify=False) as client:
-            resp = client.get(
-                f"{base}{_ZONE_API}", params={"t": int(time.time() * 1000)}, headers=headers
-            )
-            if resp.status_code >= 400:
-                return AuthResult(False, f"获取 zoneId 接口返回 HTTP {resp.status_code}")
-            try:
-                zone_payload = resp.json()
-            except ValueError:
-                return AuthResult(False, "获取 zoneId 接口返回的不是 JSON")
-
-            zone_id = _find_value(zone_payload, _ZONE_KEYS)
-            zone_name = str(zone_payload.get("name") or "") if isinstance(zone_payload, dict) else ""
-            if not zone_id:
-                return AuthResult(False, "获取 zoneId 失败：响应中未找到 zoneId")
-
-            login_headers = dict(headers)
-            login_headers.update(
-                {"Content-Type": "application/json;text/html", "Origin": base}
-            )
-            login_resp = client.post(
-                f"{base}{_LOGIN_API}",
-                json={
-                    "grant_type": "password",
-                    "remember": True,
-                    "username": username,
-                    "password": encrypt_password(username, password),
-                    "zoneId": zone_id,
-                },
-                headers=login_headers,
-            )
-            if login_resp.status_code >= 400:
-                # 该接口用 HTTP 500 + error.message 表达「账号或密码错误」，把原因带出来
-                reason = _error_message(login_resp)
-                return AuthResult(
-                    False,
-                    f"登录接口返回 HTTP {login_resp.status_code}" + (f"：{reason}" if reason else ""),
-                )
-            try:
-                payload = login_resp.json()
-            except ValueError:
-                return AuthResult(False, "登录接口返回的不是 JSON")
-
-            token = _extract_token(payload, "")
-            if not token:
-                return AuthResult(False, "登录接口未返回 access_token")
-            # 该系统的登录态由前端自己写入 Cookie + localStorage，服务端不下发 Cookie，
-            # 因此按前端格式合成 storageState，供 MCP 浏览器与本地脚本共用
-            state = _build_storage_state(env, payload, token, zone_id, zone_name)
-            path = _dump_state(env.project_id, env.id, state)
-            return AuthResult(
-                True, "登录成功，已生成 Cookie 登录态", token=token, storage_state_path=path
-            )
-    except Exception as e:
-        return AuthResult(False, f"登录请求失败: {type(e).__name__}: {e}")
-
-
+# ===== 仅保留唯一通用脚本模板 =====
 AUTH_SCRIPT_TEMPLATES = [
     {
-        "id": "json_post",
-        "name": "通用 POST JSON 登录 (返回 Token 字符串)",
-        "description": "向登录接口发送 JSON 格式用户名密码，直接返回 access_token 字符串",
+        "id": "generic_post",
+        "name": "通用 POST JSON 登录模板",
+        "description": "向系统登录接口发送 POST 请求换取 Token，支持返回 Token 字符串或复合字典",
         "code": '''import httpx
 
 def get_token(base_url: str, username: str, password: str) -> str:
-    """向登录接口发送 POST 请求，获取并返回 token 字符串。
+    """通用前置获取 Token 脚本。
     
-    :param base_url: 环境域名地址（如 https://example.com）
+    固定输入契约:
+    :param base_url: 环境根地址（如 https://example.com）
     :param username: 用户名
-    :param password: 密码
-    :return: token 字符串
+    :param password: 明文密码
+    
+    固定输出契约:
+    - 模式 1 (常用): 返回 Token 字符串 (str)，系统将根据环境配置自动组装为 Cookie / LocalStorage / Header 并注入浏览器
+    - 模式 2 (高级): 返回复合字典 (dict)，如 {"token": "...", "cookies": [...], "local_storage": {...}, "headers": {...}}
     """
     resp = httpx.post(
         f"{base_url}/api/auth/login",
@@ -381,143 +152,174 @@ def get_token(base_url: str, username: str, password: str) -> str:
     )
     resp.raise_for_status()
     data = resp.json()
-    # 根据响应体实际层级提取 token，如 data["token"] 或 data["data"]["token"]
+
+    # 根据响应体实际层级提取 token（如 data["token"] 或 data["data"]["token"]）
     token = data.get("token") or (data.get("data") or {}).get("token")
     if not token:
         raise ValueError(f"登录响应中未找到 token 字段: {data}")
     return str(token)
 ''',
     },
-    {
-        "id": "md5_login",
-        "name": "MD5 加密登录 (返回 Token 字符串)",
-        "description": "将密码进行 MD5 哈希后再发送请求",
-        "code": '''import hashlib
-import httpx
-
-def get_token(base_url: str, username: str, password: str) -> str:
-    """密码 MD5 加密后发送登录请求。"""
-    pwd_md5 = hashlib.md5(password.encode("utf-8")).hexdigest()
-    resp = httpx.post(
-        f"{base_url}/api/login",
-        json={"username": username, "password": pwd_md5},
-        timeout=15,
-        verify=False,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    token = data.get("access_token") or (data.get("data") or {}).get("access_token") or data.get("token")
-    if not token:
-        raise ValueError(f"登录响应中未包含 access_token: {data}")
-    return str(token)
-''',
-    },
-    {
-        "id": "custom_dict",
-        "name": "高级自定义登录态 (返回字典)",
-        "description": "返回包含 token、headers、cookies 或 localStorage 的字典结构",
-        "code": '''import httpx
-
-def get_token(base_url: str, username: str, password: str) -> dict:
-    """返回复合字典，支持自定义写入 Cookie、LocalStorage 和请求头。"""
-    resp = httpx.post(
-        f"{base_url}/api/login",
-        json={"username": username, "password": password},
-        timeout=15,
-        verify=False,
-    )
-    resp.raise_for_status()
-    token = resp.json().get("data", {}).get("token", "")
-
-    return {
-        "token": token,
-        "headers": {
-            "Authorization": f"Bearer {token}",
-        },
-        "cookies": [
-            {"name": "session_id", "value": token},
-        ],
-        "local_storage": {
-            "auth_token": token,
-            "user_name": username,
-        },
-    }
-''',
-    },
-    {
-        "id": "builtin_zone",
-        "name": "项目001内置系统登录 (zoneId + 双重MD5)",
-        "description": "原内置系统的完整登录逻辑（换取 zoneId，计算 MD5(MD5(username) + password)，写入 OAuth Cookie 与 localStorage）",
-        "code": '''import base64
-import hashlib
-import json
-import time
-import urllib.parse
-import httpx
-
-def get_token(base_url: str, username: str, password: str) -> dict:
-    """项目001 专用多步登录：zoneId -> 双重 MD5 -> 换取 Token 并写入 Cookie 与 localStorage。"""
-    base = base_url.rstrip("/")
-    headers = {
-        "Authorization": "Basic ZGlnaWJpcmRfd2ViX2NsaWVudDpkaWdpYmlyZF93ZWJfc2VjcmV0",
-        "Referer": f"{base}/login",
-        "X-CLIENT-ID": "874477ff396f4df8b9cc29c37665d8e8",
-    }
-    with httpx.Client(timeout=30, verify=False) as client:
-        # 1. 获取 zoneId
-        z_resp = client.get(f"{base}/resource/api/local", params={"t": int(time.time() * 1000)}, headers=headers)
-        z_resp.raise_for_status()
-        z_data = z_resp.json()
-        zone_id = z_data.get("id") or z_data.get("zoneId") or ""
-        zone_name = str(z_data.get("name") or "")
-
-        # 2. 密码加密 MD5(MD5(username) + password)
-        md5 = lambda s: hashlib.md5(s.encode("utf-8")).hexdigest().upper()
-        enc_pwd = md5(md5(username) + password)
-
-        # 3. 登录请求
-        l_headers = dict(headers)
-        l_headers.update({"Content-Type": "application/json;text/html", "Origin": base})
-        l_resp = client.post(
-            f"{base}/usm/api/oauth/token/get",
-            json={
-                "grant_type": "password",
-                "remember": True,
-                "username": username,
-                "password": enc_pwd,
-                "zoneId": zone_id,
-            },
-            headers=l_headers,
-        )
-        l_resp.raise_for_status()
-        payload = l_resp.json()
-        token = payload.get("access_token") or payload.get("token") or ""
-        expires_in = int(payload.get("expires_in") or 900)
-
-        # 4. 组装 Cookie 与 localStorage
-        token_obj = {
-            "expirationTime": int(time.time() * 1000) + expires_in * 1000,
-            "expires_in": expires_in,
-            "access_token": token,
-            "refresh_token": payload.get("refresh_token") or "",
-            "scope": payload.get("scope") or "",
-            "isCrossZone": bool(payload.get("isCrossZone")),
-        }
-        cookie_name = base64.b64encode(b"darwin_oauth_token").decode()
-        cookie_val = urllib.parse.quote(json.dumps(token_obj, separators=(",", ":"), ensure_ascii=False), safe="")
-
-        return {
-            "token": token,
-            "cookies": [
-                {"name": cookie_name, "value": cookie_val, "expires": int(time.time()) + expires_in}
-            ],
-            "local_storage": {
-                "local-zone-info": json.dumps({"id": zone_id, "name": zone_name}, ensure_ascii=False)
-            },
-        }
-''',
-    },
 ]
+
+
+class BrowserAuthPacker:
+    """公共登录态封装器：将用户脚本输出的 Token 或复合字典标准化并封装为 Playwright 登录态。
+
+    统一职责：
+    1. 接收自定义脚本返回值（str 或 dict）；
+    2. 针对 Token 字符串自动根据环境策略（Cookie/LocalStorage/Header）补齐域名、路径、过期时间等；
+    3. 组装符合 Playwright 标准规范的 storageState 结构；
+    4. 落盘至指定环境目录供浏览器启动时自动载入。
+    """
+
+    @classmethod
+    def dump_storage_state(cls, project_id: int, env_id: int, state: dict) -> str:
+        """将 storageState 写入本地文件并返回绝对路径。"""
+        path = paths.storage_state_path(project_id, env_id)
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(path)
+
+    @classmethod
+    def pack(cls, env, res: any, base_url: str) -> tuple[dict, str, dict]:
+        """将脚本返回值封装为 (storage_state, token, headers)。
+
+        :param env: 环境配置对象（读取 token_inject, token_name, token_prefix）
+        :param res: get_token 脚本的返回值（str 或 dict）
+        :param base_url: 环境域名根地址
+        :return: (storage_state 字典, 主 token 字符串, headers 字典)
+        """
+        import time
+        from urllib.parse import urlparse
+
+        u = urlparse((base_url or "").rstrip("/"))
+        host = u.hostname or ""
+        origin = f"{u.scheme}://{u.netloc}"
+        secure = u.scheme == "https"
+
+        inject = (getattr(env, "token_inject", "") or "cookie").lower()
+        token_name = getattr(env, "token_name", "") or "token"
+        token_prefix = getattr(env, "token_prefix", "") or ""
+
+        # 模式 1: 纯字符串 Token
+        if isinstance(res, (str, int)):
+            token = str(res).strip()
+            if not token:
+                raise ValueError("脚本返回的 Token 为空")
+            val = f"{token_prefix}{token}"
+
+            if inject == "header":
+                header_name = token_name if token_name else "Authorization"
+                return {"cookies": [], "origins": []}, token, {header_name: val}
+
+            if inject == "localstorage":
+                state = {
+                    "cookies": [],
+                    "origins": [
+                        {
+                            "origin": origin,
+                            "localStorage": [{"name": token_name, "value": val}],
+                        }
+                    ],
+                }
+                return state, token, {}
+
+            # 默认 cookie 注入
+            state = {
+                "cookies": [
+                    {
+                        "name": token_name,
+                        "value": val,
+                        "domain": host,
+                        "path": "/",
+                        "expires": int(time.time()) + 86400,
+                        "httpOnly": False,
+                        "secure": secure,
+                        "sameSite": "Lax",
+                    }
+                ],
+                "origins": [],
+            }
+            return state, token, {}
+
+        # 模式 2: 复合字典
+        if isinstance(res, dict):
+            token = str(res.get("token") or res.get("access_token") or "").strip()
+            headers = dict(res.get("headers") or {})
+
+            raw_cookies = res.get("cookies")
+            raw_ls = res.get("local_storage") or res.get("localStorage")
+            raw_origins = res.get("origins")
+
+            cookies = []
+            if isinstance(raw_cookies, list):
+                for ck in raw_cookies:
+                    if isinstance(ck, dict) and ck.get("name") and ck.get("value") is not None:
+                        cookies.append({
+                            "name": str(ck["name"]),
+                            "value": str(ck["value"]),
+                            "domain": ck.get("domain") or host,
+                            "path": ck.get("path") or "/",
+                            "expires": int(ck.get("expires") or (time.time() + 86400)),
+                            "httpOnly": bool(ck.get("httpOnly", False)),
+                            "secure": bool(ck.get("secure", secure)),
+                            "sameSite": ck.get("sameSite", "Lax"),
+                        })
+
+            origins = []
+            if isinstance(raw_origins, list):
+                origins = raw_origins
+            elif isinstance(raw_ls, dict):
+                ls_list = [{"name": str(k), "value": str(v)} for k, v in raw_ls.items()]
+                origins.append({"origin": origin, "localStorage": ls_list})
+            elif isinstance(raw_ls, list):
+                origins.append({"origin": origin, "localStorage": raw_ls})
+
+            # 若既无 cookies 也无 origins，但包含了主 token，根据注入策略自动兜底补齐
+            if not cookies and not origins and token:
+                val = f"{token_prefix}{token}"
+                if inject == "header":
+                    header_name = token_name if token_name else "Authorization"
+                    headers.setdefault(header_name, val)
+                elif inject == "localstorage":
+                    origins.append({"origin": origin, "localStorage": [{"name": token_name, "value": val}]})
+                else:
+                    cookies.append({
+                        "name": token_name,
+                        "value": val,
+                        "domain": host,
+                        "path": "/",
+                        "expires": int(time.time()) + 86400,
+                        "httpOnly": False,
+                        "secure": secure,
+                        "sameSite": "Lax",
+                    })
+
+            state = {"cookies": cookies, "origins": origins}
+            return state, token, headers
+
+        raise TypeError(f"前置脚本返回值必须为 str 或 dict，实际类型为 {type(res).__name__}")
+
+    @classmethod
+    def process(cls, env, res: any, base_url: str) -> AuthResult:
+        """执行标准的 Token 封装与 storageState 组装落盘。"""
+        try:
+            state, token, headers = cls.pack(env, res, base_url)
+        except Exception as e:
+            return AuthResult(False, f"处理登录态失败: {e}")
+
+        # 若组装出了有效 cookies 或 origins，生成 storageState 供浏览器加载
+        path = ""
+        if state.get("cookies") or state.get("origins"):
+            path = cls.dump_storage_state(env.project_id, env.id, state)
+
+        return AuthResult(
+            True,
+            "获取 Token 成功，已生成浏览器登录态" if path else "获取 Token 成功",
+            token=token,
+            headers=headers,
+            storage_state_path=path,
+        )
 
 
 def _sanitize_error(text: str, password: str, token: str) -> str:
@@ -607,151 +409,36 @@ def execute_auth_script(script: str, base_url: str, username: str, password: str
         return False, f"解析脚本返回值 JSON 失败: {e}", None
 
 
-def _handle_script_result(env, res: any, base_url: str) -> AuthResult:
-    """把脚本返回值（str 或 dict）转换为标准的 AuthResult 和 storageState。"""
-    import time
-    from urllib.parse import urlparse
-
-    u = urlparse((base_url or "").rstrip("/"))
-    host = u.hostname or ""
-    origin = f"{u.scheme}://{u.netloc}"
-    secure = u.scheme == "https"
-
-    inject = (getattr(env, "token_inject", "") or "cookie").lower()
-    token_name = getattr(env, "token_name", "") or "token"
-    token_prefix = getattr(env, "token_prefix", "") or ""
-
-    # 1. 如果返回纯字符串 token
-    if isinstance(res, (str, int)):
-        token = str(res).strip()
-        if not token:
-            return AuthResult(False, "脚本返回的 token 为空")
-        val = f"{token_prefix}{token}"
-
-        if inject == "header":
-            header_name = token_name if token_name else "Authorization"
-            return AuthResult(True, "登录成功，已生成请求头", token=token, headers={header_name: val})
-        elif inject == "localstorage":
-            state = {
-                "cookies": [],
-                "origins": [
-                    {
-                        "origin": origin,
-                        "localStorage": [{"name": token_name, "value": val}],
-                    }
-                ],
-            }
-            path = _dump_state(env.project_id, env.id, state)
-            return AuthResult(True, "登录成功，已生成 LocalStorage 登录态", token=token, storage_state_path=path)
-        else:
-            # 默认 cookie
-            state = {
-                "cookies": [
-                    {
-                        "name": token_name,
-                        "value": val,
-                        "domain": host,
-                        "path": "/",
-                        "expires": int(time.time()) + 86400,
-                        "httpOnly": False,
-                        "secure": secure,
-                        "sameSite": "Lax",
-                    }
-                ],
-                "origins": [],
-            }
-            path = _dump_state(env.project_id, env.id, state)
-            return AuthResult(True, "登录成功，已生成 Cookie 登录态", token=token, storage_state_path=path)
-
-    # 2. 如果返回字典
-    if isinstance(res, dict):
-        token = str(res.get("token") or res.get("access_token") or "").strip()
-        headers = dict(res.get("headers") or {})
-
-        raw_cookies = res.get("cookies")
-        raw_ls = res.get("local_storage") or res.get("localStorage")
-        raw_origins = res.get("origins")
-
-        cookies = []
-        if isinstance(raw_cookies, list):
-            for ck in raw_cookies:
-                if isinstance(ck, dict) and ck.get("name") and ck.get("value") is not None:
-                    cookies.append({
-                        "name": str(ck["name"]),
-                        "value": str(ck["value"]),
-                        "domain": ck.get("domain") or host,
-                        "path": ck.get("path") or "/",
-                        "expires": int(ck.get("expires") or (time.time() + 86400)),
-                        "httpOnly": bool(ck.get("httpOnly", False)),
-                        "secure": bool(ck.get("secure", secure)),
-                        "sameSite": ck.get("sameSite", "Lax"),
-                    })
-
-        origins = []
-        if isinstance(raw_origins, list):
-            origins = raw_origins
-        elif isinstance(raw_ls, dict):
-            ls_list = [{"name": str(k), "value": str(v)} for k, v in raw_ls.items()]
-            origins.append({"origin": origin, "localStorage": ls_list})
-        elif isinstance(raw_ls, list):
-            origins.append({"origin": origin, "localStorage": raw_ls})
-
-        # 若既无 cookies 也无 origins，但返回了 token，按环境配置补齐
-        if not cookies and not origins and token:
-            val = f"{token_prefix}{token}"
-            if inject == "header":
-                header_name = token_name if token_name else "Authorization"
-                headers.setdefault(header_name, val)
-            elif inject == "localstorage":
-                origins.append({"origin": origin, "localStorage": [{"name": token_name, "value": val}]})
-            else:
-                cookies.append({
-                    "name": token_name,
-                    "value": val,
-                    "domain": host,
-                    "path": "/",
-                    "expires": int(time.time()) + 86400,
-                    "httpOnly": False,
-                    "secure": secure,
-                    "sameSite": "Lax",
-                })
-
-        state = {"cookies": cookies, "origins": origins}
-        path = _dump_state(env.project_id, env.id, state) if (cookies or origins) else ""
-        return AuthResult(
-            True,
-            "登录成功，已生成自定义登录态",
-            token=token,
-            headers=headers,
-            storage_state_path=path,
-        )
-
-    return AuthResult(False, f"前置脚本返回值必须为 str 或 dict，实际类型为 {type(res).__name__}")
-
-
 def prepare_auth(env, override_script: str | None = None, override_password: str | None = None) -> AuthResult:
     """生成/执行前准备登录态。
 
-    优先判断是否配置了前置脚本 auth_script：
-    - 若配置了 auth_script，执行用户自定义 Python 脚本换取 token / 登录态；
-    - 若未配置 auth_script，回退执行原本内置的 _login(env) 流程。
+    所有环境全部通过自定义脚本获取 Token：
+    1. 执行用户的 Python get_token 脚本获取 Token 字符串或复合字典；
+    2. 通过公共 BrowserAuthPacker 完成封装，并写入 Playwright storageState.json；
+    3. 若环境未配置脚本且无账号密码，跳过登录；若设置了账号密码但未配置脚本，返回明确提示。
     """
     script = (override_script if override_script is not None else getattr(env, "auth_script", "")) or ""
     script = script.strip()
 
-    if script:
-        base = (env.base_url or "").rstrip("/")
-        if not base:
-            return AuthResult(False, "未配置环境地址 base_url")
-        username = env.username or ""
+    if not script:
+        username = getattr(env, "username", "") or ""
         password = override_password if override_password is not None else get_password(getattr(env, "password_ref", ""))
-        ok, err_msg, res = execute_auth_script(script, base, username, password)
-        if not ok:
-            return AuthResult(False, err_msg)
-        result = _handle_script_result(env, res, base)
-    else:
-        result = _login(env)
+        if not username and not password:
+            return AuthResult(True, "未配置认证信息，跳过登录态生成")
+        return AuthResult(False, "该环境尚未配置前置获取 Token 脚本，请在环境管理中编写 get_token 脚本")
 
+    base = (getattr(env, "base_url", "") or "").rstrip("/")
+    if not base:
+        return AuthResult(False, "未配置环境地址 base_url")
+
+    username = getattr(env, "username", "") or ""
+    password = override_password if override_password is not None else get_password(getattr(env, "password_ref", ""))
+
+    ok, err_msg, res = execute_auth_script(script, base, username, password)
+    if not ok:
+        return AuthResult(False, err_msg)
+
+    result = BrowserAuthPacker.process(env, res, base)
     if result.storage_state_path:
         try:
             from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
@@ -802,3 +489,8 @@ def test_env(env, override_fields: dict | None = None) -> dict:
         token_preview = f" (Token: {masked})"
 
     return {"ok": True, "message": reach_msg + "；" + auth.message + token_preview, "token": auth.token}
+
+
+# 兼容性别名
+_handle_script_result = BrowserAuthPacker.process
+
