@@ -22,22 +22,24 @@ export function TestCaseApp() {
     selectCase,
     createCase,
     currentFolderId,
+    setCurrentFolderId,
     selectedProjectId,
     setSelectedProjectId,
   } = useCaseStore();
-  const { projects, loadProjects } = useProjectStore();
+  const { projects, currentProjectId, loadProjects } = useProjectStore();
   const isMobile = useIsMobile();
 
   useEffect(() => {
     loadProjects();
   }, [loadProjects]);
 
-  // 用例必须归属项目：如果当前未指定有效项目，自动选中第一个项目（本地用例 store 状态，不污染全局）
+  // 与顶部全局项目选择器保持联动，切换项目时重置目录并载入用例
   useEffect(() => {
-    if (projects.length > 0 && (selectedProjectId === null || !projects.some((p) => p.id === selectedProjectId))) {
-      setSelectedProjectId(projects[0].id);
+    if (currentProjectId !== null && currentProjectId !== selectedProjectId) {
+      setCurrentFolderId(null);
+      setSelectedProjectId(currentProjectId);
     }
-  }, [projects, selectedProjectId, setSelectedProjectId]);
+  }, [currentProjectId, selectedProjectId, setCurrentFolderId, setSelectedProjectId]);
 
   useEffect(() => {
     if (selectedProjectId !== null) {

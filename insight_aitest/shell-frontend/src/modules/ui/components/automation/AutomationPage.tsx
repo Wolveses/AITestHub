@@ -16,7 +16,7 @@ const ACTIVE_STATUSES = new Set(['generating', 'fixing', 'running']);
 
 export function AutomationPage() {
   const { t } = useTranslation();
-  const { projects, loadProjects } = useProjectStore();
+  const { projects, currentProjectId, loadProjects } = useProjectStore();
   const { confirm } = useConfirmStore();
   const {
     projectId,
@@ -49,13 +49,12 @@ export function AutomationPage() {
     loadProjects();
   }, [loadProjects]);
 
-  // 记住的项目被删除时回退到第一个项目
+  // 与顶部全局项目选择器保持联动
   useEffect(() => {
-    if (projects.length === 0) return;
-    if (projectId === null || !projects.some((p) => p.id === projectId)) {
-      setProjectId(projects[0].id);
+    if (currentProjectId !== null && currentProjectId !== projectId) {
+      setProjectId(currentProjectId);
     }
-  }, [projects, projectId, setProjectId]);
+  }, [currentProjectId, projectId, setProjectId]);
 
   useEffect(() => {
     if (projectId !== null) {
@@ -169,19 +168,6 @@ export function AutomationPage() {
           flexWrap: 'wrap',
         }}
       >
-        <select
-          value={projectId ?? ''}
-          onChange={(e) => setProjectId(Number(e.target.value))}
-          style={{ ...inputStyle, width: 180 }}
-          title={t('ui.auto.selectProject', '选择项目')}
-        >
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-
         <Btn variant="primary" onClick={() => setImportOpen(true)} disabled={projectId === null}>
           <Download size={14} /> {t('ui.auto.importCases', '导入用例')}
         </Btn>

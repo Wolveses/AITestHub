@@ -25,7 +25,7 @@ interface CaseFolderTreeProps {
 export function CaseFolderTree({ onFolderChange }: CaseFolderTreeProps) {
   const { t } = useTranslation();
   const { confirm } = useConfirmStore();
-  const { projects } = useProjectStore();
+  const { projects, currentProjectId } = useProjectStore();
   const {
     folders,
     currentFolderId,
@@ -52,17 +52,15 @@ export function CaseFolderTree({ onFolderChange }: CaseFolderTreeProps) {
     }
   }, [selectedProjectId, loadFolders]);
 
-  // 用例必须归属项目：如果当前未选项目或选中的项目不存在，自动选中第一个项目
+  // 与顶部全局项目选择器保持联动
   useEffect(() => {
-    if (projects.length > 0 && (selectedProjectId === null || !projects.some((p) => p.id === selectedProjectId))) {
-      setSelectedProjectId(projects[0].id);
+    if (currentProjectId !== null && currentProjectId !== selectedProjectId) {
+      setCurrentFolderId(null);
+      setSelectedProjectId(currentProjectId);
     }
-  }, [projects, selectedProjectId, setSelectedProjectId]);
+  }, [currentProjectId, selectedProjectId, setCurrentFolderId, setSelectedProjectId]);
 
-  const handleSelectProject = (pid: number) => {
-    setCurrentFolderId(null);
-    setSelectedProjectId(pid);
-  };
+  const currentProject = projects.find((p) => p.id === (selectedProjectId ?? currentProjectId));
 
   const toggleExpand = (id: number, e: MouseEvent) => {
     e.stopPropagation();
@@ -340,39 +338,24 @@ export function CaseFolderTree({ onFolderChange }: CaseFolderTreeProps) {
         flexShrink: 0,
       }}
     >
-      {/* 目录最上方：项目下拉选择框 */}
-      <div style={{ padding: '12px 12px 8px', borderBottom: '1px solid var(--bg-card)' }}>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 4 }}>
+      {/* 目录最上方：显示当前选中的项目名称 */}
+      <div style={{ padding: '12px 14px 10px', borderBottom: '1px solid var(--bg-card)' }}>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 4 }}>
           <TreeIcon size={12} strokeWidth={1.5} /> {t('testcase.projectCatalog', '项目目录')}
         </div>
-        <select
-          value={selectedProjectId ?? (projects.length > 0 ? projects[0].id : '')}
-          onChange={(e) => {
-            const val = e.target.value;
-            if (val) handleSelectProject(Number(val));
-          }}
+        <div
           style={{
-            width: '100%',
-            background: 'var(--bg-card)',
-            border: '1px solid var(--border)',
-            color: 'var(--text-primary)',
-            padding: '6px 8px',
-            borderRadius: 6,
             fontSize: 13,
-            cursor: 'pointer',
-            outline: 'none',
+            fontWeight: 600,
+            color: 'var(--text-primary)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
           }}
+          title={currentProject?.name}
         >
-          {projects.length === 0 ? (
-            <option value="">{t('testcase.noProjects', '暂无项目')}</option>
-          ) : (
-            projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))
-          )}
-        </select>
+          {currentProject?.name || t('testcase.noProjects', '暂无项目')}
+        </div>
       </div>
 
       {/* 根级别导航选项（全部用例、未分类） */}

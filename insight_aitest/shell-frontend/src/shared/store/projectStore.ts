@@ -62,11 +62,18 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const data = await r.json();
       const projects: Project[] = Array.isArray(data) ? data : [];
       const current = get().currentProjectId;
-      // 记住的项目已被删除时清空，避免下拉框显示不存在的项目
-      if (current !== null && !projects.some((p) => p.id === current)) {
+      // 记住的项目已被删除或尚未选择时，若有项目列表则默认选中第 1 个
+      if (projects.length === 0) {
         writeStoredId(LS_PROJECT, null);
         writeStoredId(LS_VERSION, null);
         set({ projects, currentProjectId: null, currentVersionId: null, versions: [] });
+        return;
+      }
+      if (current === null || !projects.some((p) => p.id === current)) {
+        const defaultId = projects[0].id;
+        writeStoredId(LS_PROJECT, defaultId);
+        set({ projects, currentProjectId: defaultId });
+        get().loadVersions(defaultId);
         return;
       }
       set({ projects });

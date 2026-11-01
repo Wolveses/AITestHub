@@ -122,8 +122,8 @@ export function KnowledgeBase() {
     listFeishuSpaces,
     syncFeishuSpace,
   } = useKnowledgeStore();
-  const { projects, loadProjects } = useProjectStore();
-  // 缺陷库、用例库使用独立项目上下文，不改全局项目，避免影响知识库文档列表
+  // 缺陷库、用例库使用与顶部全局选中的项目联动，知识库本地与飞书文档不受影响
+  const currentProjectId = useProjectStore((s) => s.currentProjectId);
   const defectProjectId = useKnowledgeStore((s) => s.defectProjectId);
   const setDefectProjectId = useKnowledgeStore((s) => s.setDefectProjectId);
   const caseProjectId = useKnowledgeStore((s) => s.caseProjectId);
@@ -437,30 +437,19 @@ export function KnowledgeBase() {
 
   // 缺陷库与用例管理一致：进入后自动选中第一个项目（当前项目失效时也回落到第一个），
   // 项目可在页内下拉切换，不做整页拦截。
+  // 与顶部全局项目选择器保持联动
   useEffect(() => {
-    if ((activeTab === 'defect' || activeTab === 'case') && projects.length === 0) {
-      loadProjects();
+    if (currentProjectId !== null) {
+      if (activeTab === 'defect' && defectProjectId !== currentProjectId) {
+        setDefectProjectId(currentProjectId);
+      } else if (activeTab === 'case' && caseProjectId !== currentProjectId) {
+        setCaseProjectId(currentProjectId);
+      }
     }
-  }, [activeTab, projects.length, loadProjects]);
+  }, [activeTab, currentProjectId, defectProjectId, caseProjectId, setDefectProjectId, setCaseProjectId]);
 
-  useEffect(() => {
-    if (activeTab !== 'defect' || projects.length === 0) return;
-    if (defectProjectId === null || !projects.some((p) => p.id === defectProjectId)) {
-      setDefectProjectId(projects[0].id);
-    }
-  }, [activeTab, projects, defectProjectId, setDefectProjectId]);
-
-  useEffect(() => {
-    if (activeTab !== 'case' || projects.length === 0) return;
-    if (caseProjectId === null || !projects.some((p) => p.id === caseProjectId)) {
-      setCaseProjectId(projects[0].id);
-    }
-  }, [activeTab, projects, caseProjectId, setCaseProjectId]);
-
-  // 缺陷库与用例库共用页内项目下拉，仅项目上下文不同
+  // 缺陷库与用例库共用实体视图
   const isEntityTab = activeTab === 'defect' || activeTab === 'case';
-  const entityProjectId = activeTab === 'case' ? caseProjectId : defectProjectId;
-  const setEntityProjectId = activeTab === 'case' ? setCaseProjectId : setDefectProjectId;
 
   return (
     <div style={{ flex: 1, display: 'flex', height: '100%', overflow: 'hidden' }}>
@@ -485,51 +474,20 @@ export function KnowledgeBase() {
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             {isEntityTab ? (
-              <>
-                {/* 与用例管理一致：项目在页内下拉切换，进入后自动选中 */}
-                <span style={{ color: 'var(--text-muted)' }}>{t('kb.project', '项目')}</span>
-                <select
-                  value={entityProjectId ?? ''}
-                  onChange={(e) => {
-                    if (e.target.value) setEntityProjectId(Number(e.target.value));
-                  }}
-                  style={{
-                    background: 'var(--bg-card)',
-                    border: '1px solid var(--border)',
-                    color: 'var(--text-primary)',
-                    padding: '4px 8px',
-                    borderRadius: 6,
-                    fontSize: 13,
-                    cursor: 'pointer',
-                    outline: 'none',
-                  }}
-                >
-                  {projects.length === 0 ? (
-                    <option value="">{t('testcase.noProjects', '暂无项目')}</option>
-                  ) : (
-                    projects.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))
-                  )}
-                </select>
-                <ChevronRight size={13} style={{ opacity: 0.5 }} />
-                <span
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 4,
-                    color: 'var(--text-primary, #111)',
-                    fontWeight: 600,
-                  }}
-                >
-                  <Home size={14} />{' '}
-                  {activeTab === 'case'
-                    ? t('kb.allCases', '全部用例')
-                    : t('kb.allDefects', '全部缺陷')}
-                </span>
-              </>
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  color: 'var(--text-primary, #111)',
+                  fontWeight: 600,
+                }}
+              >
+                <Home size={14} />{' '}
+                {activeTab === 'case'
+                  ? t('kb.allCases', '全部用例')
+                  : t('kb.allDefects', '全部缺陷')}
+              </span>
             ) : (
               <>
                 <span

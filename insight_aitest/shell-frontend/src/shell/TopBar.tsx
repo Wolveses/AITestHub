@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import axios from 'axios';
 import { Menu, X, Users, LogOut, Sun, Moon } from 'lucide-react';
@@ -9,6 +10,26 @@ import LanguageSwitcher from '../shared/components/LanguageSwitcher';
 import { useAuthStore } from '../shared/store/authStore';
 import { useThemeStore } from '../shared/store/themeStore';
 import { UserManageModal } from './UserManageModal';
+import { ProjectSelector } from './ProjectSelector';
+
+/**
+ * 判断当前路由是否属于项目作用域页面（用例库、缺陷库、UI/API 自动化、用例管理等）。
+ * 全局资源（知识库本地/飞书文档、Agent 对话、系统概览等）不属于项目作用域。
+ */
+export function isProjectScopedRoute(pathname: string): boolean {
+  if (pathname.startsWith('/kb/defect') || pathname.startsWith('/kb/case')) {
+    return true;
+  }
+  if (
+    pathname.startsWith('/testcase') ||
+    pathname.startsWith('/ui-runner') ||
+    pathname.startsWith('/api-runner') ||
+    pathname.startsWith('/performance')
+  ) {
+    return true;
+  }
+  return false;
+}
 
 interface TopBarProps {
   onToggleSidebar: () => void;
@@ -16,12 +37,14 @@ interface TopBarProps {
 
 export function TopBar({ onToggleSidebar }: TopBarProps) {
   const { t } = useTranslation();
+  const location = useLocation();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [userManageOpen, setUserManageOpen] = useState(false);
   const { user, logout } = useAuthStore();
   const { theme, toggleTheme } = useThemeStore();
   const [version, setVersion] = useState<string>('2.2.0');
   const isMobile = useIsMobile();
+  const isProjectScoped = isProjectScopedRoute(location.pathname);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,7 +91,21 @@ export function TopBar({ onToggleSidebar }: TopBarProps) {
           >
             <Menu size={18} strokeWidth={1.5} />
           </button>
-          <strong>AITest 平台</strong>
+          <strong style={{ whiteSpace: 'nowrap' }}>AITest 平台</strong>
+
+          {/* 仅在项目相关页面生效并展示顶部项目选择器 */}
+          {isProjectScoped && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginLeft: 6 }}>
+              <div
+                style={{
+                  width: 1,
+                  height: 16,
+                  background: 'var(--border, rgba(255,255,255,0.15))',
+                }}
+              />
+              <ProjectSelector />
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>v{version}</span>
