@@ -409,15 +409,41 @@ def execute_auth_script(script: str, base_url: str, username: str, password: str
         return False, f"解析脚本返回值 JSON 失败: {e}", None
 
 
+def get_project_auth_script(project_id: int) -> str:
+    """获取项目级统一前置获取 Token 脚本内容。若未配置，返回空字符串。"""
+    if not project_id:
+        return ""
+    p = paths.project_auth_script_path(project_id)
+    if p.exists():
+        try:
+            return p.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    return ""
+
+
+def set_project_auth_script(project_id: int, script: str) -> None:
+    """保存项目级统一前置获取 Token 脚本。"""
+    if not project_id:
+        return
+    p = paths.project_auth_script_path(project_id)
+    p.write_text(script or "", encoding="utf-8")
+
+
 def prepare_auth(env, override_script: str | None = None, override_password: str | None = None) -> AuthResult:
     """生成/执行前准备登录态。
 
-    所有环境全部通过自定义脚本获取 Token：
-    1. 执行用户的 Python get_token 脚本获取 Token 字符串或复合字典；
-    2. 通过公共 BrowserAuthPacker 完成封装，并写入 Playwright storageState.json；
-    3. 若环境未配置脚本且无账号密码，跳过登录；若设置了账号密码但未配置脚本，返回明确提示。
+    优先级：
+    1. 显式传入的 override_script；
+    2. 项目级统一前置脚本（paths.project_auth_script_path(env.project_id)）；
+    3. 环境自带的 auth_script（兼容历史老数据）。
     """
-    script = (override_script if override_script is not None else getattr(env, "auth_script", "")) or ""
+    script = override_script
+    project_id = getattr(env, "project_id", 0) or 0
+    if script is None and project_id:
+        script = get_project_auth_script(project_id)
+    if not script:
+        script = getattr(env, "auth_script", "") or ""
     script = script.strip()
 
     if not script:
@@ -425,7 +451,7 @@ def prepare_auth(env, override_script: str | None = None, override_password: str
         password = override_password if override_password is not None else get_password(getattr(env, "password_ref", ""))
         if not username and not password:
             return AuthResult(True, "未配置认证信息，跳过登录态生成")
-        return AuthResult(False, "该环境尚未配置前置获取 Token 脚本，请在环境管理中编写 get_token 脚本")
+        return AuthResult(False, "该项目尚未配置前置获取 Token 脚本，请在环境管理中编写项目 get_token 脚本")
 
     base = (getattr(env, "base_url", "") or "").rstrip("/")
     if not base:

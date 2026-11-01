@@ -50,6 +50,13 @@ def project_scripts_dir(project_id: int) -> Path:
     return workspace_root() / "scripts" / str(project_id)
 
 
+def project_auth_script_path(project_id: int) -> Path:
+    """项目级前置获取 Token 脚本路径（本项目所有环境共用）。"""
+    d = project_scripts_dir(project_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "auth_script.py"
+
+
 def case_dir(project_id: int, case_id: int) -> Path:
     return project_scripts_dir(project_id) / str(case_id)
 
