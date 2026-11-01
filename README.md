@@ -158,7 +158,7 @@ pip install -r requirements.txt
 # 3. (UI Automation only) install the browser driver
 playwright install chromium
 
-# 4. Start the platform (starts backend + frontend dev server, opens browser)
+# 4. Start the platform (starts backend + frontend dev server)
 python -m insight_aitest
 
 # Services start automatically:
@@ -167,7 +167,7 @@ python -m insight_aitest
 # - API Docs:     http://localhost:8001/docs
 ```
 
-> **Note**: `python -m insight_aitest` launches the FastAPI backend (port 8001), the React frontend dev server (port 80), and opens a browser. If `node_modules` is missing it runs `npm install` first.
+> **Note**: `python -m insight_aitest` launches the FastAPI backend (port 8001) and the React frontend dev server (port 80). If `node_modules` is missing it runs `npm install` first. (Pass `--open` if you want to automatically open the browser).
 
 ### LLM Configuration (modules C / D / F)
 

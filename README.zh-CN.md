@@ -166,7 +166,7 @@ pip install -r requirements.txt
 # 3.（仅 UI 自动化）安装浏览器驱动
 playwright install chromium
 
-# 4. 启动平台（自动启动后端 + 前端开发服务器并打开浏览器）
+# 4. 启动平台（自动启动后端 + 前端开发服务器）
 python -m insight_aitest
 
 # 服务将自动启动：
@@ -175,7 +175,7 @@ python -m insight_aitest
 # - API 文档：http://localhost:8001/docs
 ```
 
-> **说明**：`python -m insight_aitest` 会启动 FastAPI 后端（8001）、React 前端开发服务器（80）并打开浏览器；若 `node_modules` 不存在会先执行 `npm install`。
+> **说明**：`python -m insight_aitest` 会启动 FastAPI 后端（8001）与 React 前端开发服务器（80）；若 `node_modules` 不存在会先执行 `npm install`。（如需自动打开浏览器，可传入 `--open` 参数）。
 
 ### LLM 配置（模块 C / D / F）
 

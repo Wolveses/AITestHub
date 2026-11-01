@@ -1,13 +1,12 @@
 """
 Insight-AITest 应用入口点
 
-启动 Web 后端服务 (FastAPI) 和前端开发服务器，并自动打开浏览器
+启动 Web 后端服务 (FastAPI) 和前端开发服务器
 """
 
 from __future__ import absolute_import
 import sys
 import os
-import webbrowser
 import threading
 import time
 import subprocess
@@ -94,6 +93,8 @@ def start_frontend():
 
 def open_browser(local_ip):
     """延迟打开浏览器到前端页面（本机打开优先使用 localhost 避免代理拦截）"""
+    import webbrowser
+
     time.sleep(5)  # 等待前端和后端都启动
     try:
         # 本机打开浏览器优先使用 localhost，保证不受代理/VPN/网络变化影响
@@ -126,9 +127,10 @@ def main():
     frontend_thread = threading.Thread(target=start_frontend, daemon=True)
     frontend_thread.start()
 
-    # 在后台线程中打开浏览器
-    browser_thread = threading.Thread(target=open_browser, args=(local_ip,), daemon=True)
-    browser_thread.start()
+    # 取消自动打开浏览器；仅当显式传入 --open / --open-browser 参数时才打开浏览器
+    if "--open" in sys.argv or "--open-browser" in sys.argv:
+        browser_thread = threading.Thread(target=open_browser, args=(local_ip,), daemon=True)
+        browser_thread.start()
 
     # 动态导入平台内核装配的应用
     from insight_aitest.platform.kernel import build_app
@@ -156,7 +158,6 @@ def main():
 ║  服务日志 / Logs:                                          ║
 ║    - 文件 / File:   {log_file_path}
 ╠════════════════════════════════════════════════════════════╣
-║  浏览器将自动打开 / Browser will open automatically        ║
 ║  其他设备可使用网络地址访问 /                              ║
 ║  Other devices can use network URL to access              ║
 ║  按 Ctrl+C 停止服务 / Press Ctrl+C to stop                 ║

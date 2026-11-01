@@ -13,7 +13,7 @@
 
 ```
 insight_aitest/
-├── __main__.py              # 入口点：python -m insight_aitest（启动后端 + 前端 + 开浏览器）
+├── __main__.py              # 入口点：python -m insight_aitest（启动后端 + 前端）
 ├── platform/                # 平台内核（与具体功能无关的公共底座）
 │   ├── kernel.py            # 装配 FastAPI 应用：config → db → 扫描模块 → 注册路由
 │   ├── module_registry.py   # 模块清单解析、校验、拓扑排序
