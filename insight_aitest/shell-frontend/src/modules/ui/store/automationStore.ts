@@ -112,6 +112,8 @@ export interface GenerationRecord {
   prompt_chars: number;
   completion_chars: number;
   fix_rounds: number;
+  /** 生成成功时首跑的终态截图可预览 */
+  has_screenshot: boolean;
   started_at: string | null;
   finished_at: string | null;
 }

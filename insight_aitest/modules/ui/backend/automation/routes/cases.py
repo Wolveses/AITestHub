@@ -518,11 +518,29 @@ def list_generations(
             "completion_chars": g.completion_chars,
             "fix_rounds": g.fix_rounds,
             "log_rel_path": g.log_rel_path,
+            "has_screenshot": paths.generation_shot(case_id, g.id).is_file(),
             "started_at": g.started_at.isoformat() if g.started_at else None,
             "finished_at": g.finished_at.isoformat() if g.finished_at else None,
         }
         for g in db.list_generations(case_id)
     ]
+
+
+@router.get("/{case_id}/generations/{generation_id}/screenshot")
+def get_generation_screenshot(
+    case_id: int,
+    generation_id: int,
+    db: UIAutomationDatabase = Depends(get_automation_db),
+):
+    """生成成功时首跑的终态截图（生成记录里预览用）。"""
+    _get_or_404(case_id, db)
+    gen = next((g for g in db.list_generations(case_id) if g.id == generation_id), None)
+    if gen is None:
+        raise HTTPException(404, "生成记录不存在")
+    shot = paths.generation_shot(case_id, generation_id)
+    if not shot.is_file():
+        raise HTTPException(404, "该生成记录没有终态截图")
+    return FileResponse(shot)
 
 
 @router.get("/{case_id}/progress")

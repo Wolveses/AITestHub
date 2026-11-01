@@ -1410,6 +1410,8 @@ class GenerationJob:
         # 首次失败快照与采用的修复方式，成功时沉淀「踩坑 + 解决方案」样本
         self.first_failure = ""
         self.fix_mode = ""
+        # 最近一次首跑验证的产物目录：成功时据此固化终态截图供生成记录回溯
+        self.validate_artifacts_rel = ""
         self._log = None
         self._staged_pages: Path | None = None
         # 当前 MCP 客户端：用户终止时由外部线程 close，打断正在等待的请求
@@ -2572,7 +2574,7 @@ class GenerationJob:
         tmp = case_dir / "case_candidate.py"
         tmp.write_text(source, encoding="utf-8")
         try:
-            return run_script(
+            result = run_script(
                 self._case_view(params_schema, params_values),
                 self.env,
                 script_path=tmp,
@@ -2582,6 +2584,9 @@ class GenerationJob:
                 # 首跑是本任务另一个长阻塞点，终止时立即杀掉 pytest 子进程
                 cancel_check=lambda: concurrency.is_cancelled(self.case_id),
             )
+            # 记住本次首跑产物位置，通过时把终态截图固化到生成记录旁
+            self.validate_artifacts_rel = result.get("artifacts_rel_path") or ""
+            return result
         except EnvMissingError as e:
             return {"run_status": "error", "error_category": ErrorCategory.ENV, "error_message": str(e)}
         except Exception as e:
@@ -2652,6 +2657,25 @@ class GenerationJob:
             "message": "脚本已保存但未通过验证，请查看执行记录后手动修复",
         }
 
+    def _save_final_shot(self) -> None:
+        """把首跑终态截图复制到生成记录旁，供生成记录里预览成功画面。
+
+        产物目录会随执行记录保留策略被清理，复制一份按 gen_id 命名的小图，
+        生成记录始终能对应到当时那条脚本的终态画面。
+        """
+        rel = self.validate_artifacts_rel
+        if not rel:
+            return
+        src = paths.resolve_rel(rel) / "final.png"
+        if not src.is_file():
+            return
+        target = paths.generation_shot(self.case_id, self.gen_id)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
+        except OSError:
+            logger.warning("保存生成终态截图失败：%s", target)
+
     def _finalize(self, outcome: dict) -> None:
         status = outcome.get("status", GenerationStatus.FAILED)
         log_rel = paths.to_rel(paths.generation_log(self.case_id, self.gen_id))
@@ -2684,6 +2708,7 @@ class GenerationJob:
             return
 
         if status == GenerationStatus.SUCCESS:
+            self._save_final_shot()
             concurrency.set_progress(self.case_id, "完成", "脚本已固化")
             self.db.finish_generation(
                 self.gen_id,

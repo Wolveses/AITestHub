@@ -588,6 +588,20 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                         {t('ui.auto.failureReason', '失败原因')}
                       </button>
                     )}
+                    {g.status === 'success' && g.has_screenshot && (
+                      <button
+                        type="button"
+                        style={linkButtonStyle}
+                        onClick={() =>
+                          setPreview({
+                            url: `${BASE}/cases/${detail.id}/generations/${g.id}/screenshot`,
+                            label: `${t('ui.auto.finalScreenshot', '终态截图')} · #${g.id}`,
+                          })
+                        }
+                      >
+                        {t('ui.auto.finalScreenshot', '终态截图')}
+                      </button>
+                    )}
                     <button
                       type="button"
                       style={linkButtonStyle}

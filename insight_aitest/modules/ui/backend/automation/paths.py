@@ -117,6 +117,11 @@ def generation_log(ui_case_id: int, gen_id: int) -> Path:
     return d / f"{gen_id}.jsonl"
 
 
+def generation_shot(ui_case_id: int, gen_id: int) -> Path:
+    """生成成功时的首跑终态截图（与生成日志同目录，按 gen_id 对应）。"""
+    return workspace_root() / "generations" / str(ui_case_id) / f"{gen_id}.png"
+
+
 def storage_state_path(project_id: int, env_id: int) -> Path:
     d = workspace_root() / "auth" / str(project_id) / str(env_id)
     d.mkdir(parents=True, exist_ok=True)
