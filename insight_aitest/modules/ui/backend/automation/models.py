@@ -107,7 +107,7 @@ class UiCase(MappedAsDataclass, Base, kw_only=True):
 
 
 class UiEnv(MappedAsDataclass, Base, kw_only=True):
-    """环境配置：被测系统地址 + 登录接口 + token 注入方式。
+    """环境配置：被测系统地址 + 前置获取 token 脚本 + token 注入方式。
 
     password_ref 指向 ~/.insight_eye/ui/envs.json 里的密码键；
     接口只回 password_set 布尔值，任何场景都不返回明文密码。
@@ -126,10 +126,13 @@ class UiEnv(MappedAsDataclass, Base, kw_only=True):
     login_method: Mapped[str] = mapped_column(Text, default="POST")
     username: Mapped[str] = mapped_column(Text, default="")
     password_ref: Mapped[str] = mapped_column(Text, default="")
+    # 用户自定义前置获取 token 的 Python 脚本（入口函数 def get_token(base_url, username, password)）
+    auth_script: Mapped[str] = mapped_column(Text, default="")
     # token 在登录响应 JSON 中的路径，如 data.token / access_token
     token_json_path: Mapped[str] = mapped_column(Text, default="")
-    token_inject: Mapped[str] = mapped_column(Text, default="cookie")  # cookie|header|localStorage
+    token_inject: Mapped[str] = mapped_column(Text, default="cookie")  # cookie|header|localStorage|custom
     token_name: Mapped[str] = mapped_column(Text, default="token")
+    token_prefix: Mapped[str] = mapped_column(Text, default="")
     storage_state_rel: Mapped[str] = mapped_column(Text, default="")
     is_default: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)

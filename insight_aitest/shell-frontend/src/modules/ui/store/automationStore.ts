@@ -79,8 +79,19 @@ export interface UIEnv {
   base_url: string;
   username: string;
   password_set: boolean;
+  auth_script?: string;
+  token_inject?: string;
+  token_name?: string;
+  token_prefix?: string;
   is_default: boolean;
   has_storage_state: boolean;
+}
+
+export interface ScriptTemplate {
+  id: string;
+  name: string;
+  description: string;
+  code: string;
 }
 
 export interface ScriptRun {
@@ -163,7 +174,9 @@ interface AutomationState {
   listGenerations: (caseId: number) => Promise<GenerationRecord[]>;
   saveEnv: (data: Record<string, unknown>, envId?: number) => Promise<UIEnv>;
   deleteEnv: (envId: number) => Promise<void>;
-  testEnv: (envId: number) => Promise<{ ok: boolean; message: string }>;
+  testEnv: (envId: number, payload?: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
+  testCustomEnv: (payload: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
+  loadTemplates: () => Promise<ScriptTemplate[]>;
 }
 
 const BASE = '/api/modules/ui/automation';
@@ -365,9 +378,29 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
     await get().loadEnvs();
   },
 
-  testEnv: async (envId) => {
-    const r = await fetch(`${BASE}/envs/${envId}/test`, { method: 'POST' });
+  testEnv: async (envId, payload) => {
+    const r = await fetch(`${BASE}/envs/${envId}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload ? JSON.stringify(payload) : undefined,
+    });
     if (!r.ok) throw new Error(await parseError(r));
+    return await r.json();
+  },
+
+  testCustomEnv: async (payload) => {
+    const r = await fetch(`${BASE}/envs/test-custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) throw new Error(await parseError(r));
+    return await r.json();
+  },
+
+  loadTemplates: async () => {
+    const r = await fetch(`${BASE}/envs/templates`);
+    if (!r.ok) return [];
     return await r.json();
   },
 }));

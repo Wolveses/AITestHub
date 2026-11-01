@@ -98,6 +98,23 @@ def _drop_flow_assets(db_path: str) -> None:
         conn.commit()
 
 
+def _ensure_ui_envs_auth_script(db_path: str) -> None:
+    """给旧 ui_envs 表补 auth_script / token_prefix 列（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ui_envs)")}
+        if not cols:
+            return
+        for name, ddl in (
+            ("auth_script", "TEXT NOT NULL DEFAULT ''"),
+            ("token_prefix", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE ui_envs ADD COLUMN {name} {ddl}")
+        conn.commit()
+
+
 class UIAutomationDatabase:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -119,6 +136,7 @@ class UIAutomationDatabase:
                 _ensure_ui_cases_params,
                 _ensure_generation_metrics,
                 _drop_flow_assets,
+                _ensure_ui_envs_auth_script,
             ],
         )
 

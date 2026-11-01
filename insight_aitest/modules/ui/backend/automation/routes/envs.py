@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from insight_aitest.modules.ui.backend.automation.database import UIAutomationDatabase
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 from insight_aitest.modules.ui.backend.automation.env_service import (
+    AUTH_SCRIPT_TEMPLATES,
     delete_password,
     env_public,
     set_password,
@@ -27,6 +28,10 @@ class EnvIn(BaseModel):
     base_url: str
     username: str = ""
     password: str | None = None
+    auth_script: str = ""
+    token_inject: str = "cookie"
+    token_name: str = "token"
+    token_prefix: str = ""
     is_default: bool = False
 
 
@@ -35,8 +40,28 @@ class EnvPatch(BaseModel):
     base_url: str | None = None
     username: str | None = None
     password: str | None = None
+    auth_script: str | None = None
+    token_inject: str | None = None
+    token_name: str | None = None
+    token_prefix: str | None = None
     clear_password: bool = False
     is_default: bool | None = None
+
+
+class EnvTestPayload(BaseModel):
+    base_url: str | None = None
+    username: str | None = None
+    password: str | None = None
+    auth_script: str | None = None
+    token_inject: str | None = None
+    token_name: str | None = None
+    token_prefix: str | None = None
+
+
+@router.get("/templates")
+def list_script_templates() -> list[dict]:
+    """返回常用前置脚本模板列表。"""
+    return AUTH_SCRIPT_TEMPLATES
 
 
 @router.get("")
@@ -60,6 +85,10 @@ def create_env(body: EnvIn, db: UIAutomationDatabase = Depends(get_automation_db
         base_url=body.base_url.strip(),
         username=body.username.strip(),
         password_ref=ref,
+        auth_script=body.auth_script or "",
+        token_inject=body.token_inject or "cookie",
+        token_name=body.token_name or "token",
+        token_prefix=body.token_prefix or "",
         is_default=1 if body.is_default else 0,
     )
     return env_public(db.get_env(env_id))
@@ -98,12 +127,33 @@ def delete_env(env_id: int, db: UIAutomationDatabase = Depends(get_automation_db
     return {"deleted": env_id}
 
 
+@router.post("/test-custom")
+async def test_custom_env(body: EnvTestPayload) -> dict:
+    """对表单中填写的临时环境与前置脚本进行调试与连通性测试。"""
+    class _TempEnv:
+        id = 0
+        project_id = 0
+        name = "temp"
+        base_url = body.base_url or ""
+        username = body.username or ""
+        password_ref = ""
+        auth_script = body.auth_script or ""
+        token_inject = body.token_inject or "cookie"
+        token_name = body.token_name or "token"
+        token_prefix = body.token_prefix or ""
+
+    overrides = body.model_dump(exclude_none=True)
+    return await asyncio.to_thread(test_env, _TempEnv(), overrides)
+
+
 @router.post("/{env_id}/test")
 async def test_connection(
-    env_id: int, db: UIAutomationDatabase = Depends(get_automation_db)
+    env_id: int,
+    body: EnvTestPayload | None = None,
+    db: UIAutomationDatabase = Depends(get_automation_db),
 ) -> dict:
     env = db.get_env(env_id)
     if env is None:
         raise HTTPException(404, "环境不存在")
-    # 连通性测试含同步网络/浏览器调用，放线程池避免阻塞事件循环
-    return await asyncio.to_thread(test_env, env)
+    overrides = body.model_dump(exclude_none=True) if body else None
+    return await asyncio.to_thread(test_env, env, overrides)

@@ -235,6 +235,7 @@ def run_script(
             "INSIGHT_UI_PARAMS": str(params_file) if params_payload else "",
             "INSIGHT_UI_STORAGE_STATE": auth.storage_state_path or "",
             "INSIGHT_UI_HEADERS": json.dumps(auth.headers, ensure_ascii=False),
+            "INSIGHT_UI_TOKEN": auth.token or "",
             "INSIGHT_UI_TIMEOUT_MS": "15000",
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUTF8": "1",
