@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Play, Sparkles, Wrench, X, Copy, FileCode, Square } from 'lucide-react';
 import { useAutomationStore, type AutomationCase, type GenerationRecord, type ParamSchemaItem, type ScriptRun } from '../../store/automationStore';
 import { Btn, ErrorCategoryTag, Field, StatusBadge, inputStyle, STATUS_META } from './common';
+import { artifactUrl, ImagePreviewOverlay, LogViewer } from './RunArtifacts';
 
 const BASE = '/api/modules/ui/automation';
 const ACTIVE = new Set(['generating', 'fixing', 'running']);
@@ -171,9 +172,6 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
     }
     void toggleSite(detail.site === 'backend' ? 'frontend' : 'backend');
   };
-
-  const artifactUrl = (runId: number, name: string) =>
-    `${BASE}/cases/${detail.id}/runs/${runId}/artifact/${encodeURIComponent(name)}`;
 
   const tabs: { key: Tab; label: string }[] = [
     { key: 'snapshot', label: t('ui.auto.tabSnapshot', '用例快照') },
@@ -525,7 +523,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                         <button
                           type="button"
                           style={linkButtonStyle}
-                          onClick={() => setPreview({ url: artifactUrl(r.id, shot.name), label: `${shot.label} · #${r.id}` })}
+                          onClick={() => setPreview({ url: artifactUrl(detail.id, r.id, shot.name), label: `${shot.label} · #${r.id}` })}
                         >
                           {shot.label}
                         </button>
@@ -535,13 +533,13 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                       <button
                         type="button"
                         style={linkButtonStyle}
-                        onClick={() => setPreview({ url: artifactUrl(r.id, 'final.png'), label: `${t('ui.auto.finalScreenshot', '终态截图')} · #${r.id}` })}
+                        onClick={() => setPreview({ url: artifactUrl(detail.id, r.id, 'final.png'), label: `${t('ui.auto.finalScreenshot', '终态截图')} · #${r.id}` })}
                       >
                         {t('ui.auto.finalScreenshot', '终态截图')}
                       </button>
                     )}
                     {r.trace_rel_path && (
-                      <a href={artifactUrl(r.id, 'trace.zip')} style={linkStyle}>
+                      <a href={artifactUrl(detail.id, r.id, 'trace.zip')} style={linkStyle}>
                         Trace
                       </a>
                     )}
@@ -623,46 +621,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
         </div>
       </div>
 
-      {preview && (
-        <div
-          onClick={() => setPreview(null)}
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 1600,
-            background: 'rgba(0,0,0,.8)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: 24,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: '94vw', maxHeight: '94vh' }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: '#fff', fontSize: 12 }}>
-              <span style={{ flex: 1 }}>{preview.label}</span>
-              <a href={preview.url} target="_blank" rel="noreferrer" style={{ color: '#fff', fontSize: 11, textDecoration: 'none', opacity: 0.85 }}>
-                {t('ui.auto.openOriginal', '新窗口打开')}
-              </a>
-              <button
-                type="button"
-                onClick={() => setPreview(null)}
-                aria-label={t('common.close', '关闭')}
-                style={{ ...linkButtonStyle, color: '#fff', display: 'flex', alignItems: 'center' }}
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <img
-              src={preview.url}
-              alt={preview.label}
-              style={{ maxWidth: '94vw', maxHeight: '86vh', objectFit: 'contain', borderRadius: 8, background: '#111' }}
-            />
-          </div>
-        </div>
-      )}
+      <ImagePreviewOverlay preview={preview} onClose={() => setPreview(null)} />
     </>
   );
 }
@@ -724,44 +683,3 @@ const linkButtonStyle: CSSProperties = {
   cursor: 'pointer',
   font: 'inherit',
 };
-
-/** 过程日志查看器：运行中按 2 秒轮询，结束后只拉一次。 */
-function LogViewer({ url, live }: { url: string; live: boolean }) {
-  const { t } = useTranslation();
-  const [text, setText] = useState(t('ui.auto.logLoading', '日志加载中…'));
-  const boxRef = useRef<HTMLPreElement>(null);
-
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        // 加时间戳绕过浏览器缓存，保证运行中每次都能拿到追加后的内容
-        const r = await fetch(`${url}?_t=${Date.now()}`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const body = await r.text();
-        if (alive) setText(body || t('ui.auto.logEmpty', '（暂无输出）'));
-      } catch (e) {
-        if (alive) setText(t('ui.auto.logLoadFailed', '日志加载失败：{{msg}}', { msg: (e as Error).message }));
-      }
-    };
-    tick();
-    const timer = live ? setInterval(tick, 2000) : undefined;
-    return () => {
-      alive = false;
-      if (timer) clearInterval(timer);
-    };
-  }, [url, live, t]);
-
-  useEffect(() => {
-    if (live && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;
-  }, [text, live]);
-
-  return (
-    <pre
-      ref={boxRef}
-      style={{ ...preStyle, marginTop: 8, maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap' }}
-    >
-      {text}
-    </pre>
-  );
-}

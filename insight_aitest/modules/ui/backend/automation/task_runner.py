@@ -105,6 +105,17 @@ def _task_worker(task_id: int, run_id: int) -> None:
         env = db.get_env(task.env_id) or db.default_env(task.project_id)
         case_pairs = db.get_task_cases(task_id)
 
+        def flush_progress() -> None:
+            """每条用例结束后立即回写进度，前端轮询即可看到实时通过/失败数量。"""
+            db.update_task_run(
+                run_id,
+                total_cases=len(case_pairs),
+                passed_cases=passed_count,
+                failed_cases=failed_count,
+                duration_ms=int((time.time() - started_time) * 1000),
+                summary_json=json.dumps(results, ensure_ascii=False),
+            )
+
         if not case_pairs:
             # 任务中无用例
             duration_ms = int((time.time() - started_time) * 1000)
@@ -142,8 +153,12 @@ def _task_worker(task_id: int, run_id: int) -> None:
                         "error": "用例尚未生成固化脚本（未实现）",
                         "run_id": None,
                         "artifacts_rel_path": "",
+                        "trace_rel_path": "",
+                        "has_final": False,
+                        "has_failure": False,
                     }
                 )
+                flush_progress()
                 continue
 
             # 执行已实现的用例脚本
@@ -159,6 +174,10 @@ def _task_worker(task_id: int, run_id: int) -> None:
                 run_status = script_res.get("run_status") or "failed"
                 err_msg = script_res.get("error_message") or ""
                 artifacts_path = script_res.get("artifacts_rel_path") or ""
+                trace_path = script_res.get("trace_rel_path") or ""
+                # 截图/trace 是否存在按本次产物目录实测，报告页按「如有」展示按钮
+                has_final = (run_dir / "final.png").exists()
+                has_failure = (run_dir / "failure.png").exists()
                 case_duration = int((time.time() - case_started) * 1000)
 
                 if run_status == "passed":
@@ -177,8 +196,12 @@ def _task_worker(task_id: int, run_id: int) -> None:
                         "error": err_msg,
                         "run_id": sub_run_id,
                         "artifacts_rel_path": artifacts_path,
+                        "trace_rel_path": trace_path,
+                        "has_final": has_final,
+                        "has_failure": has_failure,
                     }
                 )
+                flush_progress()
             except EnvMissingError as e:
                 failed_count += 1
                 results.append(
@@ -192,8 +215,12 @@ def _task_worker(task_id: int, run_id: int) -> None:
                         "error": str(e),
                         "run_id": sub_run_id,
                         "artifacts_rel_path": "",
+                        "trace_rel_path": "",
+                        "has_final": False,
+                        "has_failure": False,
                     }
                 )
+                flush_progress()
             except Exception as e:
                 failed_count += 1
                 results.append(
@@ -207,8 +234,12 @@ def _task_worker(task_id: int, run_id: int) -> None:
                         "error": f"用例执行异常：{e}",
                         "run_id": sub_run_id,
                         "artifacts_rel_path": "",
+                        "trace_rel_path": "",
+                        "has_final": False,
+                        "has_failure": False,
                     }
                 )
+                flush_progress()
             finally:
                 cur = db.get_case(case_id)
                 if cur is not None and cur.status == CaseStatus.RUNNING:

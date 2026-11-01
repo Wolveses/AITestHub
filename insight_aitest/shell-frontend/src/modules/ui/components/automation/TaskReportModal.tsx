@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { X, CheckCircle2, XCircle, FileText, ChevronDown, ChevronRight } from 'lucide-react';
+import { X, CheckCircle2, XCircle, FileText, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
 import { Btn } from './common';
+import { artifactUrl, ImagePreviewOverlay, LogViewer, type ArtifactPreview } from './RunArtifacts';
 import { useTaskStore } from '../../store/taskStore';
 
 interface TaskReportModalProps {
@@ -10,12 +11,28 @@ interface TaskReportModalProps {
   runId: number | null;
 }
 
+const BASE = '/api/modules/ui/automation';
+const linkButtonStyle: React.CSSProperties = {
+  background: 'none',
+  border: 'none',
+  padding: 0,
+  cursor: 'pointer',
+  font: 'inherit',
+  color: 'var(--accent)',
+  fontSize: 11,
+};
+
 export function TaskReportModal({ open, onClose, runId }: TaskReportModalProps) {
   const { currentReport, loadingReport, loadTaskReport } = useTaskStore();
   const [expandedErrors, setExpandedErrors] = useState<Record<number, boolean>>({});
+  const [openRunLog, setOpenRunLog] = useState<number | null>(null);
+  const [preview, setPreview] = useState<ArtifactPreview | null>(null);
 
   useEffect(() => {
     if (open && runId) {
+      setExpandedErrors({});
+      setOpenRunLog(null);
+      setPreview(null);
       loadTaskReport(runId).catch((err) => {
         toast.error(err.message || '加载测试报告失败');
       });
@@ -33,22 +50,25 @@ export function TaskReportModal({ open, onClose, runId }: TaskReportModalProps) 
   const total = run?.total_cases ?? 0;
   const passed = run?.passed_cases ?? 0;
   const failed = run?.failed_cases ?? 0;
-  const passRate = total > 0 ? Math.round((passed / total) * 100) : 0;
+  // 执行中总用例数含未开始用例，通过率按已完成用例计算，避免显示成 1/7=14%
+  const completed = passed + failed;
+  const passRate = completed > 0 ? Math.round((passed / completed) * 100) : null;
   const durationSec = ((run?.duration_ms ?? 0) / 1000).toFixed(1);
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(0,0,0,.6)',
-        zIndex: 1100,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-      }}
-    >
+    <>
+      <div
+        onClick={onClose}
+        style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0,0,0,.6)',
+          zIndex: 1100,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
@@ -100,24 +120,36 @@ export function TaskReportModal({ open, onClose, runId }: TaskReportModalProps) 
               {run?.trigger_type === 'cron' ? '定时调度触发' : '手动触发'}
             </div>
           </div>
-          <button
-            onClick={onClose}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              cursor: 'pointer',
-              color: 'var(--text-muted)',
-              padding: 4,
-              display: 'flex',
-            }}
-          >
-            <X size={18} />
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {/* 批次执行中报告是增量数据，提供手动刷新拉取最新已完成用例 */}
+            <Btn
+              size="sm"
+              onClick={() => runId && loadTaskReport(runId).catch(() => {})}
+              disabled={loadingReport}
+              title="刷新报告"
+            >
+              <RefreshCw size={13} style={{ animation: loadingReport ? 'spin 1s linear infinite' : 'none' }} />
+              刷新
+            </Btn>
+            <button
+              onClick={onClose}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                color: 'var(--text-muted)',
+                padding: 4,
+                display: 'flex',
+              }}
+            >
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
         {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
-          {loadingReport ? (
+          {loadingReport && !currentReport ? (
             <div style={{ padding: 60, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
               加载测试报告中...
             </div>
@@ -204,10 +236,20 @@ export function TaskReportModal({ open, onClose, runId }: TaskReportModalProps) 
                     style={{
                       fontSize: 20,
                       fontWeight: 700,
-                      color: passRate === 100 ? 'var(--success, #10b981)' : passRate > 80 ? 'var(--warning, #f59e0b)' : 'var(--error, #ef4444)',
+                      color:
+                        passRate === null
+                          ? 'var(--text-muted)'
+                          : passRate === 100
+                            ? 'var(--success, #10b981)'
+                            : passRate > 80
+                              ? 'var(--warning, #f59e0b)'
+                              : 'var(--error, #ef4444)',
                     }}
                   >
-                    {passRate}%
+                    {passRate === null ? '—' : `${passRate}%`}
+                  </span>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                    已完成 {completed} / {total}
                   </span>
                 </div>
 
@@ -256,12 +298,13 @@ export function TaskReportModal({ open, onClose, runId }: TaskReportModalProps) 
                         <th style={{ padding: '8px 12px', width: 80 }}>状态</th>
                         <th style={{ padding: '8px 12px', width: 80 }}>耗时</th>
                         <th style={{ padding: '8px 12px', width: 60 }}>详情</th>
+                        <th style={{ padding: '8px 12px', width: 150 }}>产物</th>
                       </tr>
                     </thead>
                     <tbody>
                       {summary.length === 0 ? (
                         <tr>
-                          <td colSpan={7} style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>
+                          <td colSpan={8} style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>
                             暂无用例明细数据
                           </td>
                         </tr>
@@ -269,11 +312,12 @@ export function TaskReportModal({ open, onClose, runId }: TaskReportModalProps) 
                         summary.map((item, idx) => {
                           const isPassed = item.status === 'passed';
                           const isExpanded = !!expandedErrors[item.case_id];
+                          // 产物按钮全部以本次执行的 ui_runs 记录为准，没有记录时不展示
+                          const subRunId = item.run_id;
 
                           return (
-                            <>
+                            <Fragment key={item.case_id}>
                               <tr
-                                key={item.case_id}
                                 style={{
                                   borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,0.05))',
                                   background: isPassed ? 'transparent' : 'rgba(239,68,68,0.03)',
@@ -333,10 +377,58 @@ export function TaskReportModal({ open, onClose, runId }: TaskReportModalProps) 
                                     <span style={{ color: 'var(--text-muted)' }}>-</span>
                                   )}
                                 </td>
+                                <td style={{ padding: '8px 12px' }}>
+                                  {subRunId ? (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                      <button
+                                        type="button"
+                                        style={linkButtonStyle}
+                                        onClick={() => setOpenRunLog(openRunLog === subRunId ? null : subRunId)}
+                                      >
+                                        日志
+                                      </button>
+                                      {item.has_final && (
+                                        <button
+                                          type="button"
+                                          style={linkButtonStyle}
+                                          onClick={() =>
+                                            setPreview({
+                                              url: artifactUrl(item.case_id, subRunId, 'final.png'),
+                                              label: `终态截图 · #${subRunId}`,
+                                            })
+                                          }
+                                        >
+                                          终态截图
+                                        </button>
+                                      )}
+                                      {item.has_failure && (
+                                        <button
+                                          type="button"
+                                          style={linkButtonStyle}
+                                          onClick={() =>
+                                            setPreview({
+                                              url: artifactUrl(item.case_id, subRunId, 'failure.png'),
+                                              label: `失败截图 · #${subRunId}`,
+                                            })
+                                          }
+                                        >
+                                          失败截图
+                                        </button>
+                                      )}
+                                      {item.trace_rel_path && (
+                                        <a href={artifactUrl(item.case_id, subRunId, 'trace.zip')} style={linkButtonStyle}>
+                                          Trace
+                                        </a>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span style={{ color: 'var(--text-muted)' }}>-</span>
+                                  )}
+                                </td>
                               </tr>
                               {isExpanded && item.error && (
-                                <tr key={`${item.case_id}-err`} style={{ background: 'rgba(239,68,68,0.06)' }}>
-                                  <td colSpan={7} style={{ padding: '8px 16px 12px 16px' }}>
+                                <tr style={{ background: 'rgba(239,68,68,0.06)' }}>
+                                  <td colSpan={8} style={{ padding: '8px 16px 12px 16px' }}>
                                     <div
                                       style={{
                                         fontSize: 11,
@@ -356,7 +448,17 @@ export function TaskReportModal({ open, onClose, runId }: TaskReportModalProps) 
                                   </td>
                                 </tr>
                               )}
-                            </>
+                              {subRunId && openRunLog === subRunId && (
+                                <tr>
+                                  <td colSpan={8} style={{ padding: '0 16px 10px' }}>
+                                    <LogViewer
+                                      url={`${BASE}/cases/${item.case_id}/runs/${subRunId}/log`}
+                                      live={run?.status === 'running'}
+                                    />
+                                  </td>
+                                </tr>
+                              )}
+                            </Fragment>
                           );
                         })
                       )}
@@ -382,6 +484,8 @@ export function TaskReportModal({ open, onClose, runId }: TaskReportModalProps) 
           <Btn onClick={onClose}>关闭报告</Btn>
         </div>
       </div>
-    </div>
+      </div>
+      <ImagePreviewOverlay preview={preview} onClose={() => setPreview(null)} />
+    </>
   );
 }

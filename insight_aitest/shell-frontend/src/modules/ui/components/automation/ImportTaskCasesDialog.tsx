@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { X, Search, CheckCircle2, Folder, Download } from 'lucide-react';
+import { X, Search, CheckCircle2, CheckSquare, Square, Download } from 'lucide-react';
 import { Btn, inputStyle } from './common';
+import { CategoryTree } from './CategoryTree';
 import { useTaskStore, type ImportableCategory } from '../../store/taskStore';
 
 interface ImportTaskCasesDialogProps {
@@ -24,8 +25,10 @@ export function ImportTaskCasesDialog({
   const { loadImportableCases, importCasesToTask } = useTaskStore();
 
   const [categories, setCategories] = useState<ImportableCategory[]>([]);
+  const [totalImplemented, setTotalImplemented] = useState(0);
   const [loading, setLoading] = useState(false);
   const [keyword, setKeyword] = useState('');
+  const [folder, setFolder] = useState<string | null>(null);
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set());
   const [submitting, setSubmitting] = useState(false);
 
@@ -34,9 +37,11 @@ export function ImportTaskCasesDialog({
       setLoading(true);
       setSelectedCaseIds(new Set());
       setKeyword('');
+      setFolder(null);
       loadImportableCases(taskId, projectId)
         .then((res) => {
           setCategories(res.categories || []);
+          setTotalImplemented(Number(res.total_implemented) || 0);
         })
         .catch((err) => {
           toast.error(err.message || '加载可导入用例失败');
@@ -47,38 +52,61 @@ export function ImportTaskCasesDialog({
     }
   }, [open, taskId, projectId, loadImportableCases]);
 
-  // 搜索过滤与空目录不展示
+  // 左侧目录树：由用例自身的 category_path 聚合，计数即真实条目数
+  const treeItems = useMemo(
+    () =>
+      categories.flatMap((cat) =>
+        cat.cases.map((c) => ({ category_path: c.category_path || cat.name, count: 1 }))
+      ),
+    [categories]
+  );
+
+  // 目录筛选（路径本身或其子路径）+ 关键字过滤
   const filteredCategories = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
     return categories
-      .map((cat) => {
-        const matchedCases = cat.cases.filter((c) =>
-          !kw || c.title.toLowerCase().includes(kw),
-        );
-        return { ...cat, cases: matchedCases };
-      })
+      .filter((cat) => !folder || cat.name === folder || cat.name.startsWith(`${folder} / `))
+      .map((cat) => ({
+        ...cat,
+        cases: cat.cases.filter((c) => {
+          if (!kw) return true;
+          return c.title.toLowerCase().includes(kw) || c.category_path.toLowerCase().includes(kw);
+        }),
+      }))
       .filter((cat) => cat.cases.length > 0); // 空目录严格不展示
-  }, [categories, keyword]);
+  }, [categories, folder, keyword]);
 
-  // 所有可勾选（未导入）的用例 ID 集合
-  const availableUnimportedIds = useMemo(() => {
-    const ids: number[] = [];
-    filteredCategories.forEach((cat) => {
-      cat.cases.forEach((c) => {
-        if (!c.already_imported) ids.push(c.id);
-      });
-    });
-    return ids;
-  }, [filteredCategories]);
+  // 右侧扁平列表：目录分组信息挂在条目上，便于展示与全选
+  const visibleCases = useMemo(
+    () =>
+      filteredCategories.flatMap((cat) =>
+        cat.cases.map((c) => ({ caseItem: c, categoryName: cat.name }))
+      ),
+    [filteredCategories]
+  );
+
+  // 当前列表里可勾选（未导入）的用例 ID
+  const availableUnimportedIds = useMemo(
+    () => visibleCases.filter((v) => !v.caseItem.already_imported).map((v) => v.caseItem.id),
+    [visibleCases]
+  );
+
+  const allSelected =
+    availableUnimportedIds.length > 0 &&
+    availableUnimportedIds.every((id) => selectedCaseIds.has(id));
 
   if (!open) return null;
 
   const handleToggleSelectAll = () => {
-    if (selectedCaseIds.size === availableUnimportedIds.length) {
-      setSelectedCaseIds(new Set());
-    } else {
-      setSelectedCaseIds(new Set(availableUnimportedIds));
-    }
+    setSelectedCaseIds((prev) => {
+      const next = new Set(prev);
+      if (allSelected) {
+        availableUnimportedIds.forEach((id) => next.delete(id));
+      } else {
+        availableUnimportedIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
   };
 
   const handleToggleCase = (id: number) => {
@@ -125,8 +153,8 @@ export function ImportTaskCasesDialog({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: 680,
-          maxWidth: '92vw',
+          width: 860,
+          maxWidth: '94vw',
           maxHeight: '85vh',
           background: 'var(--bg-card)',
           border: '1px solid var(--border)',
@@ -152,7 +180,7 @@ export function ImportTaskCasesDialog({
               从同项目自动化用例导入
             </strong>
             <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-              任务：{taskName}（仅展示当前项目已实现的固化用例，空目录不展示）
+              任务：{taskName}（仅展示当前项目已实现的固化用例）
             </div>
           </div>
           <button
@@ -200,59 +228,72 @@ export function ImportTaskCasesDialog({
               style={{ ...inputStyle, paddingLeft: 30 }}
             />
           </div>
-          {availableUnimportedIds.length > 0 && (
-            <Btn size="sm" onClick={handleToggleSelectAll}>
-              {selectedCaseIds.size === availableUnimportedIds.length ? '取消全选' : '全选未导入'}
-            </Btn>
-          )}
         </div>
 
-        {/* Body Case Tree / List */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 18px' }}>
+        {/* Body: 左树 + 右条目 */}
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', padding: '12px 18px' }}>
           {loading ? (
-            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
+            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13, width: '100%' }}>
               加载可导入用例中...
             </div>
-          ) : filteredCategories.length === 0 ? (
-            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-              {keyword ? '未搜索到匹配的已实现用例' : '暂无可导入的已实现用例（请先在自动化用例页生成脚本）'}
+          ) : categories.length === 0 ? (
+            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13, width: '100%' }}>
+              暂无可导入的已实现用例（请先在自动化用例页生成脚本）
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {filteredCategories.map((cat) => (
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                minHeight: 0,
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                overflow: 'hidden',
+              }}
+            >
+              <CategoryTree
+                items={treeItems}
+                allCount={totalImplemented || treeItems.length}
+                active={folder}
+                onSelect={setFolder}
+                allLabel="全部用例"
+              />
+
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                 <div
-                  key={cat.name}
                   style={{
-                    border: '1px solid var(--border)',
-                    borderRadius: 8,
-                    overflow: 'hidden',
-                    background: 'var(--bg-base)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '6px 12px',
+                    borderBottom: '1px solid var(--bg-card)',
+                    flexShrink: 0,
                   }}
                 >
-                  {/* Category Header */}
-                  <div
+                  <span
+                    onClick={() => availableUnimportedIds.length > 0 && handleToggleSelectAll()}
+                    title="全选/取消全选当前列表"
                     style={{
-                      padding: '8px 12px',
-                      background: 'var(--bg-card)',
-                      borderBottom: '1px solid var(--border)',
-                      fontSize: 12,
-                      fontWeight: 600,
-                      color: 'var(--text-secondary)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
+                      display: 'inline-flex',
+                      cursor: availableUnimportedIds.length === 0 ? 'not-allowed' : 'pointer',
+                      opacity: availableUnimportedIds.length === 0 ? 0.5 : 1,
+                      color: allSelected ? 'var(--accent)' : 'var(--text-muted)',
                     }}
                   >
-                    <Folder size={14} style={{ opacity: 0.8 }} />
-                    <span>{cat.name}</span>
-                    <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 400 }}>
-                      ({cat.cases.length} 条已实现用例)
-                    </span>
-                  </div>
+                    {allSelected ? <CheckSquare size={15} /> : <Square size={15} />}
+                  </span>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    当前目录 {visibleCases.length} 条，可导入 {availableUnimportedIds.length} 条
+                  </span>
+                </div>
 
-                  {/* Cases list */}
-                  <div style={{ display: 'flex', flexDirection: 'column' }}>
-                    {cat.cases.map((c) => {
+                <div style={{ flex: 1, overflowY: 'auto' }}>
+                  {visibleCases.length === 0 ? (
+                    <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                      {keyword.trim() || folder ? '该目录下暂无匹配的已实现用例' : '暂无可导入的已实现用例'}
+                    </div>
+                  ) : (
+                    visibleCases.map(({ caseItem: c, categoryName }) => {
                       const isImported = c.already_imported;
                       const isSelected = selectedCaseIds.has(c.id);
 
@@ -269,47 +310,57 @@ export function ImportTaskCasesDialog({
                             gap: 10,
                             borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,0.05))',
                             cursor: isImported ? 'not-allowed' : 'pointer',
-                            background: isImported
-                              ? 'transparent'
-                              : isSelected
-                                ? 'rgba(59,130,246,0.06)'
-                                : 'transparent',
+                            background: isSelected ? 'rgba(59,130,246,0.06)' : 'transparent',
                             opacity: isImported ? 0.6 : 1,
                           }}
                         >
-                          <input
-                            type="checkbox"
-                            checked={isImported || isSelected}
-                            disabled={isImported}
-                            onChange={() => {
-                              if (!isImported) handleToggleCase(c.id);
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              color: isImported || isSelected ? 'var(--accent)' : 'var(--text-muted)',
                             }}
-                            style={{ cursor: isImported ? 'not-allowed' : 'pointer' }}
-                          />
+                          >
+                            {isImported || isSelected ? <CheckSquare size={15} /> : <Square size={15} />}
+                          </span>
 
-                          <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <span
+                                style={{
+                                  fontSize: 13,
+                                  color: isImported ? 'var(--text-muted)' : 'var(--text-primary)',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {c.title}
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: 10,
+                                  padding: '1px 5px',
+                                  borderRadius: 4,
+                                  border: '1px solid var(--border)',
+                                  color: 'var(--text-muted)',
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {c.site === 'backend' ? '后台' : '前台'}
+                              </span>
+                            </div>
+                            <div
                               style={{
-                                fontSize: 13,
-                                color: isImported ? 'var(--text-muted)' : 'var(--text-primary)',
+                                fontSize: 11,
+                                color: 'var(--text-muted)',
+                                marginTop: 2,
                                 overflow: 'hidden',
                                 textOverflow: 'ellipsis',
                                 whiteSpace: 'nowrap',
                               }}
                             >
-                              {c.title}
-                            </span>
-                            <span
-                              style={{
-                                fontSize: 10,
-                                padding: '1px 5px',
-                                borderRadius: 4,
-                                border: '1px solid var(--border)',
-                                color: 'var(--text-muted)',
-                              }}
-                            >
-                              {c.site === 'backend' ? '后台' : '前台'}
-                            </span>
+                              {c.category_path || categoryName || '未分类'}
+                            </div>
                           </div>
 
                           {isImported ? (
@@ -320,6 +371,7 @@ export function ImportTaskCasesDialog({
                                 display: 'inline-flex',
                                 alignItems: 'center',
                                 gap: 3,
+                                flexShrink: 0,
                               }}
                             >
                               <CheckCircle2 size={12} /> 已在此任务中
@@ -332,6 +384,7 @@ export function ImportTaskCasesDialog({
                                 background: 'rgba(16,185,129,0.1)',
                                 padding: '1px 6px',
                                 borderRadius: 4,
+                                flexShrink: 0,
                               }}
                             >
                               已实现
@@ -339,10 +392,10 @@ export function ImportTaskCasesDialog({
                           )}
                         </div>
                       );
-                    })}
-                  </div>
+                    })
+                  )}
                 </div>
-              ))}
+              </div>
             </div>
           )}
         </div>
