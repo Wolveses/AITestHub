@@ -549,7 +549,10 @@ def test_env(env, override_fields: dict | None = None) -> dict:
         return {"ok": False, "message": f"站点不可访问: {type(e).__name__}: {e}"}
 
     override_script = overrides.get("auth_script")
+    # 密码留空 = 不修改，测试时沿用环境里已保存的密码（与保存接口语义一致）
     override_pwd = overrides.get("password")
+    if isinstance(override_pwd, str) and not override_pwd.strip():
+        override_pwd = None
 
     test_target = env
     if overrides:
