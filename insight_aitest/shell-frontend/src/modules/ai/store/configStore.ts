@@ -95,7 +95,7 @@ interface ConfigState {
   upsertProvider: (providerId: string, body: ProviderUpsert) => Promise<void>;
   deleteProvider: (providerId: string) => Promise<void>;
   activateProvider: (providerId: string) => Promise<void>;
-  testConnection: (baseUrl: string, apiKey: string, model: string) => Promise<{ ok: boolean; message: string }>;
+  testConnection: (baseUrl: string, apiKey: string, model: string, providerId?: string) => Promise<{ ok: boolean; message: string }>;
 }
 
 const BASE = '/api/modules/ai';
@@ -199,11 +199,11 @@ export const useConfigStore = create<ConfigState>((set) => ({
     }
   },
 
-  testConnection: async (baseUrl: string, apiKey: string, model: string) => {
+  testConnection: async (baseUrl: string, apiKey: string, model: string, providerId?: string) => {
     const r = await fetch(`${BASE}/config/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model }),
+      body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model, provider_id: providerId || '' }),
     });
     const data = await r.json();
     return { ok: !!data.ok, message: data.message || '' };

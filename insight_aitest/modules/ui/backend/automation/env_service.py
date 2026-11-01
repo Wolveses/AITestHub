@@ -333,6 +333,44 @@ def _sanitize_error(text: str, password: str, token: str) -> str:
 
 _AUTH_RUNNER_CODE = '''import sys
 import json
+import traceback
+
+ERROR_MARKER = "---AUTH_ERROR_START---"
+
+
+def _friendly(e):
+    """把异常整理成可读提示；HTTP 错误带上服务端返回的错误信息。
+
+    被测系统常用 HTTP 500 + body.error.message 表达「账号或密码错误」，
+    只抛出状态码会让用户无从判断，这里补上 body 里的提示。
+    """
+    try:
+        import httpx
+    except Exception:
+        httpx = None
+    if httpx is not None and isinstance(e, httpx.HTTPStatusError):
+        resp = e.response
+        detail = ""
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                detail = str(err.get("message") or err.get("code") or "")
+            detail = detail or str(body.get("message") or "")
+        if not detail:
+            detail = (resp.text or "").strip()[:300]
+        req = resp.request
+        return "请求 %s %s 返回 HTTP %s%s" % (
+            req.method,
+            req.url,
+            resp.status_code,
+            ("：" + detail) if detail else "",
+        )
+    return "%s: %s" % (type(e).__name__, e)
+
 
 def _run():
     raw = sys.stdin.read()
@@ -348,7 +386,15 @@ def _run():
     if "get_token" not in scope or not callable(scope["get_token"]):
         raise ValueError("前置脚本中未定义可调用的函数 get_token(base_url, username, password)")
 
-    res = scope["get_token"](base_url, username, password)
+    try:
+        res = scope["get_token"](base_url, username, password)
+    except Exception as e:
+        # 保留完整堆栈供排查，同时输出一行可读原因供前端直接展示
+        traceback.print_exc()
+        print(ERROR_MARKER)
+        print(json.dumps({"message": _friendly(e)}, ensure_ascii=False))
+        sys.exit(1)
+
     print("---AUTH_OUTPUT_START---")
     print(json.dumps(res, ensure_ascii=False))
 
@@ -390,10 +436,20 @@ def execute_auth_script(script: str, base_url: str, username: str, password: str
         return False, f"前置脚本启动失败: {type(e).__name__}: {e}", None
 
     if proc.returncode != 0:
+        # 优先用子进程给出的可读原因（含 HTTP 错误的服务端提示），
+        # 堆栈只保留最后几行作为补充，避免前端只看到裸状态码
+        friendly = ""
+        err_marker = "---AUTH_ERROR_START---"
+        if err_marker in proc.stdout:
+            try:
+                payload_err = json.loads(proc.stdout.split(err_marker, 1)[1].strip())
+                friendly = str(payload_err.get("message") or "")
+            except Exception:
+                friendly = ""
         err = proc.stderr.strip() or proc.stdout.strip() or f"进程退出码: {proc.returncode}"
         lines = [l for l in err.splitlines() if l.strip()]
-        brief = "\n".join(lines[-8:]) if len(lines) > 8 else err
-        clean = _sanitize_error(brief, password, "")
+        brief = "\n".join(lines[-6:]) if len(lines) > 6 else err
+        clean = _sanitize_error(friendly or brief, password, "")
         return False, f"脚本执行失败:\n{clean}", None
 
     marker = "---AUTH_OUTPUT_START---"
@@ -493,7 +549,10 @@ def test_env(env, override_fields: dict | None = None) -> dict:
         return {"ok": False, "message": f"站点不可访问: {type(e).__name__}: {e}"}
 
     override_script = overrides.get("auth_script")
+    # 密码留空 = 不修改，测试时沿用环境里已保存的密码（与保存接口语义一致）
     override_pwd = overrides.get("password")
+    if isinstance(override_pwd, str) and not override_pwd.strip():
+        override_pwd = None
 
     test_target = env
     if overrides:

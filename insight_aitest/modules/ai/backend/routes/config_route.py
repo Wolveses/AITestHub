@@ -140,8 +140,9 @@ class TestRequest(BaseModel):
     """连通性探测请求（临时 client，不写配置）。"""
 
     base_url: str
-    api_key: str
+    api_key: str = ""  # 留空 = 沿用已保存的 Key
     model: str
+    provider_id: str = ""
 
 
 def _provider_to_out(p: dict) -> ProviderOut:
@@ -251,9 +252,24 @@ def update_config(body: ConfigUpdate, cfg: AIConfig = Depends(get_config)) -> Co
 
 
 @router.post("/test")
-def test_provider(body: TestRequest) -> dict:
-    """临时 client 探测连通性（不写配置、不动单例）。"""
-    ok, msg = test_connection(body.base_url, body.api_key, body.model)
+def test_provider(body: TestRequest, cfg: AIConfig = Depends(get_config)) -> dict:
+    """临时 client 探测连通性（不写配置、不动单例）。
+
+    api_key 留空表示「不修改 Key，沿用已保存值」：先按 provider_id 找对应
+    Provider，找不到再取当前生效 Provider，避免前端拿空值去测试导致误报失败。
+    """
+    api_key = (body.api_key or "").strip()
+    if not api_key:
+        providers = [p for p in (cfg.providers or []) if isinstance(p, dict)]
+        target = next((p for p in providers if p.get("id") == body.provider_id), None)
+        if target is None:
+            active_id = getattr(cfg, "active_provider_id", "") or ""
+            target = next((p for p in providers if p.get("id") == active_id), None)
+        if target:
+            api_key = str(target.get("api_key") or "")
+    if not api_key:
+        return {"ok": False, "message": "未填写 API Key，且没有可沿用的已保存 Key"}
+    ok, msg = test_connection(body.base_url, api_key, body.model)
     return {"ok": ok, "message": msg}
 
 

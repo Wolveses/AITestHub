@@ -131,10 +131,13 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
     setEnvTestResult(null);
     try {
       let res: { ok: boolean; message: string; token?: string };
+      const payload: Record<string, unknown> = { ...envForm };
+      // 密码留空表示不修改：不随请求发送，后端沿用已保存的密码
+      if (editEnvId !== null && !envForm.password) delete payload.password;
       if (editEnvId !== null) {
-        res = await testEnv(editEnvId, envForm as unknown as Record<string, unknown>);
+        res = await testEnv(editEnvId, payload);
       } else {
-        res = await testCustomEnv(envForm as unknown as Record<string, unknown>);
+        res = await testCustomEnv(payload);
       }
       setEnvTestResult(res);
       if (res.ok) toast.success(res.message || t('ui.auto.testOk', '测试通过'));

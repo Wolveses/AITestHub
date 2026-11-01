@@ -450,7 +450,7 @@ function ProviderEditor({ provider, presets, saving, onSave, onCancel, onTest }:
   saving: boolean;
   onSave: (body: ProviderUpsert) => void;
   onCancel: () => void;
-  onTest: (baseUrl: string, apiKey: string, model: string) => Promise<{ ok: boolean; message: string }>;
+  onTest: (baseUrl: string, apiKey: string, model: string, providerId?: string) => Promise<{ ok: boolean; message: string }>;
 }) {
   const [name, setName] = useState(provider?.name || '');
   const [baseUrl, setBaseUrl] = useState(provider?.base_url || '');
@@ -476,7 +476,8 @@ function ProviderEditor({ provider, presets, saving, onSave, onCancel, onTest }:
     setTesting(true);
     setTestResult(null);
     try {
-      const r = await onTest(baseUrl, apiKey || 'placeholder', chatModel);
+      // Key 留空表示不修改，测试时由后端沿用已保存的 Key
+      const r = await onTest(baseUrl, apiKey.trim(), chatModel, provider?.id);
       setTestResult(r);
     } catch (e) {
       setTestResult({ ok: false, message: errorMessage(e) });
