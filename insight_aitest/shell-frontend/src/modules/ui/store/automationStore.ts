@@ -177,6 +177,9 @@ interface AutomationState {
   testEnv: (envId: number, payload?: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
   testCustomEnv: (payload: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
   loadTemplates: () => Promise<ScriptTemplate[]>;
+  loadProjectAuthScript: (projectId: number) => Promise<{ project_id: number; auth_script: string; has_script: boolean }>;
+  saveProjectAuthScript: (projectId: number, authScript: string) => Promise<void>;
+  testProjectAuthScript: (projectId: number, payload: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
 }
 
 const BASE = '/api/modules/ui/automation';
@@ -401,6 +404,31 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
   loadTemplates: async () => {
     const r = await fetch(`${BASE}/envs/templates`);
     if (!r.ok) return [];
+    return await r.json();
+  },
+
+  loadProjectAuthScript: async (projectId) => {
+    const r = await fetch(`${BASE}/envs/projects/${projectId}/auth-script`);
+    if (!r.ok) throw new Error(await parseError(r));
+    return await r.json();
+  },
+
+  saveProjectAuthScript: async (projectId, authScript) => {
+    const r = await fetch(`${BASE}/envs/projects/${projectId}/auth-script`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auth_script: authScript }),
+    });
+    if (!r.ok) throw new Error(await parseError(r));
+  },
+
+  testProjectAuthScript: async (projectId, payload) => {
+    const r = await fetch(`${BASE}/envs/projects/${projectId}/auth-script/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) throw new Error(await parseError(r));
     return await r.json();
   },
 }));
