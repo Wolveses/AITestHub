@@ -13,6 +13,13 @@ from insight_aitest.modules.ui.backend.automation.models import (
     UiGeneration,
     UiLesson,
 )
+from insight_aitest.modules.ui.backend.automation.task_models import (
+    TaskStatus,
+    TriggerType,
+    UiTask,
+    UiTaskCase,
+    UiTaskRun,
+)
 from insight_aitest.modules.ui.backend.persistence.models import RunRecord
 from insight_aitest.platform.persistence import Base, ensure_schema, get_engine, session_scope
 
@@ -126,6 +133,9 @@ class UIAutomationDatabase:
                 UiGeneration.__table__,
                 UiLesson.__table__,
                 RunRecord.__table__,
+                UiTask.__table__,
+                UiTaskCase.__table__,
+                UiTaskRun.__table__,
             ],
         )
         ensure_schema(
@@ -464,3 +474,221 @@ class UIAutomationDatabase:
             "artifacts_rel_path": r.artifacts_rel_path,
             "trace_rel_path": r.trace_rel_path,
         }
+
+    # ===== 任务管理 =====
+
+    def create_task(
+        self,
+        project_id: int,
+        name: str,
+        env_id: int,
+        description: str = "",
+        cron_expression: str = "",
+        cron_enabled: bool = False,
+    ) -> UiTask:
+        task = UiTask(
+            project_id=project_id,
+            name=name.strip(),
+            description=description.strip(),
+            env_id=env_id,
+            cron_expression=cron_expression.strip(),
+            cron_enabled=cron_enabled,
+        )
+        with session_scope(self.db_path) as s:
+            s.add(task)
+            s.flush()
+            s.expunge(task)
+            return task
+
+    def get_task(self, task_id: int) -> UiTask | None:
+        with session_scope(self.db_path) as s:
+            t = s.get(UiTask, task_id)
+            if t is not None:
+                s.expunge(t)
+            return t
+
+    def list_tasks(self, project_id: int) -> list[UiTask]:
+        with session_scope(self.db_path) as s:
+            rows = list(
+                s.execute(
+                    select(UiTask)
+                    .where(UiTask.project_id == project_id)
+                    .order_by(UiTask.id.desc())
+                )
+                .scalars()
+            )
+            for r in rows:
+                s.expunge(r)
+            return rows
+
+    def update_task(self, task_id: int, **fields) -> UiTask | None:
+        with session_scope(self.db_path) as s:
+            t = s.get(UiTask, task_id)
+            if t is None:
+                return None
+            for k, v in fields.items():
+                if hasattr(t, k):
+                    setattr(t, k, v)
+            t.updated_at = datetime.now()
+            s.flush()
+            s.expunge(t)
+            return t
+
+    def delete_task(self, task_id: int) -> bool:
+        with session_scope(self.db_path) as s:
+            t = s.get(UiTask, task_id)
+            if t is None:
+                return False
+            tc_rows = s.execute(
+                select(UiTaskCase).where(UiTaskCase.task_id == task_id)
+            ).scalars().all()
+            for tc in tc_rows:
+                s.delete(tc)
+            tr_rows = s.execute(
+                select(UiTaskRun).where(UiTaskRun.task_id == task_id)
+            ).scalars().all()
+            for tr in tr_rows:
+                s.delete(tr)
+            s.delete(t)
+            return True
+
+    def get_task_cases(self, task_id: int) -> list[tuple[UiTaskCase, UiCase]]:
+        with session_scope(self.db_path) as s:
+            stmt = (
+                select(UiTaskCase, UiCase)
+                .join(UiCase, UiTaskCase.case_id == UiCase.id)
+                .where(UiTaskCase.task_id == task_id)
+                .order_by(UiTaskCase.order_no.asc(), UiTaskCase.id.asc())
+            )
+            rows = s.execute(stmt).all()
+            result = []
+            for tc, c in rows:
+                s.expunge(tc)
+                s.expunge(c)
+                result.append((tc, c))
+            return result
+
+    def get_task_case_ids(self, task_id: int) -> set[int]:
+        with session_scope(self.db_path) as s:
+            rows = s.execute(
+                select(UiTaskCase.case_id).where(UiTaskCase.task_id == task_id)
+            ).scalars().all()
+            return set(rows)
+
+    def import_cases_to_task(self, task_id: int, case_ids: list[int]) -> int:
+        """从自动化用例导入用例到任务，同一任务同一用例不可重复导入。"""
+        if not case_ids:
+            return 0
+        with session_scope(self.db_path) as s:
+            existing_ids = set(
+                s.execute(
+                    select(UiTaskCase.case_id).where(UiTaskCase.task_id == task_id)
+                ).scalars().all()
+            )
+            max_order = (
+                s.scalar(
+                    select(func.max(UiTaskCase.order_no)).where(UiTaskCase.task_id == task_id)
+                )
+                or 0
+            )
+            imported_count = 0
+            for cid in case_ids:
+                if cid in existing_ids:
+                    continue
+                max_order += 1
+                tc = UiTaskCase(task_id=task_id, case_id=cid, order_no=max_order)
+                s.add(tc)
+                existing_ids.add(cid)
+                imported_count += 1
+            return imported_count
+
+    def remove_task_case(self, task_id: int, case_id: int) -> bool:
+        with session_scope(self.db_path) as s:
+            tc = s.scalar(
+                select(UiTaskCase).where(
+                    UiTaskCase.task_id == task_id, UiTaskCase.case_id == case_id
+                )
+            )
+            if tc is None:
+                return False
+            s.delete(tc)
+            return True
+
+    def count_task_cases(self, task_id: int) -> int:
+        with session_scope(self.db_path) as s:
+            return (
+                s.scalar(
+                    select(func.count(UiTaskCase.id)).where(UiTaskCase.task_id == task_id)
+                )
+                or 0
+            )
+
+    def get_task_case_counts(self, project_id: int) -> dict[int, int]:
+        """批量获取指定项目下所有任务的用例数。"""
+        with session_scope(self.db_path) as s:
+            stmt = (
+                select(UiTaskCase.task_id, func.count(UiTaskCase.id))
+                .join(UiTask, UiTaskCase.task_id == UiTask.id)
+                .where(UiTask.project_id == project_id)
+                .group_by(UiTaskCase.task_id)
+            )
+            rows = s.execute(stmt).all()
+            return {tid: count for tid, count in rows}
+
+    # ===== 任务执行历史与报告 =====
+
+    def create_task_run(
+        self,
+        task_id: int,
+        project_id: int,
+        env_id: int,
+        trigger_type: str = TriggerType.MANUAL,
+        total_cases: int = 0,
+    ) -> UiTaskRun:
+        run = UiTaskRun(
+            task_id=task_id,
+            project_id=project_id,
+            env_id=env_id,
+            trigger_type=trigger_type,
+            status=TaskStatus.RUNNING,
+            total_cases=total_cases,
+        )
+        with session_scope(self.db_path) as s:
+            s.add(run)
+            s.flush()
+            s.expunge(run)
+            return run
+
+    def get_task_run(self, run_id: int) -> UiTaskRun | None:
+        with session_scope(self.db_path) as s:
+            r = s.get(UiTaskRun, run_id)
+            if r is not None:
+                s.expunge(r)
+            return r
+
+    def list_task_runs(self, task_id: int, limit: int = 50) -> list[UiTaskRun]:
+        with session_scope(self.db_path) as s:
+            rows = list(
+                s.execute(
+                    select(UiTaskRun)
+                    .where(UiTaskRun.task_id == task_id)
+                    .order_by(UiTaskRun.id.desc())
+                    .limit(limit)
+                )
+                .scalars()
+            )
+            for r in rows:
+                s.expunge(r)
+            return rows
+
+    def update_task_run(self, run_id: int, **fields) -> UiTaskRun | None:
+        with session_scope(self.db_path) as s:
+            r = s.get(UiTaskRun, run_id)
+            if r is None:
+                return None
+            for k, v in fields.items():
+                if hasattr(r, k):
+                    setattr(r, k, v)
+            s.flush()
+            s.expunge(r)
+            return r

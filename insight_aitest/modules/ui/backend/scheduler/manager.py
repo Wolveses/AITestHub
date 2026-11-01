@@ -33,6 +33,17 @@ def _parse_cron(expr: str) -> dict:
     }
 
 
+def _run_scheduled_ui_task(task_id: int) -> None:
+    """定时任务回调：执行 UI 自动化任务。"""
+    from insight_aitest.modules.ui.backend.automation.task_models import TriggerType
+    from insight_aitest.modules.ui.backend.automation.task_runner import execute_task
+
+    try:
+        execute_task(task_id, trigger_type=TriggerType.CRON)
+    except Exception as e:
+        logger.error(f"定时执行 UI 自动化任务 {task_id} 失败: {e}")
+
+
 def _run_scheduled_ui_batch(sched_id: int) -> None:
     """定时任务回调：执行批量 UI 用例并记录结果。"""
     import insight_aitest.modules.ui.backend.deps as ui_deps
@@ -110,6 +121,10 @@ class UISchedulerManager:
 
     def _reload_jobs(self) -> None:
         from insight_aitest.modules.ui.backend.scheduler.database import ScheduledUIBatchDatabase
+        from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+        from sqlalchemy import select
+        from insight_aitest.modules.ui.backend.automation.task_models import UiTask
+        from insight_aitest.platform.persistence import session_scope
 
         sched_db = ScheduledUIBatchDatabase(self.db_path)
         self._sched.remove_all_jobs()
@@ -124,10 +139,61 @@ class UISchedulerManager:
                     replace_existing=True,
                 )
                 logger.info(
-                    f"重建 UI 定时任务: ui_sched_{sched.id} ({sched.name}) cron={sched.cron_expression}"
+                    f"重建 UI 定时批次: ui_sched_{sched.id} ({sched.name}) cron={sched.cron_expression}"
                 )
             except Exception as e:
-                logger.error(f"重建 UI 定时任务 {sched.id} 失败: {e}")
+                logger.error(f"重建 UI 定时批次 {sched.id} 失败: {e}")
+
+        # 重建自动化任务调度
+        try:
+            with session_scope(self.db_path) as s:
+                tasks = (
+                    s.execute(
+                        select(UiTask).where(
+                            UiTask.cron_enabled.is_(True),
+                            UiTask.cron_expression != "",
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for task in tasks:
+                    try:
+                        cron_params = _parse_cron(task.cron_expression)
+                        self._sched.add_job(
+                            _run_scheduled_ui_task,
+                            trigger=CronTrigger(**cron_params),
+                            args=[task.id],
+                            id=f"ui_task_{task.id}",
+                            replace_existing=True,
+                        )
+                        logger.info(
+                            f"重建 UI 自动化任务定时: ui_task_{task.id} ({task.name}) cron={task.cron_expression}"
+                        )
+                    except Exception as te:
+                        logger.error(f"重建 UI 自动化任务定时 {task.id} 失败: {te}")
+        except Exception as e:
+            logger.error(f"从数据库加载 UI 任务调度失败: {e}")
+
+    def add_task_job(self, task_id: int, cron_expression: str) -> bool:
+        try:
+            cron_params = _parse_cron(cron_expression)
+            self.scheduler.add_job(
+                _run_scheduled_ui_task,
+                trigger=CronTrigger(**cron_params),
+                args=[task_id],
+                id=f"ui_task_{task_id}",
+                replace_existing=True,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"添加 UI 自动化任务定时 {task_id} 失败: {e}")
+            return False
+
+    def remove_task_job(self, task_id: int) -> None:
+        job_id = f"ui_task_{task_id}"
+        if self._sched and self._sched.get_job(job_id):
+            self._sched.remove_job(job_id)
 
     def add_job(self, sched_id: int, cron_expression: str) -> bool:
         try:

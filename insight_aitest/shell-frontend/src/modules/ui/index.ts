@@ -1,4 +1,6 @@
 export { UIApp } from './UIApp';
+export { AutomationPage } from './components/automation/AutomationPage';
+export { TaskManagerPage } from './components/automation/TaskManagerPage';
 export { ExecTab } from './ExecTab';
 export { EditTab } from './EditTab';
 export { Dashboard } from './components/Dashboard';

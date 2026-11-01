@@ -1,16 +1,86 @@
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Construction } from 'lucide-react';
+import { Construction, ListChecks, CalendarCheck } from 'lucide-react';
 import { AutomationPage } from './components/automation/AutomationPage';
+import { TaskManagerPage } from './components/automation/TaskManagerPage';
+
+type SubTab = 'cases' | 'tasks';
 
 /**
  * UI 自动化模块入口。
- *
- * 当前主链路：知识库用例快照 → AI 生成 Playwright 脚本 → 固化后本地执行。
- * 旧的 Midscene 视觉驱动页面（执行/编辑/看板/批量/定时/视觉配置）暂时雪藏：
- * 组件与后端接口保留，不再挂到路由，后续作为补充场景接入。
+ * 包含两个子 Tab：
+ * 1. 自动化用例：管理用例资产、AI 生成与本地脚本执行；
+ * 2. 任务管理：管理批次任务、从自动化用例导入已实现用例、定时调度、执行历史与测试报告。
  */
 export function UIApp() {
-  return <AutomationPage />;
+  const [activeTab, setActiveTab] = useState<SubTab>('cases');
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', background: 'var(--bg-base)' }}>
+      {/* 子 Tab 导航栏 */}
+      <div
+        style={{
+          padding: '0 16px',
+          background: 'var(--bg-card)',
+          borderBottom: '1px solid var(--border)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          flexShrink: 0,
+          height: 44,
+        }}
+      >
+        <button
+          onClick={() => setActiveTab('cases')}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'cases' ? '2px solid var(--accent)' : '2px solid transparent',
+            color: activeTab === 'cases' ? 'var(--accent)' : 'var(--text-secondary)',
+            fontWeight: activeTab === 'cases' ? 600 : 500,
+            fontSize: 13,
+            padding: '10px 14px',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            height: '100%',
+            transition: 'all 0.15s ease',
+          }}
+        >
+          <ListChecks size={15} />
+          <span>自动化用例</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('tasks')}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'tasks' ? '2px solid var(--accent)' : '2px solid transparent',
+            color: activeTab === 'tasks' ? 'var(--accent)' : 'var(--text-secondary)',
+            fontWeight: activeTab === 'tasks' ? 600 : 500,
+            fontSize: 13,
+            padding: '10px 14px',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            height: '100%',
+            transition: 'all 0.15s ease',
+          }}
+        >
+          <CalendarCheck size={15} />
+          <span>任务管理</span>
+        </button>
+      </div>
+
+      {/* Tab 内容区 */}
+      <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        {activeTab === 'cases' ? <AutomationPage /> : <TaskManagerPage />}
+      </div>
+    </div>
+  );
 }
 
 /** 移动端占位（路由已雪藏，保留导出避免其它模块引用断裂）。 */

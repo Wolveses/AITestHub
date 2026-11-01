@@ -148,6 +148,8 @@ def build_app() -> FastAPI:
         if lm.router is not None:
             app.include_router(lm.router, prefix=f"/api/modules/{lm.manifest.id}")
             logger.info(f"已注册模块路由: /api/modules/{lm.manifest.id}")
+            # 兼容简写别名: /api/{lm.manifest.id}
+            app.include_router(lm.router, prefix=f"/api/{lm.manifest.id}")
         if lm.websocket is not None:
             ws_path = f"/api/modules/{lm.manifest.id}/ws/monitoring/{{session_id}}"
             app.websocket(ws_path)(lm.websocket)
