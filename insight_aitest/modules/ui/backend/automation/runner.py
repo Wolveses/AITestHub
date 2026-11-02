@@ -278,6 +278,9 @@ def run_script(
                     str(script),
                     # -v 让每个用例的进度逐行输出，前端看到的执行过程更具体
                     "-v",
+                    # -s 关闭 pytest 的输出捕获：脚本里的 print 实时写进 stdout.log，
+                    # 执行记录的「日志」才能看到每步操作/输入值/断言实际值
+                    "-s",
                     "-p",
                     "no:cacheprovider",
                     # 脚手架以插件形式加载（不在用例目录写 conftest）

@@ -337,6 +337,18 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     断言一律用文案（expect(dialog.get_by_text("显示名称不能为空")).to_be_visible()），
     禁止编造 ui-input-error 这类 class。密码为空的提示是「密码不能为空」，
     且需先取消勾选「使用默认密码」，否则密码框 disabled、不参与校验。
+39. 脚本必须输出可读的执行日志（执行记录的「日志」里直接可见；pytest 以 -s 运行，print 实时落盘）：
+    - 每步操作前打印步骤与目标：print("[步骤] 打开用户管理页")、print("[操作] 点击「新增」")
+    - 输入/选择/勾选后打印实际提交的值：print(f"[输入] 用户名={username}")、
+      print(f"[选择] 部门={dept}")、print(f"[勾选] 使用默认密码={checked}")
+    - 断言前先确认元素可见（expect(loc).to_be_visible()），再读实际值打印预期 vs 实际，
+      最后再执行 expect 校验（保留自动重试，不要因为读值把断言写死）：
+      expect(row).to_be_visible()
+      actual = row.inner_text()
+      print(f"[断言] 部门 实际={actual!r} 预期={expected!r}")
+      expect(row).to_contain_text(expected)
+    日志一行一条、文案简短可读；禁止打印密码、token、Cookie 等敏感信息，
+    也不要打印整段 HTML/快照，每步保留关键值即可。
 """
 
 
