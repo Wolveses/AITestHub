@@ -149,7 +149,13 @@ class LLMClient:
         all_normalized: list[list[float]] = []
         for i in range(0, len(texts), batch_size):
             chunk_texts = texts[i : i + batch_size]
-            resp = self._embed_client.embeddings.create(model=self._embed_model, input=chunk_texts)
+            # 显式传入配置的向量维度：vec0 表按 embed_dim 建，必须让模型输出同维向量，
+            # 否则写入/检索会维度不匹配（模型支持该参数时以配置为准，而非模型默认值）
+            resp = self._embed_client.embeddings.create(
+                model=self._embed_model,
+                input=chunk_texts,
+                dimensions=self._config.embed_dim,
+            )
             ordered = sorted(resp.data, key=lambda d: d.index)
             # L2 归一化：sqlite-vec 默认用 L2（欧氏）距离，归一化后
             # L2 距离与余弦距离等价（||a-b||² = 2(1-cos)），RAG 召回更准
