@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Upload, Folder, ChevronRight, Home, UploadCloud, RefreshCw, Globe, X } from 'lucide-react';
+import { AlertTriangle, Upload, Folder, ChevronRight, ChevronDown, Home, UploadCloud, RefreshCw, Globe, X, Zap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { useKnowledgeStore, isNonTerminal, type Document, type FolderNode } from '../store/knowledgeStore';
@@ -149,7 +149,11 @@ export function KnowledgeBase() {
   // 记录监听起点：POST 刚返回时后端线程可能还没写 pending，过早读到旧终态会误判完成
   const watchStartedAtRef = useRef(0);
   const [batchRunning, setBatchRunning] = useState(false);
-  // 后端批次状态（含其他用户触发的批次），用于置灰「全部重新解析」按钮
+  const [batchKind, setBatchKind] = useState<'reparse' | 'reembed' | null>(null);
+  // 重新向量化下拉：点击按钮后在 待处理 / 全量 两个选项中选择
+  const [reembedMenuOpen, setReembedMenuOpen] = useState(false);
+  const reembedMenuRef = useRef<HTMLDivElement>(null);
+  // 后端批次状态（含其他用户触发的批次），用于置灰批量按钮
   const [serverBatchRunning, setServerBatchRunning] = useState(false);
   const batchDisabled = batchRunning || serverBatchRunning;
   const [reindexDoneTotal, setReindexDoneTotal] = useState<number | null>(null);
@@ -273,7 +277,28 @@ export function KnowledgeBase() {
 
   const handleReindex = async (docId: number) => {
     try {
-      const r = await fetch(`/api/modules/kb/documents/${docId}/reindex`, { method: 'POST' });
+      const r = await fetch(`/api/modules/kb/documents/${docId}/reparse`, { method: 'POST' });
+      if (!r.ok) {
+        const err = await r.text();
+        let msg = err;
+        try { msg = JSON.parse(err)?.detail || err; } catch { /* 非 JSON 原文 */ }
+        toast.error(msg || `重新解析失败 (HTTP ${r.status})`);
+        return;
+      }
+      toast.success(t('kb.reparseStarted', '已触发重新解析'));
+      // 立即强制轮询：POST 返回时状态可能仍是旧终态，延迟刷新会漏掉中间变化
+      watchStartedAtRef.current = Date.now();
+      setWatchDocId(docId);
+      setForcePoll(true);
+      loadDocuments();
+    } catch (e: any) {
+      toast.error(`重新解析失败: ${e?.message || e}`);
+    }
+  };
+
+  const handleReembed = async (docId: number) => {
+    try {
+      const r = await fetch(`/api/modules/kb/documents/${docId}/reembed`, { method: 'POST' });
       if (!r.ok) {
         const err = await r.text();
         let msg = err;
@@ -281,8 +306,7 @@ export function KnowledgeBase() {
         toast.error(msg || `重新向量化失败 (HTTP ${r.status})`);
         return;
       }
-      toast.success(t('kb.reindexStarted', '已触发重新向量化'));
-      // 立即强制轮询：POST 返回时状态可能仍是旧终态，延迟刷新会漏掉中间变化
+      toast.success(t('kb.reembedStarted', '已触发重新向量化'));
       watchStartedAtRef.current = Date.now();
       setWatchDocId(docId);
       setForcePoll(true);
@@ -292,51 +316,141 @@ export function KnowledgeBase() {
     }
   };
 
-  const handleReindexAll = async () => {
+  const BATCH_ACTIONS: Record<
+    string,
+    { kind: 'reparse' | 'reembed'; mode: string; title: [string, string]; message: [string, string] }
+  > = {
+    reparse_failed: {
+      kind: 'reparse',
+      mode: 'parse_failed',
+      title: ['kb.confirmBatchReparseFailedTitle', '批量重新解析（仅解析失败）'],
+      message: [
+        'kb.confirmBatchReparseFailedMsg',
+        '将重新解析并向量化 {{n}} 个解析失败的文档，预计约 {{tokens}} tokens，确定？',
+      ],
+    },
+    reembed_pending: {
+      kind: 'reembed',
+      mode: 'pending',
+      title: ['kb.confirmBatchReembedPendingTitle', '批量重新向量化（待处理）'],
+      message: [
+        'kb.confirmBatchReembedPendingMsg',
+        '将对 {{n}} 个未向量化/向量化失败的文档重新计算向量（不重新解析），预计约 {{tokens}} tokens，确定？',
+      ],
+    },
+    reembed_all: {
+      kind: 'reembed',
+      mode: 'all',
+      title: ['kb.confirmBatchReembedAllTitle', '批量重新向量化（全量）'],
+      message: [
+        'kb.confirmBatchReembedAllMsg',
+        '将对 {{n}} 个已切块文档重新计算向量（含已就绪文档，用于修复换模型后的空壳），预计约 {{tokens}} tokens，确定？',
+      ],
+    },
+  };
+
+  // 批量按钮与下拉选项的通用样式
+  const batchBtnStyle: React.CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 5,
+    background: 'var(--bg-card, rgba(148,163,184,0.08))',
+    color: 'var(--text-secondary)',
+    border: '1px solid var(--border-color, rgba(148,163,184,0.25))',
+    borderRadius: 6,
+    padding: '4px 12px',
+    fontSize: 12,
+    fontWeight: 500,
+    transition: 'all 0.15s ease',
+  };
+  const batchMenuItemStyle: React.CSSProperties = {
+    display: 'block',
+    width: '100%',
+    textAlign: 'left',
+    padding: '8px 10px',
+    background: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+  };
+
+  // 批量任务：先 dry_run 获取作用域内文档数与预估 token，二次确认后启动
+  const handleBatchRun = async (action: string) => {
+    setReembedMenuOpen(false);
+    const spec = BATCH_ACTIONS[action] ?? BATCH_ACTIONS.reparse_failed;
+    // 作用域与列表筛选保持一致：知识库（本地/飞书）列表不按全局项目过滤，
+    // 批量任务也不带 project_id（飞书文档 project_id 均为空，叠加后会筛空）；
+    // 缺陷库/用例库按各自选中的项目过滤，来源固定为 tapd。
+    const scope = {
+      project_id:
+        activeTab === 'defect'
+          ? defectProjectId ?? undefined
+          : activeTab === 'case'
+            ? caseProjectId ?? undefined
+            : undefined,
+      source_type: activeTab === 'defect' || activeTab === 'case' ? 'tapd' : activeTab,
+      folder_id: currentFolderId ?? undefined,
+    };
+    // 强制作用域：不允许无项目/来源/目录的全库批量
+    if (scope.project_id === undefined && !scope.source_type && scope.folder_id === undefined) {
+      toast.error(t('kb.batchScopeRequired', '请先选择项目或目录，再执行批量操作'));
+      return;
+    }
+    const body = JSON.stringify({ ...scope, mode: spec.mode });
     try {
-      const stats = await fetch('/api/modules/ai/tasks/kb/stats').then(r => r.ok ? r.json() : null);
-      const cnt = stats?.need_reindex_count ?? 0;
-      if (cnt === 0) {
-        toast.info(t('kb.noNeedReindex', '没有需要重新向量化的文档'));
+      const pv = await fetch(`/api/modules/ai/tasks/kb/${spec.kind}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...scope, mode: spec.mode, dry_run: true }),
+      });
+      if (!pv.ok) {
+        const err = await pv.text();
+        let msg = err;
+        try { msg = JSON.parse(err)?.detail || err; } catch { /* 非 JSON 原文 */ }
+        toast.error(msg || `批量任务预览失败 (HTTP ${pv.status})`);
         return;
       }
-      const ragOn = stats?.vector_enabled;
+      const preview = await pv.json();
+      const total = preview?.total ?? 0;
+      if (total === 0) {
+        toast.info(t('kb.batchNoDocs', '当前作用域内没有符合条件的文档'));
+        return;
+      }
+      const tokens = Number(preview?.estimated_tokens ?? 0).toLocaleString();
+      const [titleKey, titleDefault] = spec.title;
+      const [msgKey, msgDefault] = spec.message;
       confirm({
-        title: t('kb.confirmReindexAllTitle', '批量重新向量化'),
-        message: ragOn
-          ? t('kb.confirmReindexAllMsg', '将对 {{n}} 个文档重新解析并向量化，需要调用 embedding API，确定？', { n: cnt })
-          : t('kb.confirmReindexAllMsgRagOff', '当前 RAG 未开启，将对 {{n}} 个文档重新解析分块（不执行向量化），确定？', { n: cnt }),
+        title: t(titleKey, titleDefault),
+        message: t(msgKey, msgDefault, { n: total, tokens }),
         onConfirm: async () => {
           try {
-            const r = await fetch('/api/modules/ai/tasks/kb/reindex', {
+            const r = await fetch(`/api/modules/ai/tasks/kb/${spec.kind}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ all: true, document_ids: [] }),
+              body,
             });
             if (!r.ok) {
               const err = await r.text();
               let msg = err;
               try { msg = JSON.parse(err)?.detail || err; } catch { /* 非 JSON 原文 */ }
-              toast.error(msg || `批量重新向量化失败 (HTTP ${r.status})`);
+              toast.error(msg || `批量任务启动失败 (HTTP ${r.status})`);
               return;
             }
-            toast.success(t('kb.reindexAllStarted', '已触发批量重新向量化'));
+            toast.success(t('kb.batchStarted', '批量任务已启动'));
             setReindexDoneTotal(null);
+            setBatchKind(spec.kind);
             setBatchRunning(true);
             setForcePoll(true);
             loadDocuments();
           } catch (e: any) {
-            toast.error(`批量重新向量化失败: ${e?.message || e}`);
+            toast.error(`批量任务启动失败: ${e?.message || e}`);
           }
         },
       });
     } catch (e: any) {
-      toast.error(`批量重新向量化失败: ${e?.message || e}`);
+      toast.error(`批量任务预览失败: ${e?.message || e}`);
     }
   };
 
-  // 顶部按钮数量用全库范围（调 stats 接口），与 handleReindexAll 的 confirm 弹框保持一致
-  const [needReindexCount, setNeedReindexCount] = useState(0);
   const [vectorEnabled, setVectorEnabled] = useState(false);
   // 订阅 configStore 的 vector_enabled，保存 AI 设置后立即生效，无需刷新页面
   const configVectorEnabled = useConfigStore((s) => !!s.config?.vector_enabled);
@@ -344,9 +458,8 @@ export function KnowledgeBase() {
     fetch('/api/modules/ai/tasks/kb/stats')
       .then(r => r.ok ? r.json() : null)
       .then(s => {
-        setNeedReindexCount(s?.need_reindex_count ?? 0);
         setVectorEnabled(!!s?.vector_enabled);
-        setServerBatchRunning(!!s?.reindex_progress?.running);
+        setServerBatchRunning(!!s?.reindex_progress?.running || !!s?.reembed_progress?.running);
       })
       .catch(() => {});
   }, [activeTab, currentFolderId, configVectorEnabled]);
@@ -358,9 +471,8 @@ export function KnowledgeBase() {
       try {
         const s = await fetch('/api/modules/ai/tasks/kb/stats').then((r) => (r.ok ? r.json() : null));
         if (s) {
-          setNeedReindexCount(s.need_reindex_count ?? 0);
           setVectorEnabled(!!s.vector_enabled);
-          setServerBatchRunning(!!s.reindex_progress?.running);
+          setServerBatchRunning(!!s.reindex_progress?.running || !!s.reembed_progress?.running);
         }
       } catch {
         /* 单次失败忽略 */
@@ -396,15 +508,14 @@ export function KnowledgeBase() {
     return () => window.clearTimeout(timer);
   }, [watchDocId]);
 
-  // 批量重新解析：轮询后端批次进度，批次结束后弹出完成卡片
+  // 批量任务：轮询对应批次进度，结束后弹出完成卡片
   useEffect(() => {
     if (!batchRunning) return;
     const tick = async () => {
       try {
         const s = await fetch('/api/modules/ai/tasks/kb/stats').then((r) => (r.ok ? r.json() : null));
         if (!s) return;
-        setNeedReindexCount(s.need_reindex_count ?? 0);
-        const p = s.reindex_progress;
+        const p = batchKind === 'reembed' ? s.reembed_progress : s.reindex_progress;
         // total>0 才认为批次已启动，避免 POST 刚返回、后台线程尚未初始化时误判完成
         if (p && p.total > 0 && !p.running) {
           setBatchRunning(false);
@@ -418,7 +529,19 @@ export function KnowledgeBase() {
     };
     const timer = window.setInterval(tick, 2000);
     return () => window.clearInterval(timer);
-  }, [batchRunning]);
+  }, [batchRunning, batchKind]);
+
+  // 重新向量化下拉：点击页面其他区域时收起
+  useEffect(() => {
+    if (!reembedMenuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (reembedMenuRef.current && !reembedMenuRef.current.contains(e.target as Node)) {
+        setReembedMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [reembedMenuOpen]);
 
   // feishuModalOpen 由 KnowledgeBaseApp 顶部按钮触发，这里监听并初始化飞书空间列表
   useEffect(() => {
@@ -529,33 +652,83 @@ export function KnowledgeBase() {
             )}
           </div>
 
-          <button
-            onClick={handleReindexAll}
-            disabled={batchDisabled}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 5,
-              background: 'var(--bg-card, rgba(148,163,184,0.08))',
-              color: 'var(--text-secondary)',
-              border: '1px solid var(--border-color, rgba(148,163,184,0.25))',
-              borderRadius: 6,
-              padding: '4px 12px',
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: batchDisabled ? 'not-allowed' : 'pointer',
-              opacity: batchDisabled ? 0.55 : 1,
-              transition: 'all 0.15s ease',
-            }}
-            title={batchDisabled ? '批量重新解析进行中' : '对所有未向量化/向量化失败的文档重新执行向量化'}
-          >
-            <RefreshCw size={13} />
-            {batchDisabled
-              ? '全部重新解析中…'
-              : needReindexCount > 0
-                ? `全部重新解析 (${needReindexCount})`
-                : '全部重新解析'}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {/* 批量重新解析：仅处理解析失败的文档 */}
+            <button
+              onClick={() => handleBatchRun('reparse_failed')}
+              disabled={batchDisabled}
+              style={{
+                ...batchBtnStyle,
+                cursor: batchDisabled ? 'not-allowed' : 'pointer',
+                opacity: batchDisabled ? 0.55 : 1,
+              }}
+              title={
+                batchDisabled
+                  ? t('kb.batchRunningHint', '批量任务进行中')
+                  : t('kb.batchReparseBtnHint', '仅对当前作用域内解析失败的文档重新解析并向量化')
+              }
+            >
+              <RefreshCw size={13} />
+              {t('kb.batchReparseBtn', '重新解析')}
+            </button>
+
+            {/* 批量重新向量化：点击展开 待处理 / 全量 两个选项 */}
+            <div ref={reembedMenuRef} style={{ position: 'relative' }}>
+              <button
+                onClick={() => setReembedMenuOpen((v) => !v)}
+                disabled={batchDisabled || !vectorEnabled}
+                style={{
+                  ...batchBtnStyle,
+                  cursor: batchDisabled || !vectorEnabled ? 'not-allowed' : 'pointer',
+                  opacity: batchDisabled || !vectorEnabled ? 0.55 : 1,
+                }}
+                title={
+                  !vectorEnabled
+                    ? t('kb.reembedRagOff', '当前 RAG 未开启，无法重新向量化')
+                    : batchDisabled
+                      ? t('kb.batchRunningHint', '批量任务进行中')
+                      : t('kb.batchReembedBtnHint', '点击选择待处理或全量重新向量化')
+                }
+              >
+                <Zap size={13} />
+                {t('kb.batchReembedBtn', '重新向量化')}
+                <ChevronDown size={12} />
+              </button>
+              {reembedMenuOpen && !batchDisabled && vectorEnabled && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    right: 0,
+                    top: 'calc(100% + 4px)',
+                    zIndex: 20,
+                    minWidth: 240,
+                    background: 'var(--bg-card, #fff)',
+                    border: '1px solid var(--border-color, rgba(148,163,184,0.25))',
+                    borderRadius: 6,
+                    boxShadow: '0 6px 16px rgba(0,0,0,0.12)',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <button onClick={() => handleBatchRun('reembed_pending')} style={batchMenuItemStyle}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                      {t('kb.batchReembedPending', '待处理')}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      {t('kb.batchReembedPendingDesc', '未向量化 / 向量化失败的文档')}
+                    </div>
+                  </button>
+                  <button onClick={() => handleBatchRun('reembed_all')} style={batchMenuItemStyle}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                      {t('kb.batchReembedAll', '全量')}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      {t('kb.batchReembedAllDesc', '含已就绪文档，修复换模型后的向量空壳')}
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* 本地文档模式下展示上传区：紧凑尺寸、明确边界、拖拽高亮 */}
@@ -702,6 +875,7 @@ export function KnowledgeBase() {
                   onShowVersions={handleShowVersions}
                   onMove={handleMove}
                   onReindex={handleReindex}
+                  onReembed={handleReembed}
                   onPreviewChunks={setChunksDoc}
                 />
               ))}
@@ -935,10 +1109,10 @@ export function KnowledgeBase() {
           >
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary, #1e293b)' }}>
-                {t('kb.reindexAllDoneTitle', '全部重新解析完成')}
+                {t('kb.batchDoneTitle', '批量任务完成')}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-secondary, #475569)', marginTop: 4 }}>
-                {t('kb.reindexAllDoneMsg', '共处理 {{n}} 个文档', { n: reindexDoneTotal })}
+                {t('kb.batchDoneMsg', '共处理 {{n}} 个文档', { n: reindexDoneTotal })}
               </div>
             </div>
             <button

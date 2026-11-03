@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +27,83 @@ import pytest
 from playwright.sync_api import sync_playwright
 
 _ARTIFACTS = Path(os.environ.get("INSIGHT_UI_ARTIFACTS", ".") or ".")
+# 生成期首跑抓包：默认关闭，仅 runner 注入 INSIGHT_UI_CAPTURE_NETWORK=1 时开启
+_CAPTURE = os.environ.get("INSIGHT_UI_CAPTURE_NETWORK") == "1"
+_CAPTURE_FILE = _ARTIFACTS / "network.jsonl"
+_CAPTURE_LOCK = threading.Lock()
+_MAX_BODY_CHARS = 64 * 1024
+
+
+def _truncate(text):
+    """请求体/响应体统一截断，避免把大报文写进产物目录。"""
+    if text is None:
+        return None
+    text = str(text)
+    return text[:_MAX_BODY_CHARS]
+
+
+def _record_response(resp, sink) -> None:
+    """事件回调：只读取事件 payload 自带字段，不调用任何 Playwright 同步 API。"""
+    try:
+        req = resp.request
+        rec = {
+            "method": req.method,
+            "url": req.url,
+            "status": resp.status,
+            "resource_type": getattr(req, "resource_type", "") or "",
+            "request_headers": dict(req.headers or {}),
+            "response_headers": dict(resp.headers or {}),
+        }
+        try:
+            rec["request_body"] = _truncate(req.post_data)
+        except Exception:
+            rec["request_body"] = None
+        with _CAPTURE_LOCK:
+            sink.append((rec, resp))
+    except Exception:
+        # 抓包只做旁路记录，任何异常都不能影响用例执行
+        return
+
+
+def _resolve_bodies(sink) -> list[dict]:
+    """用例结束后统一读取响应体（此时同步 API 调用是安全的）。"""
+    records: list[dict] = []
+    for rec, resp in sink:
+        ctype = (rec.get("response_headers", {}).get("content-type") or "").lower()
+        text_like = "json" in ctype or "text" in ctype or "xml" in ctype
+        if (
+            text_like
+            and 200 <= int(rec.get("status") or 0) <= 499
+            and rec.get("resource_type") in ("xhr", "fetch")
+        ):
+            try:
+                text = resp.body().decode("utf-8", "replace")
+                if len(text) > _MAX_BODY_CHARS:
+                    text = text[:_MAX_BODY_CHARS]
+                    rec["body_truncated"] = True
+                try:
+                    rec["response_body"] = json.loads(text)
+                except ValueError:
+                    rec["response_body"] = text
+            except Exception:
+                pass
+        records.append(rec)
+    return records
+
+
+def _write_capture(sink) -> None:
+    try:
+        records = _resolve_bodies(sink)
+        if not records:
+            return
+        _ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        with open(_CAPTURE_FILE, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        # 抓包产物写入失败不影响用例执行结果
+        pass
+
 
 # 水印字体优先级：Windows 微软雅黑 → macOS/Linux 常见中文字体 → PIL 默认位图字体
 _FONT_CANDIDATES = (
@@ -138,6 +216,10 @@ def page(_insight_browser, request):
         kwargs["storage_state"] = state
     ctx = _insight_browser.new_context(**kwargs)
     ctx.set_default_timeout(int(os.environ.get("INSIGHT_UI_TIMEOUT_MS") or 15000))
+    sink: list = []
+    if _CAPTURE:
+        # 只记录旁路信息；响应体延迟到 teardown 读取，避免回调里调用同步 API
+        ctx.on("response", lambda resp: _record_response(resp, sink))
     try:
         ctx.tracing.start(screenshots=True, snapshots=True, sources=True)
     except Exception:
@@ -156,6 +238,8 @@ def page(_insight_browser, request):
         except Exception:
             pass
     finally:
+        if _CAPTURE:
+            _write_capture(sink)
         ctx.close()
 
 

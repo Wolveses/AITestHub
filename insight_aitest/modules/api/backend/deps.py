@@ -7,6 +7,7 @@ import os
 import threading
 
 from insight_aitest.modules.api.backend.persistence.database import RunDatabase
+from insight_aitest.modules.api.backend.persistence.asset_database import AssetDatabase
 from insight_aitest.modules.api.backend.persistence.environment_database import EnvironmentDatabase
 from insight_aitest.modules.api.backend.persistence.suite_database import (
     SuiteDatabase,
@@ -23,6 +24,8 @@ _suite_db: SuiteDatabase | None = None
 _suite_db_lock = threading.Lock()
 _suite_run_db: SuiteRunDatabase | None = None
 _suite_run_db_lock = threading.Lock()
+_asset_db: AssetDatabase | None = None
+_asset_db_lock = threading.Lock()
 
 
 def get_run_db() -> RunDatabase:
@@ -59,3 +62,13 @@ def get_suite_run_db() -> SuiteRunDatabase:
             if _suite_run_db is None:
                 _suite_run_db = SuiteRunDatabase(_DB_PATH)
     return _suite_run_db
+
+
+def get_asset_db() -> AssetDatabase:
+    """接口资产库（api.db 的 api_assets 表）。"""
+    global _asset_db
+    if _asset_db is None:
+        with _asset_db_lock:
+            if _asset_db is None:
+                _asset_db = AssetDatabase(_DB_PATH)
+    return _asset_db

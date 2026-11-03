@@ -2145,6 +2145,8 @@ class GenerationJob:
                     pages_root=self._staged_pages,
                     params_schema=param_schema,
                     params_values=param_values,
+                    # 仅生成期首跑采集网络请求；修复场景复用既有脚本，不重复采集
+                    capture_network=not is_fix,
                 )
                 if result.get("cancelled"):
                     return self._cancelled_outcome()
@@ -2159,6 +2161,8 @@ class GenerationJob:
                 if result.get("run_status") == "passed":
                     adopt_pages(int(self.case.project_id), self._staged_pages)
                     self._staged_pages = None
+                    if not is_fix:
+                        self._import_capture(result)
                     return self._solidify(
                         source,
                         ok=True,
@@ -2579,6 +2583,7 @@ class GenerationJob:
         pages_root: Path | None = None,
         params_schema: list[dict] | None = None,
         params_values: dict | None = None,
+        capture_network: bool = False,
     ) -> dict:
         project_id = int(self.case.project_id)
         case_dir = paths.case_dir(project_id, int(self.case.id))
@@ -2595,6 +2600,7 @@ class GenerationJob:
                 pages_root=pages_root if pages_root is not None else self._staged_pages,
                 # 首跑是本任务另一个长阻塞点，终止时立即杀掉 pytest 子进程
                 cancel_check=lambda: concurrency.is_cancelled(self.case_id),
+                capture_network=capture_network,
             )
             # 记住本次首跑产物位置，通过时把终态截图固化到生成记录旁
             self.validate_artifacts_rel = result.get("artifacts_rel_path") or ""
@@ -2607,6 +2613,36 @@ class GenerationJob:
                 "error_category": ErrorCategory.SCRIPT,
                 "error_message": f"{type(e).__name__}: {e}",
             }
+
+    def _import_capture(self, result: dict) -> None:
+        """生成期首跑抓包 → 独立接口资产库（纯旁路，失败不影响生成结果）。"""
+        run_dir = result.get("run_dir") or ""
+        if not run_dir:
+            return
+        try:
+            from urllib.parse import urlsplit
+
+            from .capture import import_captured_api_assets
+
+            env = self.env
+            base_origin = ""
+            raw_base = (getattr(env, "base_url", "") or "").strip() if env else ""
+            if raw_base:
+                parts = urlsplit(raw_base)
+                if parts.scheme and parts.netloc:
+                    base_origin = f"{parts.scheme}://{parts.netloc}"
+            stats = import_captured_api_assets(
+                project_id=int(self.case.project_id),
+                ui_case_id=int(self.case.id),
+                ui_case_title=self.case.title,
+                network_path=Path(run_dir) / "network.jsonl",
+                base_origin=base_origin,
+                login_api_path=(getattr(env, "login_api_path", "") or "") if env else "",
+                auto_enhance=True,
+            )
+            self._write_log({"type": "api_capture", **stats})
+        except Exception:
+            logger.warning("生成期接口抓包入库失败 case=%s", self.case_id, exc_info=True)
 
     def _solidify(
         self,

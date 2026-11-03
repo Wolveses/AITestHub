@@ -44,6 +44,7 @@ export const childrenMap: Record<string, Record<string, ComponentType>> = {
   },
   api: {
     cases: lazy(() => import('./modules/api').then((m) => ({ default: m.CasesTab }))),
+    assets: lazy(() => import('./modules/api').then((m) => ({ default: m.AssetsTab }))),
     suites: lazy(() => import('./modules/api').then((m) => ({ default: m.SuitesTab }))),
     envs: lazy(() => import('./modules/api').then((m) => ({ default: m.EnvironmentPanel }))),
     dashboard: lazy(() => import('./modules/api').then((m) => ({ default: m.Dashboard }))),

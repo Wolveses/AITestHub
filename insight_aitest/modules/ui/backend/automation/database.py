@@ -8,6 +8,8 @@ from datetime import datetime
 from sqlalchemy import func, select
 
 from insight_aitest.modules.ui.backend.automation.models import (
+    CaseStatus,
+    GenerationStatus,
     UiCase,
     UiEnv,
     UiGeneration,
@@ -151,6 +153,39 @@ class UIAutomationDatabase:
         )
 
     # ===== 用例 =====
+
+    def recover_interrupted_jobs(self) -> int:
+        """后端重启后收敛残留的生成/修复状态（内存任务已不可能存活）。
+
+        残留的 running 生成记录置为 failed；generating/fixing 用例按是否有脚本
+        回退为已实现/未实现，避免前端一直显示「生成中」且停止按钮失效。
+        """
+        with session_scope(self.db_path) as s:
+            gens = list(
+                s.scalars(
+                    select(UiGeneration).where(
+                        UiGeneration.status == GenerationStatus.RUNNING
+                    )
+                )
+            )
+            for g in gens:
+                g.status = GenerationStatus.FAILED
+                g.error_message = g.error_message or "服务重启导致任务中断"
+                g.finished_at = datetime.now()
+            cases = list(
+                s.scalars(
+                    select(UiCase).where(
+                        UiCase.status.in_([CaseStatus.GENERATING, CaseStatus.FIXING])
+                    )
+                )
+            )
+            for c in cases:
+                c.status = (
+                    CaseStatus.IMPLEMENTED if c.script_rel_path else CaseStatus.NOT_IMPLEMENTED
+                )
+                c.last_error_message = "服务重启导致任务中断"
+                c.updated_at = datetime.now()
+            return len(gens) + len(cases)
 
     def get_case(self, case_id: int) -> UiCase | None:
         with session_scope(self.db_path) as s:

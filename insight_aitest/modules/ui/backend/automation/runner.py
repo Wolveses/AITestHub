@@ -173,6 +173,7 @@ def run_script(
     pages_root: Path | None = None,
     retries: int = 0,
     cancel_check: Callable[[], bool] | None = None,
+    capture_network: bool = False,
 ) -> dict:
     """执行一个固化脚本，返回结果摘要（不写 ui_runs，由调用方决定是否落库）。
 
@@ -180,6 +181,7 @@ def run_script(
     pages_root: 覆盖项目资产根目录（含 common/ 与 pages/ 包）。生成期首跑传暂存目录，
         避免未验证的资产污染正式目录；不传时默认 ``scripts/<project_id>``。
     cancel_check: 生成期首跑传入终止检查，返回 True 时立即杀掉 pytest 子进程。
+    capture_network: 仅生成期首跑开启，脚手架据此采集网络请求（默认关闭）。
     """
     if env is None:
         raise EnvMissingError("项目未配置环境，请先在环境管理中新增并测试通过")
@@ -237,6 +239,7 @@ def run_script(
             "INSIGHT_UI_HEADERS": json.dumps(auth.headers, ensure_ascii=False),
             "INSIGHT_UI_TOKEN": auth.token or "",
             "INSIGHT_UI_TIMEOUT_MS": "15000",
+            "INSIGHT_UI_CAPTURE_NETWORK": "1" if capture_network else "0",
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUTF8": "1",
         }

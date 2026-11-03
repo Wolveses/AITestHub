@@ -318,8 +318,20 @@ def cancel_generate(
     case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)
 ) -> dict:
     """终止正在进行的生成/修复任务（卡在模型响应或浏览器调用时主动停止）。"""
-    _get_or_404(case_id, db)
+    case = _get_or_404(case_id, db)
     if not cancel_job(case_id):
+        # 进程内任务已不存在（典型场景：后端重启后残留 generating/fixing 状态），
+        # 直接把用例收敛回终止态，避免前端一直显示生成中、停止按钮报「没有进行中任务」
+        if case.status in (CaseStatus.GENERATING, CaseStatus.FIXING):
+            db.update_case(
+                case_id,
+                status=CaseStatus.IMPLEMENTED
+                if case.script_rel_path
+                else CaseStatus.NOT_IMPLEMENTED,
+                last_error_message="任务已中断（服务重启），请重新生成",
+            )
+            concurrency.clear_progress(case_id)
+            return {"accepted": True, "case_id": case_id, "stale": True}
         raise HTTPException(409, "当前没有正在进行的生成/修复任务")
     concurrency.set_progress(case_id, "终止中", "正在停止生成任务")
     return {"accepted": True, "case_id": case_id}
