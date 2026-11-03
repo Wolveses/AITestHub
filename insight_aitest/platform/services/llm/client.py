@@ -58,7 +58,8 @@ class LLMUnavailableError(Exception):
 
 # 重试配置（瞬时错误：限流/超时/连接失败）
 _MAX_RETRIES = 3
-_RETRY_DELAYS = [1, 2, 4]  # 指数退避秒数
+_RETRY_DELAYS = [1.5, 3, 6]  # 指数退避秒数（首次 1.5s，逐次翻倍）
+_JITTER_RATIO = 0.2  # 退避抖动 ±20%，避免多实例同一时刻重试形成尖峰
 # 可重试的 OpenAI SDK 异常（瞬时）
 _RETRYABLE = (
     "RateLimitError",
@@ -73,8 +74,41 @@ def _is_retryable(e: Exception) -> bool:
     return any(type(e).__name__ == name for name in _RETRYABLE)
 
 
+def _retry_after(e: Exception) -> float | None:
+    """读取服务端 Retry-After（429/503 常用），支持秒数与 HTTP 日期两种格式。"""
+    resp = getattr(e, "response", None)
+    headers = getattr(resp, "headers", None)
+    if not headers:
+        return None
+    raw = headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        try:
+            from datetime import datetime
+            from email.utils import parsedate_to_datetime
+
+            dt = parsedate_to_datetime(raw)
+            return max(0.0, (dt - datetime.now(dt.tzinfo)).total_seconds())
+        except Exception:
+            return None
+
+
+def _sleep_before_retry(attempt: int, e: Exception) -> None:
+    """指数退避 + 抖动；服务端给了 Retry-After 时取两者较大值。"""
+    import random
+
+    delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
+    retry_after = _retry_after(e)
+    if retry_after is not None:
+        delay = max(delay, retry_after)
+    time.sleep(delay * random.uniform(1 - _JITTER_RATIO, 1 + _JITTER_RATIO))
+
+
 def _retry_call(fn, *args, **kwargs):
-    """带指数退避的重试包装。瞬时错误重试 ≤3 次（1s/2s/4s），耗尽后抛 LLMUnavailableError。
+    """带指数退避的重试包装。瞬时错误重试 ≤3 次（1.5s/3s/6s），耗尽后抛 LLMUnavailableError。
 
     不可重试的错误（AuthenticationError/BadRequestError/NotFoundError）原样抛出。
     """
@@ -86,7 +120,7 @@ def _retry_call(fn, *args, **kwargs):
             last_exc = e
             if not _is_retryable(e) or attempt == _MAX_RETRIES:
                 break
-            time.sleep(_RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)])
+            _sleep_before_retry(attempt, e)
     # 重试耗尽：瞬时错误转 LLMUnavailableError，配置/参数错误原样抛
     if last_exc is None:
         raise RuntimeError("_retry_call 退出但无异常（不应发生）")
