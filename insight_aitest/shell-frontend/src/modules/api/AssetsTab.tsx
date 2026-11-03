@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Bot, FilePlus2, Loader2, RefreshCw, Trash2, VolumeX } from 'lucide-react';
+import { Bot, FilePlus2, KeyRound, Loader2, Play, RefreshCw, Send, Trash2, VolumeX, X } from 'lucide-react';
 import { useProjectStore } from '../../shared/store/projectStore';
 import { useIsMobile } from '../../shared/hooks/useIsMobile';
-import { useAssetStore, type ApiAsset, type AiMeta, type EnhanceProgress, fetchEnhanceProgress } from './store/assetStore';
+import { useAssetStore, type ApiAsset, type AiMeta, type AuthTokenInfo, type DebugResult, type EnhanceProgress, fetchEnhanceProgress } from './store/assetStore';
 
 const METHODS = ['', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
 
@@ -23,6 +23,13 @@ function methodColor(method: string) {
     default:
       return 'var(--text-secondary)';
   }
+}
+
+function statusColor(status: number) {
+  if (status < 300) return '#16a34a';
+  if (status < 400) return '#3b82f6';
+  if (status < 500) return '#d97706';
+  return '#dc2626';
 }
 
 function pretty(value: unknown): string {
@@ -76,7 +83,7 @@ export function AssetsTab() {
   const isMobile = useIsMobile();
   const {
     items, total, loading, selectedId, checkedIds,
-    loadAssets, selectAsset, updateAsset, deleteAsset, enhanceAsset, toCase,
+    loadAssets, selectAsset, updateAsset, deleteAsset, enhanceAsset, debugAsset, fetchAuthToken, toCase,
     toggleCheck, setChecked, deleteChecked,
   } = useAssetStore();
 
@@ -91,6 +98,21 @@ export function AssetsTab() {
   const [progress, setProgress] = useState<EnhanceProgress | null>(null);
   const prevRunning = useRef(false);
 
+  // 在线调试：仅前端临时状态，退出或切换资产即清空，不落库
+  const [debugMode, setDebugMode] = useState(false);
+  const [debugMethod, setDebugMethod] = useState('GET');
+  const [debugUrl, setDebugUrl] = useState('');
+  const [debugHeaders, setDebugHeaders] = useState<{ name: string; value: string }[]>([]);
+  const [debugBody, setDebugBody] = useState('');
+  const [debugTab, setDebugTab] = useState<'headers' | 'body'>('headers');
+  const [sending, setSending] = useState(false);
+  const [debugResp, setDebugResp] = useState<DebugResult | null>(null);
+  const [respTab, setRespTab] = useState<'body' | 'headers'>('body');
+  // 认证：项目级前置 token（仅内存，可手动改，再次获取即刷新）
+  const [authToken, setAuthToken] = useState('');
+  const [authInfo, setAuthInfo] = useState<AuthTokenInfo | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
+
   const query = useMemo(
     () => ({ project_id: currentProjectId, method, keyword, hide_noise: hideNoise, page, page_size: pageSize }),
     [currentProjectId, method, keyword, hideNoise, page, pageSize],
@@ -98,7 +120,13 @@ export function AssetsTab() {
 
   useEffect(() => { loadAssets(query).catch((e) => toast.error(String(e))); }, [loadAssets, query]);
 
-  useEffect(() => { setMeta(null); }, [selectedId]);
+  useEffect(() => {
+    setMeta(null);
+    setDebugMode(false);
+    setDebugResp(null);
+    setAuthToken('');
+    setAuthInfo(null);
+  }, [selectedId]);
 
   // 轮询后台自动整理进度：运行中每 2 秒刷新，结束后重载列表并提示
   useEffect(() => {
@@ -145,6 +173,116 @@ export function AssetsTab() {
       setBusy(false);
     }
   };
+
+  const enterDebug = () => {
+    if (!selected) return;
+    setDebugMethod(selected.method || 'GET');
+    setDebugUrl(`${(selected.base_url || '').replace(/\/$/, '')}${selected.path || ''}`);
+    setDebugHeaders(
+      Object.entries(selected.headers || {}).map(([name, value]) => ({ name, value: String(value) })),
+    );
+    setDebugBody(selected.body == null ? '' : pretty(selected.body));
+    setDebugTab('headers');
+    setRespTab('body');
+    setDebugResp(null);
+    setDebugMode(true);
+  };
+
+  const exitDebug = () => {
+    setDebugMode(false);
+    setDebugResp(null);
+    setDebugHeaders([]);
+    setDebugBody('');
+    setDebugUrl('');
+    setAuthToken('');
+    setAuthInfo(null);
+  };
+
+  const authHeaderValue = (info: AuthTokenInfo, token: string) => `${info.prefix}${token}`;
+
+  const applyAuthHeader = (info: AuthTokenInfo, token: string) => {
+    const name = info.header_name;
+    const value = authHeaderValue(info, token);
+    setDebugHeaders((prev) => {
+      const idx = prev.findIndex((h) => h.name.trim().toLowerCase() === name.toLowerCase());
+      return idx >= 0
+        ? prev.map((h, i) => (i === idx ? { ...h, value } : h))
+        : [...prev, { name, value }];
+    });
+  };
+
+  const fetchToken = async () => {
+    if (!selected) return;
+    setAuthLoading(true);
+    try {
+      const info = await fetchAuthToken(selected.id);
+      setAuthInfo(info);
+      setAuthToken(info.token);
+      applyAuthHeader(info, info.token);
+      toast.success(t('api.authFetched', { env: info.env_name || '-' }));
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const updateAuthToken = (v: string) => {
+    setAuthToken(v);
+    if (authInfo) applyAuthHeader(authInfo, v);
+  };
+
+  const sendDebug = async () => {
+    if (!selected) return;
+    if (!authToken.trim()) {
+      toast.error(t('api.authRequired'));
+      return;
+    }
+    if (!debugUrl.trim()) {
+      toast.error(t('api.urlRequired'));
+      return;
+    }
+    const headers: Record<string, string> = {};
+    debugHeaders.forEach((h) => {
+      if (h.name.trim()) headers[h.name.trim()] = h.value;
+    });
+    if (authInfo) {
+      headers[authInfo.header_name] = authHeaderValue(authInfo, authToken.trim());
+    }
+    let parsedBody: unknown = null;
+    if (debugBody.trim()) {
+      try {
+        parsedBody = JSON.parse(debugBody);
+      } catch {
+        parsedBody = debugBody;
+      }
+    }
+    setSending(true);
+    try {
+      const r = await debugAsset(selected.id, {
+        method: debugMethod,
+        url: debugUrl.trim(),
+        headers,
+        body: parsedBody,
+      });
+      setDebugResp(r);
+      setRespTab('body');
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const respBodyText = debugResp
+    ? (() => {
+        try {
+          return pretty(JSON.parse(debugResp.body));
+        } catch {
+          return debugResp.body;
+        }
+      })()
+    : '';
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: isMobile ? 'column' : 'row', overflow: 'hidden' }}>
@@ -276,7 +414,11 @@ export function AssetsTab() {
               <Loader2 size={11} className="animate-spin" /> {t('api.aiEnhancingDetail')}
             </span>
           )}
-          {selected && (
+          {selected && (debugMode ? (
+            <button style={btnStyle(sending)} disabled={sending} onClick={exitDebug}>
+              <X size={12} strokeWidth={1.5} /> {t('api.exitDebug')}
+            </button>
+          ) : (
             <>
               <button style={btnStyle(busy || enhancing)} disabled={busy || enhancing} onClick={async () => {
                 setEnhancing(true);
@@ -314,13 +456,172 @@ export function AssetsTab() {
               })}>
                 <Trash2 size={12} strokeWidth={1.5} /> {t('api.delete')}
               </button>
+              <button style={btnStyle(busy)} disabled={busy} onClick={enterDebug}>
+                <Play size={12} strokeWidth={1.5} /> {t('api.debug')}
+              </button>
             </>
-          )}
+          ))}
         </div>
 
         <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
           {!selected && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('api.selectAssetHint')}</div>}
-          {selected && (
+          {selected && debugMode && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('api.debugHint')}</div>
+
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <select
+                  style={{ ...inputStyle, width: 96, fontWeight: 700, color: methodColor(debugMethod) }}
+                  value={debugMethod}
+                  onChange={(e) => setDebugMethod(e.target.value)}
+                >
+                  {['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <input
+                  style={{ ...inputStyle, flex: 1, minWidth: 220, fontFamily: 'monospace' }}
+                  value={debugUrl}
+                  onChange={(e) => setDebugUrl(e.target.value)}
+                  placeholder="https://..."
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !sending) sendDebug(); }}
+                />
+                <button
+                  style={{
+                    background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 4,
+                    padding: '5px 16px', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4,
+                    cursor: sending ? 'not-allowed' : 'pointer', opacity: sending ? 0.6 : 1,
+                  }}
+                  disabled={sending}
+                  onClick={sendDebug}
+                >
+                  {sending
+                    ? <Loader2 size={12} className="animate-spin" />
+                    : <Send size={12} strokeWidth={1.5} />}
+                  {sending ? t('api.sending') : t('api.send')}
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)', minWidth: 32 }}>{t('api.auth')}</span>
+                <input
+                  style={{ ...inputStyle, flex: 1, minWidth: 220, fontFamily: 'monospace' }}
+                  value={authToken}
+                  onChange={(e) => updateAuthToken(e.target.value)}
+                  placeholder={t('api.authPlaceholder')}
+                />
+                <button style={btnStyle(authLoading)} disabled={authLoading} onClick={fetchToken}>
+                  {authLoading
+                    ? <Loader2 size={12} strokeWidth={1.5} className="animate-spin" />
+                    : <KeyRound size={12} strokeWidth={1.5} />}
+                  {authLoading ? t('api.authFetching') : t('api.authFetch')}
+                </button>
+              </div>
+              {authInfo && (
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  {t('api.authSource', { env: authInfo.env_name || '-', inject: authInfo.inject })}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 12, borderBottom: '1px solid var(--bg-card)' }}>
+                {(['headers', 'body'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setDebugTab(tab)}
+                    style={{
+                      background: 'none', border: 'none', padding: '4px 8px', fontSize: 12, cursor: 'pointer',
+                      borderBottom: `2px solid ${debugTab === tab ? 'var(--accent)' : 'transparent'}`,
+                      color: debugTab === tab ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    }}
+                  >
+                    {tab === 'headers'
+                      ? `${t('api.reqHeaders')} (${debugHeaders.filter((h) => h.name.trim()).length})`
+                      : t('api.reqBody')}
+                  </button>
+                ))}
+              </div>
+
+              {debugTab === 'headers' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {debugHeaders.map((h, i) => (
+                    <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 26px', gap: 6 }}>
+                      <input
+                        style={{ ...inputStyle, fontFamily: 'monospace' }}
+                        placeholder={t('api.headerName')}
+                        value={h.name}
+                        onChange={(e) => setDebugHeaders(debugHeaders.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
+                      />
+                      <input
+                        style={{ ...inputStyle, fontFamily: 'monospace' }}
+                        placeholder={t('api.headerValue')}
+                        value={h.value}
+                        onChange={(e) => setDebugHeaders(debugHeaders.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))}
+                      />
+                      <button
+                        style={{ ...btnStyle(), justifyContent: 'center', padding: 0 }}
+                        onClick={() => setDebugHeaders(debugHeaders.filter((_, j) => j !== i))}
+                      >
+                        <X size={12} strokeWidth={1.5} />
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    style={{ ...btnStyle(), alignSelf: 'flex-start' }}
+                    onClick={() => setDebugHeaders([...debugHeaders, { name: '', value: '' }])}
+                  >
+                    {t('api.addHeader')}
+                  </button>
+                </div>
+              ) : (
+                <textarea
+                  style={{ ...inputStyle, minHeight: 160, fontFamily: 'monospace', lineHeight: 1.6 }}
+                  value={debugBody}
+                  onChange={(e) => setDebugBody(e.target.value)}
+                  placeholder='{"key": "value"}'
+                />
+              )}
+
+              {debugResp && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', fontSize: 12 }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>{t('api.response')}</span>
+                    <span style={{
+                      background: statusColor(debugResp.status), color: '#fff',
+                      borderRadius: 4, padding: '1px 8px', fontWeight: 700,
+                    }}>{debugResp.status}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>{debugResp.content_type}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>
+                      {t('api.debugElapsed', { ms: debugResp.elapsed_ms, size: debugResp.size })}
+                    </span>
+                    {debugResp.truncated && <span style={{ color: '#d97706' }}>{t('api.debugTruncated')}</span>}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                    {debugResp.url}
+                  </div>
+                  <div style={{ display: 'flex', gap: 12, borderBottom: '1px solid var(--bg-card)' }}>
+                    {(['body', 'headers'] as const).map((tab) => (
+                      <button
+                        key={tab}
+                        onClick={() => setRespTab(tab)}
+                        style={{
+                          background: 'none', border: 'none', padding: '4px 8px', fontSize: 12, cursor: 'pointer',
+                          borderBottom: `2px solid ${respTab === tab ? 'var(--accent)' : 'transparent'}`,
+                          color: respTab === tab ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        }}
+                      >
+                        {tab === 'body' ? t('api.respBody') : t('api.respHeaders')}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={boxStyle}>
+                    {respTab === 'body' ? (respBodyText || t('api.respEmpty')) : pretty(debugResp.headers)}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {selected && !debugMode && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               {enhancing && (
                 <div style={{ border: '1px solid var(--accent)', borderRadius: 6, padding: 12, fontSize: 12, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 8 }}>

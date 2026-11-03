@@ -164,6 +164,92 @@ def update_asset(
     return AssetOut.from_asset(asset)
 
 
+_MAX_DEBUG_BODY = 512 * 1024
+
+
+class AssetDebugIn(BaseModel):
+    method: str = ""
+    url: str = ""
+    headers: dict[str, str] = {}
+    body: Any = None
+    timeout: float = 30.0
+
+
+@router.post("/{asset_id}/debug")
+def debug_asset(
+    asset_id: int, body: AssetDebugIn, db: AssetDatabase = Depends(get_asset_db)
+) -> dict:
+    """在线调试：按前端编辑后的 URL/headers/body 真实发送一次请求。
+
+    仅回显本次响应，不写库、不产生调试历史，退出后资产内容不变。
+    """
+    import json
+    import time
+    import warnings
+
+    import httpx
+
+    asset = db.get(asset_id)
+    if asset is None:
+        raise HTTPException(404, "接口资产不存在")
+
+    method = (body.method or asset.method or "GET").upper()
+    url = (body.url or "").strip() or (
+        f"{(asset.base_url or '').rstrip('/')}{asset.path or ''}"
+    )
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(400, "URL 必须以 http:// 或 https:// 开头")
+
+    headers = {
+        str(k).strip(): str(v)
+        for k, v in (body.headers or {}).items()
+        if str(k).strip()
+    }
+    payload = body.body
+    content: bytes | None = None
+    if payload is not None and payload != "":
+        if isinstance(payload, (dict, list)):
+            content = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            if not any(k.lower() == "content-type" for k in headers):
+                headers["Content-Type"] = "application/json"
+        else:
+            content = str(payload).encode("utf-8")
+
+    timeout = max(1.0, min(float(body.timeout or 30), 60.0))
+    started = time.perf_counter()
+    try:
+        with warnings.catch_warnings():
+            # 调试允许访问自签名 HTTPS 环境，忽略证书校验告警
+            warnings.simplefilter("ignore")
+            with httpx.Client(
+                timeout=timeout, follow_redirects=True, verify=False
+            ) as client:
+                resp = client.request(method, url, headers=headers, content=content)
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"请求失败：{str(exc)[:200]}") from exc
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+    raw = resp.content or b""
+    truncated = len(raw) > _MAX_DEBUG_BODY
+    if truncated:
+        raw = raw[:_MAX_DEBUG_BODY]
+    try:
+        text = raw.decode(resp.encoding or "utf-8", errors="replace")
+    except LookupError:
+        text = raw.decode("utf-8", errors="replace")
+
+    return {
+        "status": resp.status_code,
+        "headers": dict(resp.headers),
+        "body": text,
+        "content_type": resp.headers.get("content-type", ""),
+        "elapsed_ms": elapsed_ms,
+        "size": len(resp.content or b""),
+        "truncated": truncated,
+        "url": str(resp.url),
+    }
+
+
 class AssetBatchDeleteIn(BaseModel):
     ids: list[int]
 
@@ -198,6 +284,63 @@ def enhance_asset(asset_id: int, db: AssetDatabase = Depends(get_asset_db)) -> d
         raise HTTPException(502, f"模型整理失败：{exc}") from exc
     except Exception as exc:
         raise HTTPException(502, f"模型整理失败：{str(exc)[:200]}") from exc
+
+
+@router.post("/{asset_id}/auth-token")
+def fetch_asset_auth_token(
+    asset_id: int, db: AssetDatabase = Depends(get_asset_db)
+) -> dict:
+    """按项目级前置脚本获取一次登录 token（每次调用都重新登录，可用于刷新）。"""
+    asset = db.get(asset_id)
+    if asset is None:
+        raise HTTPException(404, "接口资产不存在")
+    if not asset.project_id:
+        raise HTTPException(400, "该接口资产未关联项目，无法获取项目级 token")
+
+    try:
+        from insight_aitest.modules.ui.backend.automation.deps import (
+            get_automation_db,
+        )
+        from insight_aitest.modules.ui.backend.automation.env_service import (
+            prepare_auth,
+        )
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(400, "UI 自动化模块不可用，无法获取 token") from exc
+
+    env_db = get_automation_db()
+    env = env_db.default_env(asset.project_id)
+    if env is None:
+        envs = env_db.list_envs(asset.project_id)
+        env = envs[0] if envs else None
+    if env is None:
+        raise HTTPException(400, "该项目尚未配置 UI 自动化环境，无法获取 token")
+
+    auth = prepare_auth(env)
+    if not auth.ok:
+        raise HTTPException(502, f"获取 token 失败：{auth.message}")
+    if not auth.token:
+        raise HTTPException(400, "环境未配置登录信息或前置脚本未返回 token")
+
+    inject = (getattr(env, "token_inject", "") or "").lower()
+    name = (getattr(env, "token_name", "") or "token").strip()
+    # 接口调试统一组装为 Authorization: Bearer <token>
+    # 环境若显式配置了前缀则沿用（自动补一个空格），否则默认 Bearer
+    raw_prefix = (getattr(env, "token_prefix", "") or "").strip()
+    prefix = f"{raw_prefix} " if raw_prefix else "Bearer "
+    header_name = "Authorization"
+    header_value = f"{prefix}{auth.token}"
+
+    return {
+        "token": auth.token,
+        "inject": "header",
+        "name": name,
+        "prefix": prefix,
+        "header_name": header_name,
+        "header_value": header_value,
+        "env_id": getattr(env, "id", None),
+        "env_name": getattr(env, "name", ""),
+        "env_inject": inject,
+    }
 
 
 @router.post("/{asset_id}/to-case")

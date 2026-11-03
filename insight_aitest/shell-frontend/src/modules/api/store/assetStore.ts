@@ -44,6 +44,38 @@ export interface JsonPathSample {
   sample: unknown
 }
 
+/** 在线调试的单次响应（不落库、不保留历史）。 */
+export interface DebugResult {
+  status: number
+  headers: Record<string, string>
+  body: string
+  content_type: string
+  elapsed_ms: number
+  size: number
+  truncated: boolean
+  url: string
+}
+
+export interface DebugPayload {
+  method: string
+  url: string
+  headers: Record<string, string>
+  body: unknown
+  timeout?: number
+}
+
+/** 项目级前置脚本获取到的登录 token（不落库）。 */
+export interface AuthTokenInfo {
+  token: string
+  inject: string
+  name: string
+  prefix: string
+  header_name: string
+  header_value: string
+  env_id: number | null
+  env_name: string
+}
+
 export interface EnhanceProgress {
   status: 'idle' | 'running' | 'done'
   total: number
@@ -100,6 +132,8 @@ interface AssetState {
   updateAsset: (id: number, data: Partial<Pick<ApiAsset, 'title' | 'tags' | 'is_noise' | 'path_template'>> & { ai_meta?: AiMeta }) => Promise<void>
   deleteAsset: (id: number) => Promise<void>
   enhanceAsset: (id: number) => Promise<AiMeta>
+  debugAsset: (id: number, payload: DebugPayload) => Promise<DebugResult>
+  fetchAuthToken: (id: number) => Promise<AuthTokenInfo>
   toCase: (id: number) => Promise<number>
 }
 
@@ -195,6 +229,20 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   enhanceAsset: async (id) => {
     const data = await _jsonOrThrow(await fetch(`${BASE}/${id}/enhance`, { method: 'POST' }))
     return data as AiMeta
+  },
+  debugAsset: async (id, payload) => {
+    const data = await _jsonOrThrow(
+      await fetch(`${BASE}/${id}/debug`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }),
+    )
+    return data as DebugResult
+  },
+  fetchAuthToken: async (id) => {
+    const data = await _jsonOrThrow(await fetch(`${BASE}/${id}/auth-token`, { method: 'POST' }))
+    return data as AuthTokenInfo
   },
   toCase: async (id) => {
     const data = await _jsonOrThrow(await fetch(`${BASE}/${id}/to-case`, { method: 'POST' }))

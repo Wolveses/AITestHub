@@ -43,8 +43,8 @@ export const childrenMap: Record<string, Record<string, ComponentType>> = {
     agent: lazy(() => import('./modules/ai').then((m) => ({ default: m.AgentWorkbench }))),
   },
   api: {
-    cases: lazy(() => import('./modules/api').then((m) => ({ default: m.CasesTab }))),
     assets: lazy(() => import('./modules/api').then((m) => ({ default: m.AssetsTab }))),
+    cases: lazy(() => import('./modules/api').then((m) => ({ default: m.CasesTab }))),
     suites: lazy(() => import('./modules/api').then((m) => ({ default: m.SuitesTab }))),
     envs: lazy(() => import('./modules/api').then((m) => ({ default: m.EnvironmentPanel }))),
     dashboard: lazy(() => import('./modules/api').then((m) => ({ default: m.Dashboard }))),

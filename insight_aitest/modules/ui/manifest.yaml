@@ -5,7 +5,7 @@ name:
 version: 2.0.0
 category: testing
 icon: MonitorSmartphone
-order: 5
+order: 4
 description:
   zh: 用例快照 → AI 生成 Playwright 脚本 → 固化后本地执行与自动修复
   en: Case snapshots → AI-generated Playwright scripts → local runs and auto repair
