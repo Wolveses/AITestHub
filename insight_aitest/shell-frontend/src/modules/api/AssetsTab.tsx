@@ -113,6 +113,8 @@ export function AssetsTab() {
   const [authInfo, setAuthInfo] = useState<AuthTokenInfo | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
 
+  // 组合用例：多选资产串联成一条流程，入口已迁移到「用例执行 → 新建用例」
+
   const query = useMemo(
     () => ({ project_id: currentProjectId, method, keyword, hide_noise: hideNoise, page, page_size: pageSize }),
     [currentProjectId, method, keyword, hideNoise, page, pageSize],
@@ -710,6 +712,7 @@ export function AssetsTab() {
           )}
         </div>
       </div>
+
     </div>
   );
 }

@@ -76,6 +76,22 @@ export interface AuthTokenInfo {
   env_name: string
 }
 
+export interface FlowCaseResult {
+  ok: boolean
+  case_id: number
+  title: string
+  ai_used: boolean
+  step_count: number
+  dependencies: { asset_id: number; extract: Record<string, string> }[]
+}
+
+export interface ComposeStepsResult {
+  base_url: string
+  steps: unknown[]
+  ai_used: boolean
+  dependencies: { asset_id: number; extract: Record<string, string> }[]
+}
+
 export interface EnhanceProgress {
   status: 'idle' | 'running' | 'done'
   total: number
@@ -135,6 +151,9 @@ interface AssetState {
   debugAsset: (id: number, payload: DebugPayload) => Promise<DebugResult>
   fetchAuthToken: (id: number) => Promise<AuthTokenInfo>
   toCase: (id: number) => Promise<number>
+  importCase: (ids: number[], title: string, aiOrder: boolean) => Promise<FlowCaseResult>
+  composeSteps: (ids: number[], title: string, aiOrder: boolean) => Promise<ComposeStepsResult>
+  fetchAssets: (projectId: number | null) => Promise<ApiAsset[]>
 }
 
 export const useAssetStore = create<AssetState>((set, get) => ({
@@ -247,5 +266,31 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   toCase: async (id) => {
     const data = await _jsonOrThrow(await fetch(`${BASE}/${id}/to-case`, { method: 'POST' }))
     return data.case_id as number
+  },
+  importCase: async (ids, title, aiOrder) => {
+    const data = await _jsonOrThrow(
+      await fetch(`${BASE}/to-case`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asset_ids: ids, title, ai_order: aiOrder }),
+      }),
+    )
+    return data as FlowCaseResult
+  },
+  composeSteps: async (ids, title, aiOrder) => {
+    const data = await _jsonOrThrow(
+      await fetch(`${BASE}/compose`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asset_ids: ids, title, ai_order: aiOrder }),
+      }),
+    )
+    return data as ComposeStepsResult
+  },
+  fetchAssets: async (projectId) => {
+    const params = new URLSearchParams({ page: '1', page_size: '200', hide_noise: 'true' })
+    if (projectId != null) params.set('project_id', String(projectId))
+    const data = await _jsonOrThrow(await fetch(`${BASE}?${params.toString()}`))
+    return (data.items ?? []) as ApiAsset[]
   },
 }))

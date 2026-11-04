@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { ArrowUp, ArrowDown } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 /** 单条 API 测试步骤 */
 export interface ApiStep {
+  name?: string;         // 步骤名称（可重命名）
   method: string;        // GET/POST/PUT/PATCH/DELETE
   path: string;          // /api/login
   headers?: Record<string, string>;
@@ -26,6 +27,8 @@ export interface ApiContent {
 interface ApiStepsEditorProps {
   content: ApiContent;
   onChange: (content: ApiContent) => void;
+  /** 步骤区右侧附加操作（如「从接口资产导入」） */
+  extraActions?: ReactNode;
 }
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
@@ -96,7 +99,7 @@ function JsonField({ value, onChange, placeholder }: {
   );
 }
 
-export function ApiStepsEditor({ content, onChange }: ApiStepsEditorProps) {
+export function ApiStepsEditor({ content, onChange, extraActions }: ApiStepsEditorProps) {
   const { t } = useTranslation();
   const steps = content.steps || [];
   const update = (patch: Partial<ApiContent>) => onChange({ ...content, ...patch });
@@ -126,9 +129,12 @@ export function ApiStepsEditor({ content, onChange }: ApiStepsEditorProps) {
 
       <div style={{ ...sectionLabelStyle, marginTop: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span>{t('testcase.apiStepsLabel')}</span>
-        <button onClick={addStep} style={{ ...miniBtn, border: '1px dashed var(--bg-elevated)', padding: '4px 10px' }}>
-          + {t('testcase.addStep')}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {extraActions}
+          <button onClick={addStep} style={{ ...miniBtn, border: '1px dashed var(--bg-elevated)', padding: '4px 10px' }}>
+            + {t('testcase.addStep')}
+          </button>
+        </div>
       </div>
 
       {steps.length === 0 && (
@@ -170,8 +176,25 @@ function StepCard({ index, total, step, onChange, onDelete, onMove }: {
   const delAssertion = (ai: number) =>
     onChange({ assertions: assertions.filter((_, idx) => idx !== ai) });
 
+  const setExtract = (next: Record<string, string>) => onChange({ extract: next });
+  const renameExtract = (oldKey: string, newKey: string) => {
+    const next: Record<string, string> = {};
+    Object.entries(extract).forEach(([k, v]) => {
+      next[k === oldKey ? newKey : k] = v;
+    });
+    setExtract(next);
+  };
+
   return (
     <div style={cardStyle}>
+      {/* 步骤名称：可重命名，占位符 {{变量}} 可在后续步骤引用 */}
+      <input
+        style={{ ...inputStyle, width: '100%', marginBottom: 6, fontWeight: 600 }}
+        placeholder={t('testcase.stepNamePlaceholder')}
+        value={step.name || ''}
+        onChange={(e) => onChange({ name: e.target.value })}
+      />
+
       {/* 头部：序号 + method + path + 操作 */}
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 10 }}>
         <span style={{ color: 'var(--accent)', width: 20, fontSize: 13, flexShrink: 0 }}>{index + 1}</span>
@@ -241,17 +264,41 @@ function StepCard({ index, total, step, onChange, onDelete, onMove }: {
         </div>
       ))}
 
-      {/* Extract (只读展示) */}
-      <div style={{ ...subLabelStyle, marginTop: 10 }}>{t('testcase.extractVariablesLabel')}</div>
+      {/* Extract（可编辑：变量名 ↔ jsonpath，供后续步骤 {{变量}} 引用） */}
+      <div style={{ ...subLabelStyle, marginTop: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span>{t('testcase.extractVariablesLabel')}</span>
+        <button
+          onClick={() => setExtract({ ...extract, [`var${extractEntries.length + 1}`]: '$.data.id' })}
+          style={{ ...miniBtn, border: '1px dashed var(--bg-elevated)', padding: '2px 8px' }}
+        >
+          {t('testcase.addExtract')}
+        </button>
+      </div>
       {extractEntries.length === 0 ? (
         <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 0' }}>{t('testcase.noExtract')}</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {extractEntries.map(([k, v]) => (
-            <div key={k} style={extractRowStyle}>
-              <code style={{ color: 'var(--chart-2)' }}>{k}</code>
+          {extractEntries.map(([k, v], idx) => (
+            <div key={idx} style={extractRowStyle}>
+              <input
+                style={{ ...inputStyle, width: 150, padding: '3px 6px', fontSize: 12, fontFamily: 'monospace' }}
+                value={k}
+                placeholder={t('testcase.extractVarName')}
+                onChange={(e) => renameExtract(k, e.target.value)}
+              />
               <span style={{ color: 'var(--text-muted)' }}>←</span>
-              <code style={{ color: 'var(--text-secondary)' }}>{v}</code>
+              <input
+                style={{ ...inputStyle, flex: 1, padding: '3px 6px', fontSize: 12, fontFamily: 'monospace' }}
+                value={v}
+                placeholder="$.data.id"
+                onChange={(e) => setExtract({ ...extract, [k]: e.target.value })}
+              />
+              <button
+                onClick={() => { const next = { ...extract }; delete next[k]; setExtract(next); }}
+                style={{ ...miniBtn, color: 'var(--error)' }}
+              >
+                ×
+              </button>
             </div>
           ))}
         </div>

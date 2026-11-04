@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from logzero import logger
 from pydantic import BaseModel
 
 from insight_aitest.modules.api.backend.deps import get_asset_db
@@ -259,6 +260,117 @@ def batch_delete_assets(
     body: AssetBatchDeleteIn, db: AssetDatabase = Depends(get_asset_db)
 ) -> dict:
     return {"deleted": db.delete_many(body.ids)}
+
+
+class FlowCaseIn(BaseModel):
+    asset_ids: list[int]
+    title: str = ""
+    ai_order: bool = True
+    project_id: int | None = None
+
+
+def _compose_from_assets(body: FlowCaseIn, db: AssetDatabase) -> dict:
+    """校验所选资产并编排为流程内容（不落库），供「新建用例」与「编辑用例」复用。"""
+    from insight_aitest.modules.api.backend.services.flow_compose import compose_case
+
+    assets = db.get_many(body.asset_ids)
+    if not assets:
+        raise HTTPException(404, "所选接口资产不存在")
+    if len(assets) != len(set(body.asset_ids)):
+        raise HTTPException(400, "部分接口资产不存在，请刷新后重试")
+
+    origins = {
+        (asset.base_url or "").rstrip("/") for asset in assets if asset.base_url
+    }
+    if len(origins) > 1:
+        raise HTTPException(400, "所选接口的 base_url 不一致，无法组合为同一用例")
+
+    project_ids = {asset.project_id for asset in assets}
+    if len(project_ids) > 1:
+        raise HTTPException(400, "所选接口不属于同一项目，无法组合为同一用例")
+    project_id = body.project_id if body.project_id is not None else next(iter(project_ids), None)
+
+    llm = None
+    if body.ai_order:
+        try:
+            from insight_aitest.modules.ai.backend.deps import get_llm
+
+            llm = get_llm()
+        except Exception as exc:  # pragma: no cover - AI 模块禁用时走规则排序
+            logger.warning(f"接口流程编排无法加载模型，回退规则排序: {exc}")
+
+    try:
+        composed = compose_case(assets, body.title, llm)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - 编排异常兜底
+        logger.warning(f"接口流程编排失败，改为规则排序: {exc}")
+        composed = compose_case(assets, body.title, None)
+
+    return {"composed": composed, "project_id": project_id}
+
+
+@router.post("/compose")
+def compose_flow_steps(body: FlowCaseIn, db: AssetDatabase = Depends(get_asset_db)) -> dict:
+    """只编排步骤不落库：用例编辑器「从接口资产导入」时追加步骤使用。"""
+    result = _compose_from_assets(body, db)
+    composed = result["composed"]
+    return {
+        "base_url": composed["content"]["base_url"],
+        "steps": composed["content"]["steps"],
+        "ai_used": composed["ai_used"],
+        "dependencies": composed["dependencies"],
+    }
+
+
+@router.post("/to-case")
+def assets_to_flow_case(
+    body: FlowCaseIn, db: AssetDatabase = Depends(get_asset_db)
+) -> dict:
+    """把多个接口资产组合成一条可串行执行的 API 流程用例。
+
+    - 资产是唯一来源，按传入顺序作为初始顺序；
+    - ai_order=true 时调用模型按接口语义与用例名称编排，失败自动回退规则排序；
+    - 依赖参数从抓包响应体中提取，后续步骤自动替换为 {{变量}}；
+    - 每一步都会生成状态码/结构断言，查询接口可作为流程断言步骤。
+    """
+    result = _compose_from_assets(body, db)
+    composed = result["composed"]
+    project_id = result["project_id"]
+
+    try:
+        from insight_aitest.modules.testcase.backend.deps import get_tc_db
+        from insight_aitest.modules.testcase.backend.persistence.models import (
+            CasePriority,
+            CaseStatus,
+            CaseType,
+            TestCase,
+            TestType,
+        )
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(400, "用例模块不可用，无法创建用例") from exc
+
+    case = TestCase(
+        title=composed["title"],
+        type=CaseType.API,
+        description=composed["description"],
+        priority=CasePriority.P2,
+        status=CaseStatus.DRAFT,
+        test_design=TestType.POSITIVE,
+        content=composed["content"],
+        tags=["asset-flow"] + [f"asset:{i}" for i in composed["content"]["asset_ids"]],
+        source="asset-flow",
+        project_id=project_id,
+    )
+    case_id = get_tc_db().create_case(case)
+    return {
+        "ok": True,
+        "case_id": case_id,
+        "title": composed["title"],
+        "ai_used": composed["ai_used"],
+        "step_count": len(composed["content"]["steps"]),
+        "dependencies": composed["dependencies"],
+    }
 
 
 @router.delete("/{asset_id}")

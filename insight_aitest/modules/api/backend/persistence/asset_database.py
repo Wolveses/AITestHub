@@ -130,6 +130,17 @@ class AssetDatabase:
             s.refresh(asset)
             return asset
 
+    def get_many(self, ids: list[int]) -> list[ApiAsset]:
+        """按传入顺序返回资产（缺失的 id 自动忽略）。"""
+        if not ids:
+            return []
+        unique = list(dict.fromkeys(ids))
+        with session_scope(self.db_path) as s:
+            rows = list(s.scalars(select(ApiAsset).where(ApiAsset.id.in_(unique)))
+            )
+            by_id = {row.id: row for row in rows}
+            return [by_id[i] for i in unique if i in by_id]
+
     def update(self, asset_id: int, **fields) -> ApiAsset | None:
         allowed = ("title", "tags", "is_noise", "path_template", "ai_meta", "headers", "body")
         with session_scope(self.db_path) as s:
