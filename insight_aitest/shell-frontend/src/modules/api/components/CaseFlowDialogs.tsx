@@ -1,12 +1,35 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Loader2, Search } from 'lucide-react';
+import { Loader2, Search, X } from 'lucide-react';
 import { Modal } from '../../../components/ui/modal';
 import { useProjectStore } from '../../../shared/store/projectStore';
 import { useAssetStore, type ApiAsset } from '../store/assetStore';
 import { useRunStore, type ApiCase } from '../store/runStore';
 import { ApiStepsEditor, type ApiContent, type ApiStep } from '../../testcase/components/ApiStepsEditor';
+
+const METHODS = ['', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+
+const SYNONYM_GROUPS: string[][] = [
+  ['新增', '创建', '添加', '新建'],
+  ['修改', '更新', '编辑'],
+  ['删除', '移除'],
+  ['查询', '获取', '列表', '详情'],
+];
+
+function expandTokenSynonyms(token: string): string[] {
+  const result = new Set<string>([token]);
+  for (const group of SYNONYM_GROUPS) {
+    for (const word of group) {
+      if (token.includes(word)) {
+        for (const alt of group) {
+          result.add(token.replace(word, alt));
+        }
+      }
+    }
+  }
+  return Array.from(result);
+}
 
 const inputStyle: CSSProperties = {
   width: '100%',
@@ -14,7 +37,10 @@ const inputStyle: CSSProperties = {
   color: 'var(--text-primary)',
   border: '1px solid var(--bg-elevated)',
   borderRadius: 6,
-  padding: '7px 10px',
+  paddingTop: 7,
+  paddingBottom: 7,
+  paddingLeft: 10,
+  paddingRight: 10,
   fontSize: 13,
   boxSizing: 'border-box',
 };
@@ -59,24 +85,83 @@ function AssetPicker({
 }) {
   const { t } = useTranslation();
   const [keyword, setKeyword] = useState('');
+  const [method, setMethod] = useState('');
+
   const filtered = useMemo(() => {
-    const kw = keyword.trim().toLowerCase();
-    if (!kw) return assets;
-    return assets.filter((a) =>
-      `${a.title} ${a.path} ${a.method} ${a.path_template}`.toLowerCase().includes(kw),
-    );
-  }, [assets, keyword]);
+    const m = method.trim().toUpperCase();
+    const tokens = keyword.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return assets.filter((a) => {
+      if (m && (a.method || '').toUpperCase() !== m) return false;
+      if (tokens.length === 0) return true;
+      const haystack = [
+        a.title,
+        a.path,
+        a.method,
+        a.path_template,
+        a.base_url,
+        a.fingerprint,
+        a.ai_meta?.title,
+        a.ai_meta?.summary,
+        a.ai_meta?.path_template,
+        ...(a.tags || []),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return tokens.every((tok) =>
+        expandTokenSynonyms(tok).some((alt) => haystack.includes(alt)),
+      );
+    });
+  }, [assets, keyword, method]);
 
   return (
     <div>
-      <div style={{ position: 'relative', marginBottom: 8 }}>
-        <Search size={12} strokeWidth={1.5} style={{ position: 'absolute', left: 9, top: 9, color: 'var(--text-muted)' }} />
-        <input
-          style={{ ...inputStyle, paddingLeft: 26 }}
-          placeholder={t('api.assetSearch')}
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
-        />
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+        <select
+          style={{ ...inputStyle, width: 108, flexShrink: 0, cursor: 'pointer' }}
+          value={method}
+          onChange={(e) => setMethod(e.target.value)}
+        >
+          {METHODS.map((m) => (
+            <option key={m} value={m}>
+              {m || t('api.allMethods')}
+            </option>
+          ))}
+        </select>
+        <div style={{ position: 'relative', flex: 1 }}>
+          <Search
+            size={13}
+            strokeWidth={1.5}
+            style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }}
+          />
+          <input
+            style={{ ...inputStyle, paddingLeft: 28, paddingRight: keyword ? 28 : 10 }}
+            placeholder={t('api.assetSearch')}
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+          />
+          {keyword && (
+            <button
+              type="button"
+              onClick={() => setKeyword('')}
+              style={{
+                position: 'absolute',
+                right: 6,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                padding: 2,
+                display: 'inline-flex',
+                alignItems: 'center',
+              }}
+            >
+              <X size={13} strokeWidth={1.5} />
+            </button>
+          )}
+        </div>
       </div>
       <div style={{
         maxHeight: 240, overflow: 'auto', border: '1px solid var(--bg-elevated)', borderRadius: 6, background: 'var(--bg-card)',
@@ -87,9 +172,12 @@ function AssetPicker({
         )}
         {filtered.map((a) => {
           const checked = selected.includes(a.id);
+          const displayTitle = a.title || a.ai_meta?.title || a.path_template || a.path;
+          const displayPath = a.path_template || a.path;
           return (
             <label
               key={a.id}
+              title={`${a.method} ${displayPath}${a.ai_meta?.summary ? `\n${a.ai_meta.summary}` : ''}`}
               style={{
                 display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', cursor: 'pointer',
                 borderBottom: '1px solid var(--bg-base)',
@@ -97,14 +185,14 @@ function AssetPicker({
               }}
             >
               <input type="checkbox" checked={checked} onChange={() => onToggle(a.id)} style={{ flexShrink: 0 }} />
-              <span style={{ color: methodColor(a.method), fontSize: 11, fontWeight: 600, width: 56, flexShrink: 0 }}>
+              <span style={{ color: methodColor(a.method), fontSize: 11, fontWeight: 600, width: 52, flexShrink: 0 }}>
                 {a.method}
               </span>
-              <span style={{ fontSize: 12, color: 'var(--text-primary)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {a.title || a.path_template || a.path}
+              <span style={{ fontSize: 12, color: 'var(--text-primary)', flex: 1, minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {displayTitle}
               </span>
-              <span style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {a.path_template || a.path}
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'monospace' }}>
+                {displayPath}
               </span>
             </label>
           );
@@ -178,8 +266,8 @@ export function NewCaseDialog({
   return (
     <Modal open={open} onOpenChange={(o) => { if (!o) onClose(); }} title={t('api.newCase')} width="min(640px, 92vw)">
       <div style={{ padding: '0 20px 20px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('api.caseName')}</div>
         <input
-          autoFocus
           style={inputStyle}
           placeholder={t('api.caseTitlePlaceholder')}
           value={title}
@@ -229,12 +317,14 @@ export function CaseEditorDialog({
   const [saving, setSaving] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [assets, setAssets] = useState<ApiAsset[]>([]);
+  const [loadingAssets, setLoadingAssets] = useState(false);
   const [picked, setPicked] = useState<number[]>([]);
   const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     if (!open || !caseItem) return;
     setTitle(caseItem.title || '');
+    setPickerOpen(false);
     setContent({
       base_url: caseItem.content?.base_url || '',
       steps: (caseItem.content?.steps as ApiStep[]) || [],
@@ -245,7 +335,11 @@ export function CaseEditorDialog({
     setPicked([]);
     setPickerOpen(true);
     setImporting(false);
-    fetchAssets(currentProjectId).then(setAssets).catch((e) => toast.error(String(e)));
+    setLoadingAssets(true);
+    fetchAssets(currentProjectId)
+      .then(setAssets)
+      .catch((e) => toast.error(String(e)))
+      .finally(() => setLoadingAssets(false));
   };
 
   const importSelected = async () => {
@@ -293,7 +387,7 @@ export function CaseEditorDialog({
 
   return (
     <Modal open={open} onOpenChange={(o) => { if (!o) onClose(); }} title={t('api.editCase')} width="min(760px, 94vw)">
-      <div style={{ padding: '0 20px 20px', maxHeight: '72vh', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ padding: '0 20px 20px', maxHeight: pickerOpen ? '36vh' : '72vh', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('api.caseName')}</div>
         <input style={inputStyle} value={title} onChange={(e) => setTitle(e.target.value)} />
         <ApiStepsEditor
@@ -325,7 +419,7 @@ export function CaseEditorDialog({
           <AssetPicker
             assets={assets}
             selected={picked}
-            loading={false}
+            loading={loadingAssets}
             onToggle={(id) => setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
           />
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
