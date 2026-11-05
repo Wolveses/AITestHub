@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""环境 CRUD + 克隆/导入导出 API（spec E.1 §4 + 环境管理增强）。"""
+"""环境 CRUD + 克隆/导入导出 API（支持 UI 自动化环境打通与双向同步）。"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from insight_aitest.modules.api.backend.deps import get_env_db
@@ -15,6 +15,7 @@ router = APIRouter(prefix="/environments", tags=["api"])
 class EnvCreate(BaseModel):
     name: str
     base_url: str
+    project_id: int | None = None
     variables: dict = {}
     variables_meta: dict = {}
     is_default: bool = False
@@ -23,6 +24,7 @@ class EnvCreate(BaseModel):
 class EnvUpdate(BaseModel):
     name: str | None = None
     base_url: str | None = None
+    project_id: int | None = None
     variables: dict | None = None
     variables_meta: dict | None = None
     is_default: bool | None = None
@@ -32,21 +34,55 @@ class CloneRequest(BaseModel):
     new_name: str
 
 
-def _env_out(env) -> dict:
+def _ui_env_to_out(env) -> dict:
+    created = getattr(env, "created_at", None)
+    updated = getattr(env, "updated_at", None)
     return {
         "id": env.id,
+        "project_id": getattr(env, "project_id", None),
         "name": env.name,
         "base_url": env.base_url,
-        "variables": env.variables,
+        "variables": {},
+        "variables_meta": {},
+        "is_default": bool(env.is_default),
+        "created_at": created.isoformat() if created else "",
+        "updated_at": updated.isoformat() if updated else "",
+    }
+
+
+def _env_out(env) -> dict:
+    created = getattr(env, "created_at", None)
+    updated = getattr(env, "updated_at", None)
+    return {
+        "id": env.id,
+        "project_id": getattr(env, "project_id", None),
+        "name": env.name,
+        "base_url": env.base_url,
+        "variables": getattr(env, "variables", None) or {},
         "variables_meta": getattr(env, "variables_meta", None) or {},
-        "is_default": env.is_default,
-        "created_at": env.created_at.isoformat(),
-        "updated_at": env.updated_at.isoformat(),
+        "is_default": bool(env.is_default),
+        "created_at": created.isoformat() if hasattr(created, "isoformat") else "",
+        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else "",
     }
 
 
 @router.post("", status_code=201)
 def create_env(body: EnvCreate, db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
+    if body.project_id:
+        try:
+            from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+
+            ui_db = get_automation_db()
+            env_id = ui_db.create_env(
+                project_id=body.project_id,
+                name=body.name.strip() or body.base_url.strip(),
+                base_url=body.base_url.strip(),
+                is_default=1 if body.is_default else 0,
+            )
+            return _ui_env_to_out(ui_db.get_env(env_id))
+        except Exception:
+            pass
+
     if db.get_by_name(body.name):
         raise HTTPException(409, f"环境名 '{body.name}' 已存在")
     eid = db.create(
@@ -60,7 +96,19 @@ def create_env(body: EnvCreate, db: EnvironmentDatabase = Depends(get_env_db)) -
 
 
 @router.get("")
-def list_envs(db: EnvironmentDatabase = Depends(get_env_db)) -> list[dict]:
+def list_envs(
+    project_id: int | None = Query(None),
+    db: EnvironmentDatabase = Depends(get_env_db),
+) -> list[dict]:
+    if project_id:
+        try:
+            from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+
+            ui_envs = get_automation_db().list_envs(project_id)
+            if ui_envs:
+                return [_ui_env_to_out(e) for e in ui_envs]
+        except Exception:
+            pass
     return [_env_out(e) for e in db.list()]
 
 
@@ -68,11 +116,14 @@ def list_envs(db: EnvironmentDatabase = Depends(get_env_db)) -> list[dict]:
 
 
 @router.get("/export")
-def export_envs(db: EnvironmentDatabase = Depends(get_env_db)) -> Response:
-    """导出所有环境为 JSON。"""
+def export_envs(
+    project_id: int | None = Query(None),
+    db: EnvironmentDatabase = Depends(get_env_db),
+) -> Response:
+    """导出环境为 JSON。"""
     import json
 
-    envs = [_env_out(e) for e in db.list()]
+    envs = list_envs(project_id=project_id, db=db)
     content = json.dumps(envs, ensure_ascii=False, indent=2, default=str)
     return Response(
         content=content,
@@ -108,23 +159,60 @@ def import_envs(body: list[dict], db: EnvironmentDatabase = Depends(get_env_db))
 
 
 @router.get("/{env_id}")
-def get_env(env_id: int, db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
+def get_env(
+    env_id: int,
+    project_id: int | None = Query(None),
+    db: EnvironmentDatabase = Depends(get_env_db),
+) -> dict:
+    # 优先查 API 原生环境库
     env = db.get(env_id)
-    if not env:
-        raise HTTPException(404, "环境不存在")
-    return _env_out(env)
+    if env:
+        return _env_out(env)
+
+    # 次选 UI 自动化环境
+    try:
+        from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+
+        ui_env = get_automation_db().get_env(env_id)
+        if ui_env:
+            return _ui_env_to_out(ui_env)
+    except Exception:
+        pass
+
+    raise HTTPException(404, "环境不存在")
 
 
 @router.put("/{env_id}")
 def update_env(
     env_id: int, body: EnvUpdate, db: EnvironmentDatabase = Depends(get_env_db)
 ) -> dict:
-    if not db.get(env_id):
-        raise HTTPException(404, "环境不存在")
-    if body.name and db.get_by_name(body.name) and db.get_by_name(body.name).id != env_id:
-        raise HTTPException(409, f"环境名 '{body.name}' 已存在")
-    db.update(env_id, **body.model_dump(exclude_none=True))
-    return _env_out(db.get(env_id))
+    # 1. 如果存在于 API 原生环境库中，更新之
+    if db.get(env_id):
+        if body.name and db.get_by_name(body.name) and db.get_by_name(body.name).id != env_id:
+            raise HTTPException(409, f"环境名 '{body.name}' 已存在")
+        db.update(env_id, **body.model_dump(exclude_none=True))
+        return _env_out(db.get(env_id))
+
+    # 2. 否则更新 UI 自动化环境，支持双向同步启用状态
+    try:
+        from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+
+        ui_db = get_automation_db()
+        ui_env = ui_db.get_env(env_id)
+        if ui_env:
+            patch = {}
+            if body.name is not None:
+                patch["name"] = body.name
+            if body.base_url is not None:
+                patch["base_url"] = body.base_url
+            if body.is_default is not None:
+                patch["is_default"] = 1 if body.is_default else 0
+            ui_db.update_env(env_id, **patch)
+            return _ui_env_to_out(ui_db.get_env(env_id))
+    except Exception:
+        pass
+
+    raise HTTPException(404, "环境不存在")
 
 
 @router.post("/{env_id}/clone", status_code=201)
@@ -132,17 +220,55 @@ def clone_env(
     env_id: int, body: CloneRequest, db: EnvironmentDatabase = Depends(get_env_db)
 ) -> dict:
     """克隆环境。"""
-    if db.get_by_name(body.new_name):
-        raise HTTPException(409, f"环境名 '{body.new_name}' 已存在")
+    if db.get(env_id):
+        if db.get_by_name(body.new_name):
+            raise HTTPException(409, f"环境名 '{body.new_name}' 已存在")
+        try:
+            new_id = db.clone(env_id, body.new_name)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return _env_out(db.get(new_id))
+
     try:
-        new_id = db.clone(env_id, body.new_name)
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return _env_out(db.get(new_id))
+        from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+
+        ui_db = get_automation_db()
+        ui_env = ui_db.get_env(env_id)
+        if ui_env:
+            new_id = ui_db.create_env(
+                project_id=ui_env.project_id,
+                name=body.new_name.strip(),
+                base_url=ui_env.base_url,
+                username=ui_env.username,
+                password_ref=ui_env.password_ref,
+                auth_script=ui_env.auth_script,
+                token_inject=ui_env.token_inject,
+                token_name=ui_env.token_name,
+                token_prefix=ui_env.token_prefix,
+                is_default=0,
+            )
+            return _ui_env_to_out(ui_db.get_env(new_id))
+    except Exception:
+        pass
+
+    raise HTTPException(404, "环境不存在")
 
 
 @router.delete("/{env_id}")
 def delete_env(env_id: int, db: EnvironmentDatabase = Depends(get_env_db)) -> dict:
-    if not db.delete(env_id):
-        raise HTTPException(404, "环境不存在")
-    return {"deleted": env_id}
+    if db.get(env_id):
+        db.delete(env_id)
+        return {"deleted": env_id}
+
+    try:
+        from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+
+        ui_db = get_automation_db()
+        ui_env = ui_db.get_env(env_id)
+        if ui_env:
+            ui_db.delete_env(env_id)
+            return {"deleted": env_id}
+    except Exception:
+        pass
+
+    raise HTTPException(404, "环境不存在")

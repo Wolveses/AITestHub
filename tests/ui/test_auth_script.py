@@ -164,3 +164,101 @@ def get_token(base_url, username, password):
     assert res.token == "proj_token_888"
     assert res.storage_state_path
 
+
+def test_test_custom_env_with_project_id(tmp_path, monkeypatch):
+    """验证新建测试环境连通性测试时，携带 project_id 能够自动关联并调用项目统一脚本。"""
+    import asyncio
+    from insight_aitest.modules.ui.backend.automation.env_service import set_project_auth_script
+    from insight_aitest.modules.ui.backend.automation.routes.envs import EnvTestPayload, test_custom_env
+
+    monkeypatch.setattr(
+        "insight_aitest.modules.ui.backend.automation.paths.project_auth_script_path",
+        lambda pid: tmp_path / f"auth_{pid}.py",
+    )
+    monkeypatch.setattr(
+        "insight_aitest.modules.ui.backend.automation.paths.storage_state_path",
+        lambda pid, eid: tmp_path / f"storage_{pid}_{eid}.json",
+    )
+
+    code = '''
+def get_token(base_url, username, password):
+    return "custom_test_token"
+'''
+    set_project_auth_script(200, code)
+
+    # 模拟探活 httpx.Client.get 成功
+    class DummyResponse:
+        status_code = 200
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def get(self, url):
+            return DummyResponse()
+
+    monkeypatch.setattr("httpx.Client", DummyClient)
+
+    payload = EnvTestPayload(
+        project_id=200,
+        base_url="http://mock-service.local",
+        username="admin",
+        password="password123",
+    )
+    result = asyncio.run(test_custom_env(payload))
+    assert result["ok"] is True
+    assert result["token"] == "custom_test_token"
+    assert "站点可访问（HTTP 200）" in result["message"]
+
+
+def test_clone_env_endpoint(tmp_path, monkeypatch):
+    """验证克隆环境接口的功能与密码复制机制。"""
+    from insight_aitest.modules.ui.backend.automation.database import UIAutomationDatabase
+    from insight_aitest.modules.ui.backend.automation.routes.envs import clone_env, EnvCloneIn
+    from insight_aitest.modules.ui.backend.automation.env_service import get_password, set_password
+
+    db_path = str(tmp_path / "ui_test.db")
+    db = UIAutomationDatabase(db_path)
+
+    # 模拟全局 secrets 存取
+    secrets_map = {}
+    monkeypatch.setattr("insight_aitest.modules.ui.backend.automation.env_service._read_secrets", lambda: secrets_map)
+    monkeypatch.setattr("insight_aitest.modules.ui.backend.automation.env_service._write_secrets", lambda d: secrets_map.update(d))
+
+    # 创建初始环境
+    ref = "original_ref_123"
+    set_password(ref, "secret_pass_888")
+    env_id = db.create_env(
+        project_id=1,
+        name="测试环境 A",
+        base_url="http://10.0.0.1:8080",
+        username="admin",
+        password_ref=ref,
+        auth_script="print('test')",
+        token_inject="cookie",
+        token_name="token",
+        token_prefix="Bearer ",
+        is_default=1,
+    )
+
+    # 1. 默认副本名称克隆
+    cloned_res = clone_env(env_id, None, db=db)
+    assert cloned_res["name"] == "测试环境 A-副本"
+    assert cloned_res["base_url"] == "http://10.0.0.1:8080"
+    assert cloned_res["username"] == "admin"
+    assert cloned_res["is_default"] is False
+    assert cloned_res["password_set"] is True
+    # 确认克隆出的环境密码在新 ref 下保存，且内容一致
+    cloned_obj = db.get_env(cloned_res["id"])
+    assert cloned_obj.password_ref != ref
+    assert get_password(cloned_obj.password_ref) == "secret_pass_888"
+
+    # 2. 自定义名称克隆
+    cloned_custom = clone_env(env_id, EnvCloneIn(new_name="自定义克隆环境"), db=db)
+    assert cloned_custom["name"] == "自定义克隆环境"
+
+
+

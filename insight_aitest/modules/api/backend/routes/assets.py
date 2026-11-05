@@ -400,7 +400,9 @@ def enhance_asset(asset_id: int, db: AssetDatabase = Depends(get_asset_db)) -> d
 
 @router.post("/{asset_id}/auth-token")
 def fetch_asset_auth_token(
-    asset_id: int, db: AssetDatabase = Depends(get_asset_db)
+    asset_id: int,
+    environment_id: int | None = Query(None),
+    db: AssetDatabase = Depends(get_asset_db)
 ) -> dict:
     """按项目级前置脚本获取一次登录 token（每次调用都重新登录，可用于刷新）。"""
     asset = db.get(asset_id)
@@ -420,7 +422,11 @@ def fetch_asset_auth_token(
         raise HTTPException(400, "UI 自动化模块不可用，无法获取 token") from exc
 
     env_db = get_automation_db()
-    env = env_db.default_env(asset.project_id)
+    env = None
+    if environment_id is not None:
+        env = env_db.get_env(environment_id)
+    if env is None:
+        env = env_db.default_env(asset.project_id)
     if env is None:
         envs = env_db.list_envs(asset.project_id)
         env = envs[0] if envs else None

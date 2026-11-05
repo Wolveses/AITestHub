@@ -173,6 +173,7 @@ interface AutomationState {
   listRuns: (caseId: number) => Promise<ScriptRun[]>;
   listGenerations: (caseId: number) => Promise<GenerationRecord[]>;
   saveEnv: (data: Record<string, unknown>, envId?: number) => Promise<UIEnv>;
+  cloneEnv: (envId: number, newName?: string) => Promise<UIEnv>;
   deleteEnv: (envId: number) => Promise<void>;
   testEnv: (envId: number, payload?: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
   testCustomEnv: (payload: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
@@ -369,6 +370,17 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
       method: envId ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(envId ? data : { ...data, project_id: get().projectId }),
+    });
+    if (!r.ok) throw new Error(await parseError(r));
+    await get().loadEnvs();
+    return await r.json();
+  },
+
+  cloneEnv: async (envId, newName) => {
+    const r = await fetch(`${BASE}/envs/${envId}/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_name: newName || undefined }),
     });
     if (!r.ok) throw new Error(await parseError(r));
     await get().loadEnvs();

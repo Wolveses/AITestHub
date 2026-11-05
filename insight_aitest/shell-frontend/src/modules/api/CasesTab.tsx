@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { useRunStore, type RunSummary } from './store/runStore';
 import { useProjectStore } from '../../shared/store/projectStore';
 import { useConfirmStore } from '../../shared/store/confirmStore';
+import { useEnvStore } from './store/envStore';
 import { CasePicker } from '../../shared/components/CasePicker';
 import { EnvironmentSelect } from './components/EnvironmentSelect';
 import { CaseEditorDialog, NewCaseDialog } from './components/CaseFlowDialogs';
@@ -53,6 +54,15 @@ export function CasesTab() {
   const confirm = useConfirmStore((s) => s.confirm);
 
   useEffect(() => { loadCases(); }, [loadCases, currentProjectId, currentVersionId]);
+
+  // 环境未显式选择时，默认选中已启用的环境
+  const envs = useEnvStore((s) => s.envs);
+  useEffect(() => {
+    if (envId === null && envs.length > 0) {
+      const def = envs.find((e) => e.is_default) || envs[0];
+      if (def) setEnvId(def.id);
+    }
+  }, [envs, envId]);
 
   // 切换用例时回到步骤视图，避免展示上一条用例的执行记录
   useEffect(() => { setShowRecords(false); setExpandedRunId(null); }, [selectedCaseId]);

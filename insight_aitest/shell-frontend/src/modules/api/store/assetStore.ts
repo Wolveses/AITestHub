@@ -149,7 +149,7 @@ interface AssetState {
   deleteAsset: (id: number) => Promise<void>
   enhanceAsset: (id: number) => Promise<AiMeta>
   debugAsset: (id: number, payload: DebugPayload) => Promise<DebugResult>
-  fetchAuthToken: (id: number) => Promise<AuthTokenInfo>
+  fetchAuthToken: (id: number, envId?: number | null) => Promise<AuthTokenInfo>
   toCase: (id: number) => Promise<number>
   importCase: (ids: number[], title: string, aiOrder: boolean) => Promise<FlowCaseResult>
   composeSteps: (ids: number[], title: string, aiOrder: boolean) => Promise<ComposeStepsResult>
@@ -259,8 +259,9 @@ export const useAssetStore = create<AssetState>((set, get) => ({
     )
     return data as DebugResult
   },
-  fetchAuthToken: async (id) => {
-    const data = await _jsonOrThrow(await fetch(`${BASE}/${id}/auth-token`, { method: 'POST' }))
+  fetchAuthToken: async (id, envId) => {
+    const qs = envId != null ? `?environment_id=${envId}` : ''
+    const data = await _jsonOrThrow(await fetch(`${BASE}/${id}/auth-token${qs}`, { method: 'POST' }))
     return data as AuthTokenInfo
   },
   toCase: async (id) => {

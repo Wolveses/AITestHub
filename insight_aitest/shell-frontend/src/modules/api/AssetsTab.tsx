@@ -4,6 +4,8 @@ import { toast } from 'sonner';
 import { Bot, FilePlus2, KeyRound, Loader2, Play, RefreshCw, Send, Trash2, VolumeX, X } from 'lucide-react';
 import { useProjectStore } from '../../shared/store/projectStore';
 import { useIsMobile } from '../../shared/hooks/useIsMobile';
+import { EnvironmentSelect } from './components/EnvironmentSelect';
+import { useEnvStore } from './store/envStore';
 import { useAssetStore, type ApiAsset, type AiMeta, type AuthTokenInfo, type DebugResult, type EnhanceProgress, fetchEnhanceProgress } from './store/assetStore';
 
 const METHODS = ['', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
@@ -109,6 +111,7 @@ export function AssetsTab() {
   const [debugResp, setDebugResp] = useState<DebugResult | null>(null);
   const [respTab, setRespTab] = useState<'body' | 'headers'>('body');
   // 认证：项目级前置 token（仅内存，可手动改，再次获取即刷新）
+  const [debugEnvId, setDebugEnvId] = useState<number | null>(null);
   const [authToken, setAuthToken] = useState('');
   const [authInfo, setAuthInfo] = useState<AuthTokenInfo | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
@@ -128,6 +131,7 @@ export function AssetsTab() {
     setDebugResp(null);
     setAuthToken('');
     setAuthInfo(null);
+    setDebugEnvId(null);
   }, [selectedId]);
 
   // 轮询后台自动整理进度：运行中每 2 秒刷新，结束后重载列表并提示
@@ -178,8 +182,14 @@ export function AssetsTab() {
 
   const enterDebug = () => {
     if (!selected) return;
+    const envs = useEnvStore.getState().envs;
+    const defaultEnv = envs.find((e) => e.is_default) || envs[0];
+    const initialEnvId = defaultEnv ? defaultEnv.id : null;
+    const base = defaultEnv ? defaultEnv.base_url : (selected.base_url || '');
+
+    setDebugEnvId(initialEnvId);
     setDebugMethod(selected.method || 'GET');
-    setDebugUrl(`${(selected.base_url || '').replace(/\/$/, '')}${selected.path || ''}`);
+    setDebugUrl(`${(base || '').replace(/\/$/, '')}${selected.path || ''}`);
     setDebugHeaders(
       Object.entries(selected.headers || {}).map(([name, value]) => ({ name, value: String(value) })),
     );
@@ -188,6 +198,9 @@ export function AssetsTab() {
     setRespTab('body');
     setDebugResp(null);
     setDebugMode(true);
+
+    // 进入调试时自动获取已启用环境的 Token 组装 Bearer
+    fetchToken(initialEnvId);
   };
 
   const exitDebug = () => {
@@ -198,6 +211,7 @@ export function AssetsTab() {
     setDebugUrl('');
     setAuthToken('');
     setAuthInfo(null);
+    setDebugEnvId(null);
   };
 
   const authHeaderValue = (info: AuthTokenInfo, token: string) => `${info.prefix}${token}`;
@@ -213,11 +227,12 @@ export function AssetsTab() {
     });
   };
 
-  const fetchToken = async () => {
+  const fetchToken = async (targetEnvId?: number | null) => {
     if (!selected) return;
+    const targetId = targetEnvId !== undefined ? targetEnvId : debugEnvId;
     setAuthLoading(true);
     try {
-      const info = await fetchAuthToken(selected.id);
+      const info = await fetchAuthToken(selected.id, targetId);
       setAuthInfo(info);
       setAuthToken(info.token);
       applyAuthHeader(info, info.token);
@@ -227,6 +242,20 @@ export function AssetsTab() {
     } finally {
       setAuthLoading(false);
     }
+  };
+
+  const handleEnvChange = (newEnvId: number | null) => {
+    setDebugEnvId(newEnvId);
+    if (!selected) return;
+    const envs = useEnvStore.getState().envs;
+    const targetEnv = envs.find((e) => e.id === newEnvId);
+    if (targetEnv && targetEnv.base_url) {
+      const base = targetEnv.base_url.replace(/\/$/, '');
+      const path = selected.path || '';
+      setDebugUrl(`${base}${path}`);
+    }
+    // 切换环境后自动重新获取 token
+    fetchToken(newEnvId);
   };
 
   const updateAuthToken = (v: string) => {
@@ -472,6 +501,15 @@ export function AssetsTab() {
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('api.debugHint')}</div>
 
               <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)', minWidth: 32 }}>{t('api.env', '环境')}</span>
+                <EnvironmentSelect
+                  value={debugEnvId}
+                  onChange={handleEnvChange}
+                  style={{ minWidth: 160, padding: '5px 8px' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                 <select
                   style={{ ...inputStyle, width: 96, fontWeight: 700, color: methodColor(debugMethod) }}
                   value={debugMethod}
@@ -512,7 +550,7 @@ export function AssetsTab() {
                   onChange={(e) => updateAuthToken(e.target.value)}
                   placeholder={t('api.authPlaceholder')}
                 />
-                <button style={btnStyle(authLoading)} disabled={authLoading} onClick={fetchToken}>
+                <button style={btnStyle(authLoading)} disabled={authLoading} onClick={() => fetchToken()}>
                   {authLoading
                     ? <Loader2 size={12} strokeWidth={1.5} className="animate-spin" />
                     : <KeyRound size={12} strokeWidth={1.5} />}

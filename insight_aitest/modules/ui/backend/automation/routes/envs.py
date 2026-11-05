@@ -15,6 +15,7 @@ from insight_aitest.modules.ui.backend.automation.env_service import (
     AUTH_SCRIPT_TEMPLATES,
     delete_password,
     env_public,
+    get_password,
     get_project_auth_script,
     set_project_auth_script,
     set_password,
@@ -50,7 +51,12 @@ class EnvPatch(BaseModel):
     is_default: bool | None = None
 
 
+class EnvCloneIn(BaseModel):
+    new_name: str | None = None
+
+
 class EnvTestPayload(BaseModel):
+    project_id: int | None = None
     base_url: str | None = None
     username: str | None = None
     password: str | None = None
@@ -141,12 +147,49 @@ def delete_env(env_id: int, db: UIAutomationDatabase = Depends(get_automation_db
     return {"deleted": env_id}
 
 
+@router.post("/{env_id}/clone")
+def clone_env(
+    env_id: int,
+    body: EnvCloneIn | None = None,
+    db: UIAutomationDatabase = Depends(get_automation_db),
+) -> dict:
+    """复制/克隆指定测试环境配置。"""
+    env = db.get_env(env_id)
+    if env is None:
+        raise HTTPException(404, "环境不存在")
+
+    raw_name = (body.new_name if body and body.new_name else "").strip()
+    new_name = raw_name or f"{env.name or '环境'}-副本"
+
+    # 若原环境有密码，独立拷贝一份密码 secret
+    new_ref = ""
+    if env.password_ref:
+        pwd = get_password(env.password_ref)
+        if pwd:
+            new_ref = uuid.uuid4().hex
+            set_password(new_ref, pwd)
+
+    new_id = db.create_env(
+        project_id=env.project_id,
+        name=new_name,
+        base_url=env.base_url,
+        username=env.username,
+        password_ref=new_ref,
+        auth_script=env.auth_script or "",
+        token_inject=env.token_inject or "cookie",
+        token_name=env.token_name or "token",
+        token_prefix=env.token_prefix or "",
+        is_default=0,
+    )
+    return env_public(db.get_env(new_id))
+
+
 @router.post("/test-custom")
 async def test_custom_env(body: EnvTestPayload) -> dict:
     """对表单中填写的临时环境与前置脚本进行调试与连通性测试。"""
     class _TempEnv:
         id = 0
-        project_id = 0
+        project_id = body.project_id or 0
         name = "temp"
         base_url = body.base_url or ""
         username = body.username or ""

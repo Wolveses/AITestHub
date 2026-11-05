@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Code2, FileCode, Globe, Play, PlugZap, Plus, Save, Star, Trash2 } from 'lucide-react';
+import { CheckCircle2, Code2, Copy, Eye, EyeOff, FileCode, Globe, Play, PlugZap, Plus, Save, Trash2 } from 'lucide-react';
 import { Modal } from '../../../../components/ui/modal';
 import { useAutomationStore, type UIEnv, type ScriptTemplate } from '../../store/automationStore';
 import { Btn, Field, inputStyle } from './common';
@@ -29,6 +29,7 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
     envs,
     loadEnvs,
     saveEnv,
+    cloneEnv,
     deleteEnv,
     testEnv,
     testCustomEnv,
@@ -42,6 +43,7 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
 
   // 环境管理状态
   const [envForm, setEnvForm] = useState<EnvForm>(EMPTY_ENV);
+  const [showPassword, setShowPassword] = useState(false);
   const [editEnvId, setEditEnvId] = useState<number | null>(null);
   const [savingEnv, setSavingEnv] = useState(false);
   const [testingEnvId, setTestingEnvId] = useState<number | null>(null);
@@ -61,6 +63,7 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
       loadEnvs();
       loadTemplates().then(setTemplates).catch(() => {});
       setEnvForm(EMPTY_ENV);
+      setShowPassword(false);
       setEditEnvId(null);
       setEnvTestResult(null);
       setScriptTestResult(null);
@@ -100,6 +103,7 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
       await saveEnv(payload, editEnvId ?? undefined);
       toast.success(t('ui.auto.envSaved', '环境已保存'));
       setEnvForm(EMPTY_ENV);
+      setShowPassword(false);
       setEditEnvId(null);
       setEnvTestResult(null);
     } catch (e) {
@@ -131,7 +135,7 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
     setEnvTestResult(null);
     try {
       let res: { ok: boolean; message: string; token?: string };
-      const payload: Record<string, unknown> = { ...envForm };
+      const payload: Record<string, unknown> = { ...envForm, project_id: projectId };
       // 密码留空表示不修改：不随请求发送，后端沿用已保存的密码
       if (editEnvId !== null && !envForm.password) delete payload.password;
       if (editEnvId !== null) {
@@ -148,6 +152,20 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
       toast.error(err);
     } finally {
       setFormTesting(false);
+    }
+  };
+
+  const handleCloneEnv = async (env: UIEnv) => {
+    const promptText = t('ui.auto.clonePrompt', '请输入复制后的新环境名称：');
+    const defaultName = `${env.name || '环境'}-副本`;
+    const newName = window.prompt(promptText, defaultName);
+    if (newName === null) return;
+    try {
+      const cloned = await cloneEnv(env.id, newName.trim() || undefined);
+      toast.success(t('ui.auto.cloned', '环境复制成功'));
+      startEditEnv(cloned);
+    } catch (e) {
+      toast.error((e as Error).message);
     }
   };
 
@@ -307,12 +325,15 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
                     <span style={{ flex: 1, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {env.name}
                     </span>
-                    {env.is_default && <Star size={12} style={{ color: 'var(--warning, #f59e0b)' }} />}
+                    {env.is_default && <span style={{ fontSize: 10, color: 'var(--success, #10b981)', border: '1px solid var(--success, #10b981)', borderRadius: 3, padding: '1px 5px', fontWeight: 600 }}>{t('ui.auto.enabledTag', '已启用')}</span>}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, wordBreak: 'break-all' }}>{env.base_url}</div>
                   <div style={{ display: 'flex', gap: 4, marginTop: 6 }} onClick={(e) => e.stopPropagation()}>
                     <Btn size="sm" disabled={testingEnvId === env.id} onClick={() => handleTestEnvItem(env)}>
                       <PlugZap size={11} /> {testingEnvId === env.id ? t('ui.auto.testing', '测试中…') : t('ui.auto.testConn', '测试连接')}
+                    </Btn>
+                    <Btn size="sm" onClick={() => handleCloneEnv(env)} title={t('ui.auto.clone', '复制')}>
+                      <Copy size={11} /> {t('ui.auto.clone', '复制')}
                     </Btn>
                     {!env.is_default && (
                       <Btn
@@ -326,7 +347,7 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
                           }
                         }}
                       >
-                        <Star size={11} /> {t('ui.auto.setDefaultBtn', '设为默认')}
+                        <CheckCircle2 size={11} /> {t('ui.auto.setDefaultBtn', '启用')}
                       </Btn>
                     )}
                     <Btn size="sm" variant="danger" onClick={() => handleDeleteEnv(env)}>
@@ -370,14 +391,37 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
                   label={t('ui.auto.loginPassword', '登录密码')}
                   hint={editEnvId !== null ? t('ui.auto.passwordKeep', '留空表示保持原密码') : undefined}
                 >
-                  <input
-                    type="password"
-                    value={envForm.password}
-                    onChange={(e) => setEnvForm({ ...envForm, password: e.target.value })}
-                    style={inputStyle}
-                    autoComplete="new-password"
-                    placeholder={editEnvId !== null && envs.find((e) => e.id === editEnvId)?.password_set ? '••••••' : ''}
-                  />
+                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      value={envForm.password}
+                      onChange={(e) => setEnvForm({ ...envForm, password: e.target.value })}
+                      style={{ ...inputStyle, paddingRight: 32 }}
+                      autoComplete="new-password"
+                      placeholder={editEnvId !== null && envs.find((e) => e.id === editEnvId)?.password_set ? '••••••' : ''}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      title={showPassword ? t('ui.auto.hidePassword', '隐藏密码') : t('ui.auto.showPassword', '显示密码')}
+                      style={{
+                        position: 'absolute',
+                        right: 8,
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        color: 'var(--text-muted)',
+                        padding: 2,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
                 </Field>
               </div>
 

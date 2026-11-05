@@ -87,28 +87,55 @@ def execute_case(
 
     env = None
     initial_vars: dict | None = None
-    if environment_id is not None:
-        from insight_aitest.modules.api.backend.deps import get_env_db
+    project_id = case.get("project_id")
 
-        env = get_env_db().get(environment_id)
+    # 优先使用 UI 自动化环境（支持项目关联与前置 Token 获取），兼容 API 原生环境
+    if environment_id is not None:
+        try:
+            from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+            env = get_automation_db().get_env(environment_id)
+        except Exception:
+            env = None
+        if not env:
+            from insight_aitest.modules.api.backend.deps import get_env_db
+            env = get_env_db().get(environment_id)
         if not env:
             raise HTTPException(404, "环境不存在")
-        import copy
+    else:
+        # 无指定环境时自动使用同项目下已启用的 UI 自动化环境
+        if project_id:
+            try:
+                from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+                env = get_automation_db().default_env(project_id)
+            except Exception:
+                env = None
+        if not env:
+            from insight_aitest.modules.api.backend.deps import get_env_db
+            env = get_env_db().get_default()
 
+    if env:
+        import copy
         content = copy.deepcopy(content)
         content["base_url"] = env.base_url
-        initial_vars = env.variables or {}
-    else:
-        # 无指定环境时自动使用默认环境
-        from insight_aitest.modules.api.backend.deps import get_env_db
+        initial_vars = getattr(env, "variables", None) or {}
 
-        default_env = get_env_db().get_default()
-        if default_env:
-            import copy
-
-            content = copy.deepcopy(content)
-            content["base_url"] = default_env.base_url
-            initial_vars = default_env.variables or {}
+        # 尝试通过项目前置脚本自动获取 token 并组装 Authorization: Bearer <token>
+        try:
+            from insight_aitest.modules.ui.backend.automation.env_service import prepare_auth
+            auth = prepare_auth(env)
+            if auth.ok and auth.token:
+                raw_prefix = (getattr(env, "token_prefix", "") or "").strip()
+                prefix = f"{raw_prefix} " if raw_prefix else "Bearer "
+                auth_val = f"{prefix}{auth.token}"
+                if isinstance(content.get("steps"), list):
+                    for step in content["steps"]:
+                        if isinstance(step, dict):
+                            hdrs = step.setdefault("headers", {})
+                            # 若步骤没有显式设置 Authorization，则自动组装注入
+                            if not any(k.lower() == "authorization" for k in hdrs):
+                                hdrs["Authorization"] = auth_val
+        except Exception as auth_err:
+            logger.warning(f"环境 {getattr(env, 'id', None)} 自动获取 token 失败: {auth_err}")
 
     try:
         _validate_content(content)
