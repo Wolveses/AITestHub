@@ -1373,6 +1373,7 @@ export default {
       emptyBody: '(empty body)',
       jsonPathSamples: 'Response field samples (for assertions)',
       assetMeta: 'Captured {{times}} times · first {{first}} · last {{last}}',
+      assetMetaWithoutTimes: 'first {{first}} · last {{last}}',
       debug: 'Debug',
       exitDebug: 'Exit Debug',
       sending: 'Sending...',

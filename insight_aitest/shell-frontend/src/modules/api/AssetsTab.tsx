@@ -407,12 +407,12 @@ export function AssetsTab() {
                     flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     color: active ? 'var(--accent)' : undefined,
                     fontWeight: active ? 600 : 400,
-                  }}>{it.path_template || it.path}</span>
-                  <span style={{ color: 'var(--text-muted)' }}>{it.response_status}</span>
+                  }}>{it.title || it.path_template || it.path}</span>
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 2, fontSize: 11, color: 'var(--text-muted)' }}>
-                  <span>{it.title || it.fingerprint}</span>
-                  <span>×{it.times_seen}</span>
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'monospace' }}>
+                    {it.path_template || it.path}
+                  </span>
                   {it.is_noise && <span>{t('api.noiseTag')}</span>}
                   {aiRunning
                     ? <span style={{ color: '#d97706', fontWeight: 600 }}>{t('api.aiRowRunning')}</span>
@@ -712,7 +712,7 @@ export function AssetsTab() {
 
               <div>
                 <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                  {t('api.request')} · {selected.base_url}{selected.path}
+                  {t('api.request')} · {selected.path}
                 </div>
                 <div style={boxStyle}>
                   {pretty(selected.headers)}
@@ -744,7 +744,7 @@ export function AssetsTab() {
               )}
 
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                {t('api.assetMeta', { times: selected.times_seen, first: selected.first_seen_at, last: selected.last_seen_at })}
+                {t('api.assetMetaWithoutTimes', { first: selected.first_seen_at, last: selected.last_seen_at })}
               </div>
             </div>
           )}

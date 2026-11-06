@@ -1373,6 +1373,7 @@ export default {
       emptyBody: '（无响应体）',
       jsonPathSamples: '响应字段样例（供断言参考）',
       assetMeta: '采集 {{times}} 次 · 首次 {{first}} · 最近 {{last}}',
+      assetMetaWithoutTimes: '首次 {{first}} · 最近 {{last}}',
       // 接口调试（Postman 风格）
       debug: '调试',
       exitDebug: '退出调试',
