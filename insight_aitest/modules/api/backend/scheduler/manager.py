@@ -57,7 +57,6 @@ def _run_scheduled_suite(sched_id: int) -> None:
 
     suite_db = api_deps.get_suite_db()
     suite_run_db = api_deps.get_suite_run_db()
-    env_db = api_deps.get_env_db()
 
     suite = suite_db.get(sched.suite_id)
     if suite is None:
@@ -66,7 +65,11 @@ def _run_scheduled_suite(sched_id: int) -> None:
 
     env = None
     if sched.environment_id is not None:
-        env = env_db.get(sched.environment_id)
+        try:
+            from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+            env = get_automation_db().get_env(sched.environment_id)
+        except Exception:
+            env = None
 
     from datetime import datetime
     from insight_aitest.modules.api.backend.persistence.suite_models import (

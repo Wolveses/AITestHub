@@ -156,9 +156,9 @@ def _execute_api_case(params: dict, ctx: SkillContext) -> dict:
     # 可选环境覆盖
     environment_id = params.get("environment_id")
     if environment_id is not None:
-        from insight_aitest.modules.api.backend.deps import get_env_db
+        from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 
-        env = get_env_db().get(environment_id)
+        env = get_automation_db().get_env(int(environment_id))
         if env is None:
             raise ValueError(f"环境 {environment_id} 不存在")
         import copy
@@ -740,9 +740,9 @@ def _run_api_suite(params: dict, ctx: SkillContext) -> dict:
     environment = None
     environment_id = params.get("environment_id")
     if environment_id is not None:
-        from insight_aitest.modules.api.backend.deps import get_env_db
+        from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 
-        environment = get_env_db().get(int(environment_id))
+        environment = get_automation_db().get_env(int(environment_id))
 
     # 执行前快照每个 case 的 last_result（回归基线）
     baselines: dict[int, str | None] = {}

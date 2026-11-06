@@ -3,7 +3,6 @@
 
 from fastapi import APIRouter
 from .assets import router as assets_router
-from .environments import router as environments_router
 from .reports import router as reports_router
 from .runs import router as runs_router
 from .suites import router as suites_router
@@ -13,7 +12,6 @@ router = APIRouter()
 router.include_router(assets_router)
 router.include_router(runs_router)
 router.include_router(reports_router)
-router.include_router(environments_router)
 router.include_router(suites_router)
 router.include_router(schedules_router)
 

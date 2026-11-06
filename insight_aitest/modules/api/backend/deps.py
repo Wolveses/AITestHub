@@ -8,7 +8,6 @@ import threading
 
 from insight_aitest.modules.api.backend.persistence.database import RunDatabase
 from insight_aitest.modules.api.backend.persistence.asset_database import AssetDatabase
-from insight_aitest.modules.api.backend.persistence.environment_database import EnvironmentDatabase
 from insight_aitest.modules.api.backend.persistence.suite_database import (
     SuiteDatabase,
     SuiteRunDatabase,
@@ -18,8 +17,6 @@ _DB_PATH = os.path.expanduser("~/.insight_eye/api.db")
 
 _run_db: RunDatabase | None = None
 _run_db_lock = threading.Lock()
-_env_db: EnvironmentDatabase | None = None
-_env_db_lock = threading.Lock()
 _suite_db: SuiteDatabase | None = None
 _suite_db_lock = threading.Lock()
 _suite_run_db: SuiteRunDatabase | None = None
@@ -35,15 +32,6 @@ def get_run_db() -> RunDatabase:
             if _run_db is None:
                 _run_db = RunDatabase(_DB_PATH)
     return _run_db
-
-
-def get_env_db() -> EnvironmentDatabase:
-    global _env_db
-    if _env_db is None:
-        with _env_db_lock:
-            if _env_db is None:
-                _env_db = EnvironmentDatabase(_DB_PATH)
-    return _env_db
 
 
 def get_suite_db() -> SuiteDatabase:

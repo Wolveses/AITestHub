@@ -89,16 +89,13 @@ def execute_case(
     initial_vars: dict | None = None
     project_id = case.get("project_id")
 
-    # 优先使用 UI 自动化环境（支持项目关联与前置 Token 获取），兼容 API 原生环境
+    # 统一使用 UI 自动化环境（支持项目关联与前置 Token 获取）
     if environment_id is not None:
         try:
             from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
             env = get_automation_db().get_env(environment_id)
         except Exception:
             env = None
-        if not env:
-            from insight_aitest.modules.api.backend.deps import get_env_db
-            env = get_env_db().get(environment_id)
         if not env:
             raise HTTPException(404, "环境不存在")
     else:
@@ -109,9 +106,6 @@ def execute_case(
                 env = get_automation_db().default_env(project_id)
             except Exception:
                 env = None
-        if not env:
-            from insight_aitest.modules.api.backend.deps import get_env_db
-            env = get_env_db().get_default()
 
     if env:
         import copy

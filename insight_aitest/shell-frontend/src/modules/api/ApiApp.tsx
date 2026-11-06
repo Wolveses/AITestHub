@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Tabs } from '../../components/ui/tabs';
 import { ModuleHelpButton } from '../../shared/components/ModuleHelpButton';
 
-const TAB_KEYS = ['assets', 'cases', 'suites', 'envs', 'dashboard', 'schedules'] as const;
+const TAB_KEYS = ['assets', 'cases', 'dashboard', 'schedules'] as const;
 
 export function ApiApp() {
   const location = useLocation();
@@ -12,8 +12,6 @@ export function ApiApp() {
   const TABS = [
     { key: 'assets', label: t('api.tabAssets') },
     { key: 'cases', label: t('api.tabCases') },
-    { key: 'suites', label: t('api.tabSuites') },
-    { key: 'envs', label: t('api.tabEnvs') },
     { key: 'dashboard', label: t('api.tabDashboard') },
     { key: 'schedules', label: t('api.tabSchedules') },
   ];
