@@ -597,6 +597,20 @@ export default {
       imageOcr: 'LLM OCR',
       ocrHint: '关闭使用离线识别库（默认）；开启后用大模型识别（精度更高，需联网 + API Key）',
       historyRounds: '历史轮数',
+      // Langfuse 监控
+      langfuseTitle: 'Langfuse 大模型监控',
+      langfuseEnabledTag: '· 已开启',
+      langfuseDisabledTag: '· 已关闭（默认）',
+      langfuseHint: '开源自托管 LLM 可观测性平台，记录全平台大模型调用（Chat / 流式 / 视觉 / Embedding）的输入输出、首字延迟与 Token 消耗。',
+      enableLangfuse: '启用追踪上报',
+      enableLangfuseHint: '开启后自动异步上报 Trace，失败自动降级不影响主业务',
+      langfuseHost: 'Langfuse 地址',
+      langfuseHostPlaceholder: 'http://localhost:3000',
+      langfusePublicKey: 'Public Key',
+      langfusePublicKeyPlaceholder: 'pk-lf-...',
+      langfuseSecretKey: 'Secret Key',
+      langfuseSecretKeyPlaceholder: 'sk-lf-...',
+      openLangfuseConsole: '打开控制台 ↗',
     },
 
     // === AI 模块 ===

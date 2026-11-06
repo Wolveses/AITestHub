@@ -15,9 +15,12 @@ const labelStyle: React.CSSProperties = {
 
 export function SettingsPanel() {
   const { t } = useTranslation();
-  const { config, loading, saving, loadConfig, updateConfig } = useConfigStore();
+  const { config, loading, saving, loadConfig, updateConfig, testLangfuseConnection } = useConfigStore();
   const [form, setForm] = useState<AIConfigUpdate>({});
   const [vectorExpanded, setVectorExpanded] = useState(false);
+  const [langfuseExpanded, setLangfuseExpanded] = useState(false);
+  const [langfuseTesting, setLangfuseTesting] = useState(false);
+  const [langfuseMsg, setLangfuseMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   // 「与 LLM 保持一致」：URL 与 Key 都为空即视为复用 LLM 配置
   const [embedSameAsLlm, setEmbedSameAsLlm] = useState(false);
@@ -51,8 +54,13 @@ export function SettingsPanel() {
         embed_model: config.embed_model,
         embed_api_key: '',
         max_upload_mb: config.max_upload_mb ?? 100,
+        langfuse_enabled: config.langfuse_enabled ?? false,
+        langfuse_public_key: config.langfuse_public_key ?? '',
+        langfuse_secret_key: '',
+        langfuse_host: config.langfuse_host || 'http://localhost:3000',
       });
       setVectorExpanded(config.vector_enabled);
+      setLangfuseExpanded(Boolean(config.langfuse_enabled));
       setEmbedSameAsLlm(!config.embed_base_url && !config.embed_api_key_set);
       setRerankSameAsLlm(!config.rerank_base_url && !config.rerank_api_key_set);
     }
@@ -82,10 +90,30 @@ export function SettingsPanel() {
       } else if (!payload.rerank_api_key) {
         delete payload.rerank_api_key;
       }
+      if (!payload.langfuse_secret_key) {
+        delete payload.langfuse_secret_key;
+      }
       await updateConfig(payload);
       setMsg({ ok: true, text: t('settings.saved') });
     } catch (e) {
       setMsg({ ok: false, text: errorMessage(e, t('settings.saveFailed')) });
+    }
+  };
+
+  const handleTestLangfuse = async () => {
+    setLangfuseTesting(true);
+    setLangfuseMsg(null);
+    try {
+      const res = await testLangfuseConnection(
+        form.langfuse_host || 'http://localhost:3000',
+        form.langfuse_public_key || '',
+        form.langfuse_secret_key || '',
+      );
+      setLangfuseMsg({ ok: res.ok, text: res.message });
+    } catch (e) {
+      setLangfuseMsg({ ok: false, text: errorMessage(e, t('settings.saveFailed')) });
+    } finally {
+      setLangfuseTesting(false);
     }
   };
 
@@ -294,6 +322,102 @@ export function SettingsPanel() {
       <Row label={t('settings.historyRounds')}>
         <NumInput value={form.history_turns} onChange={(v) => set('history_turns', v)} />
       </Row>
+
+      {/* ===== Langfuse 大模型可观测性（可折叠）===== */}
+      <div style={{ borderTop: '1px solid var(--bg-card)', margin: '24px 0 4px', paddingTop: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <button
+            onClick={() => setLangfuseExpanded((v) => !v)}
+            style={{
+              background: 'none', border: 'none', color: "var(--text-secondary)", cursor: 'pointer',
+              fontSize: 13, padding: 0, display: 'flex', alignItems: 'center', gap: 6,
+            }}
+          >
+            <Play size={12} strokeWidth={1.5} style={{ color: form.langfuse_enabled ? "var(--accent)" : 'var(--text-secondary)', transform: langfuseExpanded ? 'rotate(90deg)' : 'none', display: 'inline-flex' }} />
+            {t('settings.langfuseTitle')}{form.langfuse_enabled ? t('settings.langfuseEnabledTag') : t('settings.langfuseDisabledTag')}
+          </button>
+          {form.langfuse_host && (
+            <a
+              href={form.langfuse_host}
+              target="_blank"
+              rel="noreferrer"
+              style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none' }}
+            >
+              {t('settings.openLangfuseConsole')}
+            </a>
+          )}
+        </div>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, marginBottom: 0 }}>
+          {t('settings.langfuseHint')}
+        </p>
+      </div>
+
+      {langfuseExpanded && (
+        <>
+          <Row label={t('settings.enableLangfuse')}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: "var(--text-secondary)", cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={form.langfuse_enabled ?? false}
+                onChange={(e) => set('langfuse_enabled', e.target.checked)}
+              />
+              {t('settings.enableLangfuseHint')}
+            </label>
+          </Row>
+
+          <Row label={t('settings.langfuseHost')}>
+            <input
+              style={inputStyle}
+              value={form.langfuse_host ?? ''}
+              autoComplete="off"
+              placeholder={t('settings.langfuseHostPlaceholder')}
+              onChange={(e) => set('langfuse_host', e.target.value)}
+            />
+          </Row>
+
+          <Row label={t('settings.langfusePublicKey')}>
+            <input
+              style={inputStyle}
+              value={form.langfuse_public_key ?? ''}
+              autoComplete="off"
+              placeholder={t('settings.langfusePublicKeyPlaceholder')}
+              onChange={(e) => set('langfuse_public_key', e.target.value)}
+            />
+          </Row>
+
+          <Row label={t('settings.langfuseSecretKey')}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
+              <input
+                style={inputStyle}
+                type="password"
+                autoComplete="new-password"
+                value={form.langfuse_secret_key ?? ''}
+                placeholder={config.langfuse_secret_key_set ? t('settings.apiKeySet') : t('settings.langfuseSecretKeyPlaceholder')}
+                onChange={(e) => set('langfuse_secret_key', e.target.value)}
+              />
+              <button
+                type="button"
+                onClick={handleTestLangfuse}
+                disabled={langfuseTesting}
+                style={{
+                  background: 'none', border: '1px solid var(--bg-elevated)', color: "var(--text-secondary)",
+                  borderRadius: 4, padding: '6px 10px', cursor: langfuseTesting ? 'wait' : 'pointer',
+                  fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+                }}
+              >
+                <Zap size={12} strokeWidth={1.5} />
+                {langfuseTesting ? t('settings.testing') : t('settings.testConnection')}
+              </button>
+            </div>
+          </Row>
+
+          {langfuseMsg && (
+            <div style={{ marginLeft: 122, marginTop: 4, fontSize: 12, color: langfuseMsg.ok ? 'var(--chart-4)' : 'var(--error)' }}>
+              {langfuseMsg.text}
+            </div>
+          )}
+        </>
+      )}
 
       <div style={{ marginTop: 24, display: 'flex', alignItems: 'center', gap: 12 }}>
         <button

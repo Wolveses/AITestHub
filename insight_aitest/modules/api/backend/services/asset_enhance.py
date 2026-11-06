@@ -140,9 +140,20 @@ def parse_result(text: str) -> dict:
 
 def enhance(asset, llm) -> dict:
     """调用一次模型，返回整理建议（不写库）。"""
-    result = parse_result(
-        llm.chat(build_messages(build_payload(asset)), temperature=0, max_tokens=600)
-    )
+    from insight_aitest.platform.services.llm.tracing import trace_context
+
+    with trace_context(
+        name="api.asset.enhance",
+        tags=["module:api", "feature:enhance"],
+        metadata={
+            "asset_id": getattr(asset, "id", None),
+            "method": getattr(asset, "method", ""),
+            "path": getattr(asset, "path", ""),
+        },
+    ):
+        result = parse_result(
+            llm.chat(build_messages(build_payload(asset)), temperature=0, max_tokens=600)
+        )
     result["enhanced_at"] = datetime.now().isoformat(timespec="seconds")
     config = getattr(llm, "_config", None)
     result["model"] = getattr(config, "chat_model", "") if config else ""

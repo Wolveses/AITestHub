@@ -25,6 +25,11 @@ export interface AIConfig {
   embed_base_url: string;
   embed_api_key_set: boolean;
   max_upload_mb: number;
+  // Langfuse 可观测性
+  langfuse_enabled?: boolean;
+  langfuse_public_key?: string;
+  langfuse_secret_key_set?: boolean;
+  langfuse_host?: string;
   // 多 Provider
   providers: ProviderOut[];
   active_provider_id: string;
@@ -54,6 +59,10 @@ export interface AIConfigUpdate {
   embed_base_url?: string;
   embed_api_key?: string;
   max_upload_mb?: number;
+  langfuse_enabled?: boolean;
+  langfuse_public_key?: string;
+  langfuse_secret_key?: string;
+  langfuse_host?: string;
 }
 
 /** 后端返回的 Provider（api_key 脱敏为 api_key_set）。 */
@@ -96,6 +105,7 @@ interface ConfigState {
   deleteProvider: (providerId: string) => Promise<void>;
   activateProvider: (providerId: string) => Promise<void>;
   testConnection: (baseUrl: string, apiKey: string, model: string, providerId?: string) => Promise<{ ok: boolean; message: string }>;
+  testLangfuseConnection: (host: string, publicKey: string, secretKey: string) => Promise<{ ok: boolean; message: string }>;
 }
 
 const BASE = '/api/modules/ai';
@@ -204,6 +214,16 @@ export const useConfigStore = create<ConfigState>((set) => ({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model, provider_id: providerId || '' }),
+    });
+    const data = await r.json();
+    return { ok: !!data.ok, message: data.message || '' };
+  },
+
+  testLangfuseConnection: async (host: string, publicKey: string, secretKey: string) => {
+    const r = await fetch(`${BASE}/config/langfuse/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, public_key: publicKey, secret_key: secretKey }),
     });
     const data = await r.json();
     return { ok: !!data.ok, message: data.message || '' };

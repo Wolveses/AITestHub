@@ -90,16 +90,22 @@ class Analyzer:
         exclude_document_ids: 检索时排除的文档 ID（例如上传文档本身已有全文注入，检索中排除以仅引用其他知识库）。
         """
         from insight_aitest.modules.testcase.backend.persistence.models import CaseType, TestType
+        from insight_aitest.platform.services.llm.tracing import trace_context
 
-        scored = self._retrieve(
-            query,
-            document_ids,
-            project_id=project_id,
-            exclude_document_ids=exclude_document_ids,
-        )
-        chunks = [(s.document.filename, s.chunk.text) for s in scored]
-        prompt = build_analyze_prompt(query, chunks, documents_text=documents_text)
-        raw = self.llm.chat([{"role": "user", "content": prompt}])
+        with trace_context(
+            name="testcase.analyze",
+            tags=["module:testcase", "phase:analyze"],
+            metadata={"project_id": project_id},
+        ):
+            scored = self._retrieve(
+                query,
+                document_ids,
+                project_id=project_id,
+                exclude_document_ids=exclude_document_ids,
+            )
+            chunks = [(s.document.filename, s.chunk.text) for s in scored]
+            prompt = build_analyze_prompt(query, chunks, documents_text=documents_text)
+            raw = self.llm.chat([{"role": "user", "content": prompt}])
         data = _extract_json(raw)
         if not data or not isinstance(data, list):
             return []

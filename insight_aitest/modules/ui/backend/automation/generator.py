@@ -1492,7 +1492,19 @@ class GenerationJob:
 
         outcome = {"status": GenerationStatus.FAILED, "error_category": ErrorCategory.MODEL}
         try:
-            outcome = self._execute(is_fix)
+            from insight_aitest.platform.services.llm.tracing import trace_context
+
+            with trace_context(
+                name=f"ui.script.{'fix' if is_fix else 'generate'}",
+                session_id=f"ui-case-{self.case_id}-gen-{self.gen_id}",
+                tags=["module:ui", f"kind:{self.kind}"],
+                metadata={
+                    "case_id": self.case_id,
+                    "project_id": project_id,
+                    "gen_id": self.gen_id,
+                },
+            ):
+                outcome = self._execute(is_fix)
         except Exception as e:
             if concurrency.is_cancelled(self.case_id):
                 # 终止时关闭 MCP/杀掉子进程会以异常形式冒泡，按「已终止」收尾而不是失败

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from dataclasses import dataclass
 from typing import AsyncIterator, TYPE_CHECKING
@@ -13,6 +14,7 @@ from insight_aitest.modules.ai.backend.agent.prompts import (
     build_system_message,
 )
 from insight_aitest.modules.ai.backend.persistence.models import Citation
+from insight_aitest.platform.services.llm.tracing import trace_context
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +90,15 @@ class RagAgent:
         use_rag: bool = True,
         project_id: int | None = None,
     ) -> RagResult:
-        scored = self._retrieve(query, document_ids, project_id=project_id) if use_rag else []
-        messages = self._build_messages(query, history, scored, use_rag=use_rag)
-        ans = self.llm.chat(messages)
-        return RagResult(answer=ans, citations=self._to_citations(scored))
+        with trace_context(
+            name="ai.chat.answer",
+            tags=["module:ai", f"rag:{use_rag}"],
+            metadata={"project_id": project_id},
+        ):
+            scored = self._retrieve(query, document_ids, project_id=project_id) if use_rag else []
+            messages = self._build_messages(query, history, scored, use_rag=use_rag)
+            ans = self.llm.chat(messages)
+            return RagResult(answer=ans, citations=self._to_citations(scored))
 
     async def stream_answer_async(
         self,
@@ -127,24 +134,30 @@ class RagAgent:
         SENTINEL = object()
         ERROR_SENTINEL = object()
         error_holder: list[str] = []
+        ctx = contextvars.copy_context()
 
         def _produce():
             try:
-                if thinking_level and thinking_level != "off":
-                    for kind, text in self.llm.stream_chat_raw(
-                        messages, thinking_level=thinking_level
-                    ):
-                        asyncio.run_coroutine_threadsafe(queue.put((kind, text)), loop).result()
-                else:
-                    for tok in self.llm.stream_chat(messages):
-                        asyncio.run_coroutine_threadsafe(queue.put(("content", tok)), loop).result()
+                with trace_context(
+                    name="ai.chat.stream",
+                    tags=["module:ai", f"rag:{use_rag}"],
+                    metadata={"project_id": project_id, "thinking_level": thinking_level},
+                ):
+                    if thinking_level and thinking_level != "off":
+                        for kind, text in self.llm.stream_chat_raw(
+                            messages, thinking_level=thinking_level
+                        ):
+                            asyncio.run_coroutine_threadsafe(queue.put((kind, text)), loop).result()
+                    else:
+                        for tok in self.llm.stream_chat(messages):
+                            asyncio.run_coroutine_threadsafe(queue.put(("content", tok)), loop).result()
             except Exception as e:
                 error_holder.append(str(e))
                 asyncio.run_coroutine_threadsafe(queue.put(ERROR_SENTINEL), loop).result()
                 return
             asyncio.run_coroutine_threadsafe(queue.put(SENTINEL), loop).result()
 
-        loop.run_in_executor(None, _produce)
+        loop.run_in_executor(None, ctx.run, _produce)
         try:
             while True:
                 item = await queue.get()

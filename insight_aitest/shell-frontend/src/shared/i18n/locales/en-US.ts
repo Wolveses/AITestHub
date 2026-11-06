@@ -597,6 +597,20 @@ export default {
       imageOcr: 'LLM OCR',
       ocrHint: 'Off = offline OCR (default); On = use vision model (higher accuracy, requires API key)',
       historyRounds: 'History rounds',
+      // Langfuse observability
+      langfuseTitle: 'Langfuse Observability',
+      langfuseEnabledTag: '· Enabled',
+      langfuseDisabledTag: '· Disabled (default)',
+      langfuseHint: 'Self-hosted LLM observability for tracing prompts, completions, TTFT latency and token usage across Chat, Streaming, Vision and Embedding calls.',
+      enableLangfuse: 'Enable tracing',
+      enableLangfuseHint: 'Async non-blocking reporting; automatically degrades on failure without affecting main workflows',
+      langfuseHost: 'Langfuse Host',
+      langfuseHostPlaceholder: 'http://localhost:3000',
+      langfusePublicKey: 'Public Key',
+      langfusePublicKeyPlaceholder: 'pk-lf-...',
+      langfuseSecretKey: 'Secret Key',
+      langfuseSecretKeyPlaceholder: 'sk-lf-...',
+      openLangfuseConsole: 'Open Console ↗',
     },
 
     // === AI module ===
