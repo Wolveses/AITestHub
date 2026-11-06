@@ -102,6 +102,12 @@ class LLMConfig:
     providers: list = field(default_factory=list)
     active_provider_id: str = ""
 
+    # ===== Langfuse 大模型可观测性监控 =====
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "http://localhost:3000"
+
     @property
     def api_key_set(self) -> bool:
         return bool(self.llm_api_key)
@@ -156,6 +162,10 @@ _ENV_KEYS = {
     "tapd_backfill_days": "INSIGHT_EYE_AI_TAPD_BACKFILL_DAYS",
     "tapd_rate_limit_per_min": "INSIGHT_EYE_AI_TAPD_RATE_LIMIT_PER_MIN",
     "ui_workspace_dir": "INSIGHT_EYE_AI_UI_WORKSPACE_DIR",
+    "langfuse_enabled": "INSIGHT_EYE_AI_LANGFUSE_ENABLED",
+    "langfuse_public_key": "LANGFUSE_PUBLIC_KEY",
+    "langfuse_secret_key": "LANGFUSE_SECRET_KEY",
+    "langfuse_host": "LANGFUSE_HOST",
 }
 
 # 需要转 int 的字段
@@ -177,7 +187,7 @@ _INT_FIELDS = {
 _FLOAT_FIELDS = {"min_score", "semantic_breakpoint"}
 
 # 需要转 bool 的字段（"1"/"true"/"yes"/"on" → True，其余 False）
-_BOOL_FIELDS = {"rerank_enabled", "ocr_enabled", "vector_enabled"}
+_BOOL_FIELDS = {"rerank_enabled", "ocr_enabled", "vector_enabled", "langfuse_enabled"}
 
 
 def get_active_provider(cfg: LLMConfig) -> dict | None:

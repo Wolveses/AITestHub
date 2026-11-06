@@ -72,6 +72,8 @@ def reset_llm_singletons() -> None:
         _llm_config.config_file = prev_cfg.config_file
         _llm_config.db_path = prev_cfg.db_path
         _llm_config.docs_dir = prev_cfg.docs_dir
+    if _llm is not None and getattr(_llm, "_tracer", None) is not None:
+        _llm._tracer.flush()
     _llm = None
     _vector_store = None
     _retriever = None

@@ -12,7 +12,7 @@ def test_default_config(monkeypatch):
     assert cfg.embed_dim == 1536
     assert cfg.chunk_size == 500
     assert cfg.chunk_overlap == 80
-    assert cfg.top_k == 4
+    assert cfg.top_k == 5
     assert cfg.api_key_set is False
 
 
@@ -64,3 +64,28 @@ def test_llm_config_chunk_env_override(monkeypatch):
     cfg = load_config(config_file="/nonexistent/path.json")  # 跳过文件加载
     assert cfg.chunk_strategy == "semantic"
     assert cfg.semantic_breakpoint == 1.5
+
+
+def test_langfuse_config_env_and_file(monkeypatch, tmp_path):
+    """Langfuse 配置支持文件读写与环境变量覆盖。"""
+    cfg_file = tmp_path / "ai_config.json"
+    cfg_file.write_text(
+        json.dumps(
+            {
+                "langfuse_enabled": True,
+                "langfuse_public_key": "pk-lf-file",
+                "langfuse_secret_key": "sk-lf-file",
+                "langfuse_host": "http://localhost:3000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = load_config(config_file=str(cfg_file))
+    assert cfg.langfuse_enabled is True
+    assert cfg.langfuse_public_key == "pk-lf-file"
+    assert cfg.langfuse_secret_key == "sk-lf-file"
+    assert cfg.langfuse_host == "http://localhost:3000"
+
+    monkeypatch.setenv("LANGFUSE_HOST", "http://127.0.0.1:3000")
+    cfg2 = load_config(config_file=str(cfg_file))
+    assert cfg2.langfuse_host == "http://127.0.0.1:3000"

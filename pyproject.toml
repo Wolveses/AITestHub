@@ -64,6 +64,7 @@ dependencies = [
     "apscheduler>=3.10",
     "httpx>=0.25.0",
     "pyyaml>=6.0",
+    "langfuse>=2.50.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
