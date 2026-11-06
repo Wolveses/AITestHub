@@ -393,6 +393,7 @@ export function CaseEditorDialog({
         <ApiStepsEditor
           content={content}
           onChange={setContent}
+          hideBaseUrl
           extraActions={(
             <button onClick={openPicker} style={btnStyle()}>
               {t('api.importAssets')}

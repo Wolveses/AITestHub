@@ -59,16 +59,12 @@ export function CaseStepsView({ caseItem }: { caseItem: ApiCase | null }) {
     );
   }
   const steps = (caseItem.content?.steps || []) as ApiStep[];
-  const baseUrl = caseItem.content?.base_url || '';
 
   return (
     <div style={{ padding: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>{t('api.caseStepsTitle')}</span>
         <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{steps.length}</span>
-        {baseUrl && (
-          <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'monospace' }}>{baseUrl}</span>
-        )}
       </div>
 
       {steps.length === 0 && (
@@ -79,6 +75,7 @@ export function CaseStepsView({ caseItem }: { caseItem: ApiCase | null }) {
         const headers = Object.entries(step.headers || {});
         const assertions = step.assertions || [];
         const extract = Object.entries(step.extract || {});
+        const cleanPath = (step.path || '').replace(/^https?:\/\/[^/]+/i, '') || step.path;
         return (
           <div
             key={index}
@@ -98,22 +95,22 @@ export function CaseStepsView({ caseItem }: { caseItem: ApiCase | null }) {
                 {step.method}
               </span>
               <span style={{ fontSize: 14, color: 'var(--text-primary)', fontWeight: 500 }}>
-                {step.name || `${step.method} ${step.path}`}
+                {step.name || `${step.method} ${cleanPath}`}
               </span>
             </div>
             <div style={{ fontSize: 13, fontFamily: 'monospace', color: 'var(--text-secondary)', marginTop: 4, wordBreak: 'break-all' }}>
-              {step.path}
+              {cleanPath}
             </div>
 
             {headers.length > 0 && (
               <>
-                <div style={sectionLabel}>Headers</div>
+                <div style={sectionLabel}>{t('api.reqHeaders', '请求头')}</div>
                 <div style={codeBox}>{pretty(Object.fromEntries(headers))}</div>
               </>
             )}
             {step.body != null && step.body !== '' && (
               <>
-                <div style={sectionLabel}>Body</div>
+                <div style={sectionLabel}>{t('api.reqBody', '请求体')}</div>
                 <div style={codeBox}>{pretty(step.body)}</div>
               </>
             )}

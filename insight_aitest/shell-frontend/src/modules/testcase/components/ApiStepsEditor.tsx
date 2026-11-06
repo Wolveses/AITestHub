@@ -29,6 +29,8 @@ interface ApiStepsEditorProps {
   onChange: (content: ApiContent) => void;
   /** 步骤区右侧附加操作（如「从接口资产导入」） */
   extraActions?: ReactNode;
+  /** 是否隐藏顶部 Base URL 输入框 */
+  hideBaseUrl?: boolean;
 }
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
@@ -99,7 +101,7 @@ function JsonField({ value, onChange, placeholder }: {
   );
 }
 
-export function ApiStepsEditor({ content, onChange, extraActions }: ApiStepsEditorProps) {
+export function ApiStepsEditor({ content, onChange, extraActions, hideBaseUrl = false }: ApiStepsEditorProps) {
   const { t } = useTranslation();
   const steps = content.steps || [];
   const update = (patch: Partial<ApiContent>) => onChange({ ...content, ...patch });
@@ -119,15 +121,19 @@ export function ApiStepsEditor({ content, onChange, extraActions }: ApiStepsEdit
 
   return (
     <div>
-      <div style={sectionLabelStyle}>Base URL</div>
-      <input
-        style={{ ...inputStyle, width: '100%' }}
-        placeholder="https://example.com"
-        value={content.base_url || ''}
-        onChange={(e) => update({ base_url: e.target.value })}
-      />
+      {!hideBaseUrl && (
+        <>
+          <div style={sectionLabelStyle}>Base URL</div>
+          <input
+            style={{ ...inputStyle, width: '100%' }}
+            placeholder="https://example.com"
+            value={content.base_url || ''}
+            onChange={(e) => update({ base_url: e.target.value })}
+          />
+        </>
+      )}
 
-      <div style={{ ...sectionLabelStyle, marginTop: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ ...sectionLabelStyle, marginTop: hideBaseUrl ? 4 : 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span>{t('testcase.apiStepsLabel')}</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {extraActions}

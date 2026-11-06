@@ -15,7 +15,7 @@ export function StepResultCard({ step }: { step: StepResult }) {
       background: 'var(--bg-base)', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
         borderBottom: '1px solid var(--bg-card)' }}>
-        <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>Step {step.step_index + 1}</span>
+        <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>步骤 {step.step_index + 1}</span>
         <span style={{ color: "var(--text-primary)", fontSize: 13, flex: 1, fontFamily: 'monospace' }}>
           {step.request.method} {step.request.url}
         </span>
