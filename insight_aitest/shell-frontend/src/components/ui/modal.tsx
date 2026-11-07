@@ -48,9 +48,27 @@ export function Modal({
           }}
         >
           {title && (
-            <Dialog.Title style={{ padding: '20px 20px 8px', color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>
-              {title}
-            </Dialog.Title>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 8px' }}>
+              <Dialog.Title style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600, margin: 0 }}>
+                {title}
+              </Dialog.Title>
+              <button
+                type="button"
+                onClick={() => onOpenChange(false)}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: 'var(--text-muted)',
+                  fontSize: 18,
+                  cursor: 'pointer',
+                  padding: '2px 6px',
+                  borderRadius: 4,
+                  lineHeight: 1,
+                }}
+              >
+                ✕
+              </button>
+            </div>
           )}
           {/* Radix 要求 Title 存在用于 a11y；无 title 时用 visually-hidden 兜底 */}
           {!title && (

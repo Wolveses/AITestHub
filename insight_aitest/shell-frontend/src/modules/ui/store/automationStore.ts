@@ -175,6 +175,7 @@ interface AutomationState {
   saveEnv: (data: Record<string, unknown>, envId?: number) => Promise<UIEnv>;
   cloneEnv: (envId: number, newName?: string) => Promise<UIEnv>;
   deleteEnv: (envId: number) => Promise<void>;
+  switchEnv: (envId: number) => Promise<void>;
   testEnv: (envId: number, payload?: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
   testCustomEnv: (payload: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
   loadTemplates: () => Promise<ScriptTemplate[]>;
@@ -389,6 +390,16 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
 
   deleteEnv: async (envId) => {
     const r = await fetch(`${BASE}/envs/${envId}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await parseError(r));
+    await get().loadEnvs();
+  },
+
+  switchEnv: async (envId) => {
+    const r = await fetch(`${BASE}/envs/${envId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_default: true }),
+    });
     if (!r.ok) throw new Error(await parseError(r));
     await get().loadEnvs();
   },

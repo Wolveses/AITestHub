@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Download, Play, RefreshCw, Search, Settings2, Sparkles, Wrench, Eye, Square } from 'lucide-react';
+import { Download, Globe, Play, RefreshCw, Search, Sparkles, Wrench, Eye, Square } from 'lucide-react';
 import { useProjectStore } from '../../../../shared/store/projectStore';
 import { useConfirmStore } from '../../../../shared/store/confirmStore';
 import { ModuleHelpButton } from '../../../../shared/components/ModuleHelpButton';
@@ -9,7 +9,6 @@ import { useAutomationStore, type AutomationCase } from '../../store/automationS
 import { CategoryTree } from './CategoryTree';
 import { ImportCasesDialog } from './ImportCasesDialog';
 import { CaseDetailDrawer } from './CaseDetailDrawer';
-import { EnvManagerDialog } from './EnvManagerDialog';
 import { Btn, ErrorCategoryTag, StatusBadge, inputStyle } from './common';
 
 const ACTIVE_STATUSES = new Set(['generating', 'fixing', 'running']);
@@ -31,7 +30,9 @@ export function AutomationPage() {
     keyword,
     setKeyword,
     loadCases,
+    envs,
     loadEnvs,
+    switchEnv,
     generate,
     fix,
     cancelGenerate,
@@ -41,7 +42,6 @@ export function AutomationPage() {
   } = useAutomationStore();
 
   const [importOpen, setImportOpen] = useState(false);
-  const [envOpen, setEnvOpen] = useState(false);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
 
@@ -82,6 +82,18 @@ export function AutomationPage() {
   }, [hasActive, loadCases]);
 
   const activeProjectName = projects.find((p) => p.id === projectId)?.name || '';
+
+  const currentEnv = envs.find((e) => e.is_default) || envs[0];
+
+  const handleEnvChange = async (envId: number) => {
+    try {
+      await switchEnv(envId);
+      const target = envs.find((e) => e.id === envId);
+      toast.success(t('ui.auto.envSwitched', '已切换到环境「{{name}}」', { name: target?.name || target?.base_url }));
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  };
 
   const withBusy = async (id: number, fn: () => Promise<void>, okMsg: string) => {
     setBusyId(id);
@@ -171,9 +183,35 @@ export function AutomationPage() {
         <Btn variant="primary" onClick={() => setImportOpen(true)} disabled={projectId === null}>
           <Download size={14} /> {t('ui.auto.importCases', '导入用例')}
         </Btn>
-        <Btn onClick={() => setEnvOpen(true)} disabled={projectId === null}>
-          <Settings2 size={14} /> {t('ui.auto.manageEnv', '环境管理')}
-        </Btn>
+
+        {/* 环境快速切换下拉 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+          <Globe size={14} style={{ color: 'var(--text-muted)' }} />
+          <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{t('ui.auto.env', '环境')}:</span>
+          <select
+            value={currentEnv?.id ?? ''}
+            disabled={loading || envs.length === 0}
+            onChange={(e) => e.target.value && handleEnvChange(Number(e.target.value))}
+            style={{
+              ...inputStyle,
+              width: 'auto',
+              maxWidth: 240,
+              padding: '4px 8px',
+              fontSize: 12,
+              cursor: envs.length > 0 ? 'pointer' : 'default',
+            }}
+          >
+            {envs.length === 0 ? (
+              <option value="">{t('ui.auto.noEnvProjectTip', '暂无环境 (可在项目管理中添加)')}</option>
+            ) : (
+              envs.map((env) => (
+                <option key={env.id} value={env.id}>
+                  {env.name || '环境'} ({env.base_url}){env.is_default ? ' · 默认' : ''}
+                </option>
+              ))
+            )}
+          </select>
+        </div>
 
         <div style={{ flex: 1 }} />
 
@@ -333,14 +371,20 @@ export function AutomationPage() {
             )}
           </div>
 
-          <div style={{ padding: '6px 16px', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>
-            {activeProjectName} · {t('ui.auto.total', '共 {{count}} 条', { count: total })}
+          <div style={{ padding: '6px 16px', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span>
+              {activeProjectName} · {t('ui.auto.total', '共 {{count}} 条', { count: total })}
+            </span>
+            {currentEnv && (
+              <span style={{ color: 'var(--text-secondary)' }}>
+                {t('ui.auto.currentEnv', '当前环境')}: <strong style={{ color: 'var(--accent)' }}>{currentEnv.name || '环境'}</strong> ({currentEnv.base_url})
+              </span>
+            )}
           </div>
         </div>
       </div>
 
       <ImportCasesDialog open={importOpen} onClose={() => setImportOpen(false)} />
-      <EnvManagerDialog open={envOpen} onClose={() => setEnvOpen(false)} />
       <CaseDetailDrawer caseId={detailId} onClose={() => setDetailId(null)} />
     </div>
   );

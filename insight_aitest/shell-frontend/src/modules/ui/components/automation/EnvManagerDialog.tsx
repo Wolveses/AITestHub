@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { CheckCircle2, Code2, Copy, Eye, EyeOff, FileCode, Globe, Play, PlugZap, Plus, Save, Trash2 } from 'lucide-react';
 import { Modal } from '../../../../components/ui/modal';
+import { useConfirmStore } from '../../../../shared/store/confirmStore';
 import { useAutomationStore, type UIEnv, type ScriptTemplate } from '../../store/automationStore';
 import { Btn, Field, inputStyle } from './common';
 
@@ -22,10 +23,30 @@ const EMPTY_ENV: EnvForm = {
   is_default: true,
 };
 
-export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+export interface EnvManagerDialogProps {
+  open: boolean;
+  onClose: () => void;
+  targetProjectId?: number | null;
+  projectName?: string;
+  initialTab?: 'envs' | 'script';
+  initialEditEnv?: UIEnv | null;
+  onChanged?: () => void;
+}
+
+export function EnvManagerDialog({
+  open,
+  onClose,
+  targetProjectId,
+  projectName,
+  initialTab = 'envs',
+  initialEditEnv = null,
+  onChanged,
+}: EnvManagerDialogProps) {
   const { t } = useTranslation();
+  const { confirm } = useConfirmStore();
   const {
-    projectId,
+    projectId: storeProjectId,
+    setProjectId,
     envs,
     loadEnvs,
     saveEnv,
@@ -39,7 +60,9 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
     testProjectAuthScript,
   } = useAutomationStore();
 
-  const [activeTab, setActiveTab] = useState<'envs' | 'script'>('envs');
+  const projectId = targetProjectId !== undefined ? targetProjectId : storeProjectId;
+
+  const [activeTab, setActiveTab] = useState<'envs' | 'script'>(initialTab);
 
   // 环境管理状态
   const [envForm, setEnvForm] = useState<EnvForm>(EMPTY_ENV);
@@ -60,13 +83,29 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
 
   useEffect(() => {
     if (open) {
+      if (targetProjectId !== undefined && targetProjectId !== storeProjectId) {
+        setProjectId(targetProjectId);
+      }
+      setActiveTab(initialTab);
       loadEnvs();
       loadTemplates().then(setTemplates).catch(() => {});
-      setEnvForm(EMPTY_ENV);
       setShowPassword(false);
-      setEditEnvId(null);
       setEnvTestResult(null);
       setScriptTestResult(null);
+
+      if (initialEditEnv) {
+        setEditEnvId(initialEditEnv.id);
+        setEnvForm({
+          name: initialEditEnv.name,
+          base_url: initialEditEnv.base_url,
+          username: initialEditEnv.username,
+          password: '',
+          is_default: initialEditEnv.is_default,
+        });
+      } else {
+        setEditEnvId(null);
+        setEnvForm(EMPTY_ENV);
+      }
 
       if (projectId !== null) {
         loadProjectAuthScript(projectId)
@@ -76,7 +115,7 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
           .catch(() => {});
       }
     }
-  }, [open, projectId, loadEnvs, loadTemplates, loadProjectAuthScript]);
+  }, [open, projectId, targetProjectId, storeProjectId, initialTab, initialEditEnv, setProjectId, loadEnvs, loadTemplates, loadProjectAuthScript]);
 
   // 环境编辑
   const startEditEnv = (env: UIEnv) => {
@@ -98,7 +137,7 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
     }
     setSavingEnv(true);
     try {
-      const payload: Record<string, unknown> = { ...envForm };
+      const payload: Record<string, unknown> = { ...envForm, project_id: projectId };
       if (editEnvId !== null && !envForm.password) delete payload.password;
       await saveEnv(payload, editEnvId ?? undefined);
       toast.success(t('ui.auto.envSaved', '环境已保存'));
@@ -106,6 +145,7 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
       setShowPassword(false);
       setEditEnvId(null);
       setEnvTestResult(null);
+      onChanged?.();
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -164,23 +204,32 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
       const cloned = await cloneEnv(env.id, newName.trim() || undefined);
       toast.success(t('ui.auto.cloned', '环境复制成功'));
       startEditEnv(cloned);
+      onChanged?.();
     } catch (e) {
       toast.error((e as Error).message);
     }
   };
 
-  const handleDeleteEnv = async (env: UIEnv) => {
-    try {
-      await deleteEnv(env.id);
-      toast.success(t('ui.auto.deleted', '已删除'));
-      if (editEnvId === env.id) {
-        setEditEnvId(null);
-        setEnvForm(EMPTY_ENV);
-        setEnvTestResult(null);
-      }
-    } catch (e) {
-      toast.error((e as Error).message);
-    }
+  const handleDeleteEnv = (env: UIEnv) => {
+    confirm({
+      title: '确认删除环境',
+      message: `确定要删除环境「${env.name || env.base_url}」吗？`,
+      variant: 'danger',
+      onConfirm: async () => {
+        try {
+          await deleteEnv(env.id);
+          toast.success(t('ui.auto.deleted', '已删除'));
+          if (editEnvId === env.id) {
+            setEditEnvId(null);
+            setEnvForm(EMPTY_ENV);
+            setEnvTestResult(null);
+          }
+          onChanged?.();
+        } catch (e) {
+          toast.error((e as Error).message);
+        }
+      },
+    });
   };
 
   // 项目级脚本管理
@@ -238,7 +287,7 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
     <Modal
       open={open}
       onOpenChange={(v) => !v && onClose()}
-      title={t('ui.auto.envManagerModalTitle', '环境与前置登录配置')}
+      title={projectName ? `环境配置 - ${projectName}` : t('ui.auto.envManagerModalTitle', '环境配置')}
       width="min(1080px, 95vw)"
     >
       <div style={{ padding: '0 20px 18px', height: 'min(78vh, 720px)', display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -465,17 +514,9 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
                 <Btn disabled={formTesting || savingEnv} onClick={handleTestCurrentEnvForm}>
                   <PlugZap size={12} /> {formTesting ? t('ui.auto.testing', '连通测试中…') : t('ui.auto.testConn', '测试连接')}
                 </Btn>
-                {editEnvId !== null && (
-                  <Btn
-                    onClick={() => {
-                      setEditEnvId(null);
-                      setEnvForm(EMPTY_ENV);
-                      setEnvTestResult(null);
-                    }}
-                  >
-                    {t('ui.auto.cancel', '取消')}
-                  </Btn>
-                )}
+                <Btn onClick={onClose}>
+                  {t('ui.auto.cancel', '取消')}
+                </Btn>
               </div>
             </div>
           </div>
@@ -592,9 +633,14 @@ export function EnvManagerDialog({ open, onClose }: { open: boolean; onClose: ()
                 </Btn>
               </div>
 
-              <Btn variant="primary" disabled={savingScript || testingScript} onClick={handleSaveProjectScript}>
-                <Save size={12} /> {savingScript ? t('ui.auto.saving', '保存中…') : t('ui.auto.saveProjectScript', '保存项目脚本')}
-              </Btn>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Btn variant="primary" disabled={savingScript || testingScript} onClick={handleSaveProjectScript}>
+                  <Save size={12} /> {savingScript ? t('ui.auto.saving', '保存中…') : t('ui.auto.saveProjectScript', '保存项目脚本')}
+                </Btn>
+                <Btn onClick={onClose}>
+                  {t('ui.auto.cancel', '取消')}
+                </Btn>
+              </div>
             </div>
           </div>
         )}
