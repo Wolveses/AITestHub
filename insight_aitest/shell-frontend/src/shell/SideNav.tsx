@@ -42,8 +42,8 @@ export function SideNav({ modules, collapsed, isMobile, onNavigate }: SideNavPro
   // 移动端：覆盖式抽屉（fixed，280 宽，避 TopBar 60px）；桌面：原 200↔0 in-flow
   const width = isMobile ? 280 : collapsed ? 0 : 200;
 
-  // 临时屏蔽性能监控菜单（API 自动化已开放）
-  const HIDDEN_MODULE_IDS = new Set(['performance']);
+  // 屏蔽已废弃或未启用的模块
+  const HIDDEN_MODULE_IDS = new Set<string>([]);
 
   const grouped = modules
     .filter((m) => !HIDDEN_MODULE_IDS.has(m.id))

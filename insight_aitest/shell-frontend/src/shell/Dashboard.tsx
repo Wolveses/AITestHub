@@ -43,8 +43,8 @@ export function Dashboard({ modules }: DashboardProps) {
       .catch(() => setBackendHealthy(false));
   }, []);
 
-  // 临时屏蔽性能监控模块入口（API 自动化已开放）
-  const HIDDEN_MODULE_IDS = new Set(['performance']);
+  // 屏蔽已废弃或未启用的模块
+  const HIDDEN_MODULE_IDS = new Set<string>([]);
 
   const dashboardModules = modules
     .filter((m) => !HIDDEN_MODULE_IDS.has(m.id) && m.frontend?.nav.show_in_dashboard)
