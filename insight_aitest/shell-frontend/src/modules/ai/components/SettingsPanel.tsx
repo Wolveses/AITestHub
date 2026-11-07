@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useConfigStore, type AIConfigUpdate, type ProviderOut, type ProviderUpsert } from '../store/configStore';
 import { Play, AlertTriangle, Plus, Trash2, Check, Zap, Edit3, ChevronDown, Sun, Moon } from 'lucide-react';
 import { useThemeStore, type Theme } from '@/shared/store/themeStore';
+import { useConfirmStore } from '@/shared/store/confirmStore';
 import { errorMessage } from '@/shared/utils/errorMessage';
 
 const inputStyle: React.CSSProperties = {
@@ -441,6 +442,7 @@ export function SettingsPanel() {
 // ===== Provider 卡片管理区 =====
 function ProviderSection() {
   const { t } = useTranslation();
+  const confirm = useConfirmStore((s) => s.confirm);
   const { config, presets, loadPresets, upsertProvider, deleteProvider, activateProvider, testConnection, saving } = useConfigStore();
   const [editing, setEditing] = useState<ProviderOut | null>(null);
   const [adding, setAdding] = useState(false);
@@ -482,10 +484,19 @@ function ProviderSection() {
             isActive={p.id === config?.active_provider_id}
             onActivate={() => activateProvider(p.id)}
             onEdit={() => { setEditing(p); setAdding(false); }}
-            onDelete={async () => {
-              if (confirm(t('settings.confirmDeleteProvider', { name: p.name }))) {
-                try { await deleteProvider(p.id); } catch (e) { alert(errorMessage(e)); }
-              }
+            onDelete={() => {
+              confirm({
+                title: t('dialogs.confirmDelete', '确认删除'),
+                message: t('settings.confirmDeleteProvider', { name: p.name }),
+                variant: 'danger',
+                onConfirm: async () => {
+                  try {
+                    await deleteProvider(p.id);
+                  } catch (e) {
+                    alert(errorMessage(e));
+                  }
+                },
+              });
             }}
           />
         ))}

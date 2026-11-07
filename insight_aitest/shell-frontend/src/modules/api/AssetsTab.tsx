@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Bot, FilePlus2, KeyRound, Loader2, Play, RefreshCw, Send, Trash2, VolumeX, X } from 'lucide-react';
 import { useProjectStore } from '../../shared/store/projectStore';
+import { useConfirmStore } from '../../shared/store/confirmStore';
 import { useIsMobile } from '../../shared/hooks/useIsMobile';
 import { EnvironmentSelect } from './components/EnvironmentSelect';
 import { useEnvStore } from './store/envStore';
@@ -82,6 +83,7 @@ const btnStyle = (disabled = false): CSSProperties => ({
 export function AssetsTab() {
   const { t } = useTranslation();
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
+  const confirm = useConfirmStore((s) => s.confirm);
   const isMobile = useIsMobile();
   const {
     items, total, loading, selectedId, checkedIds,
@@ -357,13 +359,23 @@ export function AssetsTab() {
             </label>
           )}
           {checkedIds.length > 0 && (
-            <button style={btnStyle(busy)} disabled={busy} onClick={() => {
-              if (!window.confirm(t('api.batchDeleteConfirm', { count: checkedIds.length }))) return;
-              run(async () => {
-                const deleted = await deleteChecked();
-                toast.success(`${t('api.deleteDone')}（${deleted}）`);
-              });
-            }}>
+            <button
+              style={btnStyle(busy)}
+              disabled={busy}
+              onClick={() => {
+                confirm({
+                  title: t('api.batchDelete', '批量删除'),
+                  message: t('api.batchDeleteConfirm', { count: checkedIds.length }),
+                  variant: 'danger',
+                  onConfirm: () => {
+                    run(async () => {
+                      const deleted = await deleteChecked();
+                      toast.success(`${t('api.deleteDone')}（${deleted}）`);
+                    });
+                  },
+                });
+              }}
+            >
               <Trash2 size={12} strokeWidth={1.5} /> {t('api.batchDelete')} ({checkedIds.length})
             </button>
           )}
