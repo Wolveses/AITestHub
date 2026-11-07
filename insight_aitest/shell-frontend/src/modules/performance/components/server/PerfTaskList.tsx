@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { Plus, Play, Trash2, RefreshCw, Layers, Clock, BarChart2 } from 'lucide-react';
 import { useProjectStore } from '../../../../shared/store/projectStore';
+import { useConfirmStore } from '../../../../shared/store/confirmStore';
 import { useServerPerfStore, type PerfTaskItem } from '../../store/serverPerfStore';
 
 export function PerfTaskList({ onOpenReport }: { onOpenReport: (runId: number) => void }) {
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
   const { tasks, scripts, loading, loadTasks, loadScripts } = useServerPerfStore();
+  const confirm = useConfirmStore((s) => s.confirm);
   const [createModalOpen, setCreateModalOpen] = useState(false);
 
   // 创建任务表单
@@ -44,18 +46,25 @@ export function PerfTaskList({ onOpenReport }: { onOpenReport: (runId: number) =
     }
   };
 
-  const handleDelete = async (task: PerfTaskItem) => {
-    if (!confirm(`确定要删除压测任务「${task.name}」吗？`)) return;
-    try {
-      const res = await fetch(`/api/modules/performance/server/tasks/${task.id}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) throw new Error('删除失败');
-      toast.success('任务已删除');
-      if (currentProjectId !== null) loadTasks(currentProjectId);
-    } catch (err: any) {
-      toast.error(err.message || '删除失败');
-    }
+  const handleDelete = (task: PerfTaskItem) => {
+    confirm({
+      title: '确认删除压测任务',
+      message: `确定要删除压测任务「${task.name}」吗？删除后相关编排配置将无法恢复。`,
+      confirmText: '确认删除',
+      variant: 'danger',
+      onConfirm: async () => {
+        try {
+          const res = await fetch(`/api/modules/performance/server/tasks/${task.id}`, {
+            method: 'DELETE',
+          });
+          if (!res.ok) throw new Error('删除失败');
+          toast.success('任务已删除');
+          if (currentProjectId !== null) loadTasks(currentProjectId);
+        } catch (err: any) {
+          toast.error(err.message || '删除失败');
+        }
+      },
+    });
   };
 
   const handleCreateTask = async () => {

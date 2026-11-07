@@ -49,6 +49,10 @@ export const childrenMap: Record<string, Record<string, ComponentType>> = {
     dashboard: lazy(() => import('./modules/api').then((m) => ({ default: m.Dashboard }))),
     schedules: lazy(() => import('./modules/api').then((m) => ({ default: m.SchedulePanel }))),
   },
+  performance: {
+    scripts: lazy(() => import('./modules/performance').then((m) => ({ default: m.PerformanceScriptsApp }))),
+    monitoring: lazy(() => import('./modules/performance').then((m) => ({ default: m.PerformanceMonitoringApp }))),
+  },
   testcase: {
     list: lazy(() => import('./modules/testcase').then((m) => ({ default: m.CaseList }))),
     generate: lazy(() => import('./modules/testcase').then((m) => ({ default: m.GenerateWizard }))),

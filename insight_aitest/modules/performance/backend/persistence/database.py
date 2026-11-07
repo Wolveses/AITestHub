@@ -17,6 +17,23 @@ from insight_aitest.modules.performance.backend.persistence.models import (
 from insight_aitest.platform.persistence import Base, ensure_schema, get_engine, session_scope
 
 
+def _ensure_perf_run_columns(db_path: str) -> None:
+    """增量迁移：给旧 perf_runs 表补 script_id、console_output、jtl 等列（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(perf_runs)")}
+        if "script_id" not in cols:
+            conn.execute("ALTER TABLE perf_runs ADD COLUMN script_id INTEGER")
+        if "console_output" not in cols:
+            conn.execute("ALTER TABLE perf_runs ADD COLUMN console_output TEXT DEFAULT ''")
+        if "jtl_content" not in cols:
+            conn.execute("ALTER TABLE perf_runs ADD COLUMN jtl_content TEXT DEFAULT ''")
+        if "jtl_rows_json" not in cols:
+            conn.execute("ALTER TABLE perf_runs ADD COLUMN jtl_rows_json JSON DEFAULT '[]'")
+        conn.commit()
+
+
 class PerfDatabase:
     """性能测试持久化数据库。"""
 
@@ -32,7 +49,7 @@ class PerfDatabase:
                 PerfRun.__table__,
             ],
         )
-        ensure_schema(db_path, [])
+        ensure_schema(db_path, [_ensure_perf_run_columns])
 
     # ===== 脚本管理 (Scripts) =====
     def create_script(self, script: PerfScript) -> int:
@@ -51,6 +68,7 @@ class PerfDatabase:
         script_id: int,
         name: Optional[str] = None,
         description: Optional[str] = None,
+        plan_description: Optional[str] = None,
         jmx_content: Optional[str] = None,
         config: Optional[dict] = None,
     ) -> Optional[PerfScript]:
@@ -63,6 +81,8 @@ class PerfDatabase:
                 script.name = name
             if description is not None:
                 script.description = description
+            if plan_description is not None:
+                script.plan_description = plan_description
             if jmx_content is not None:
                 script.jmx_content = jmx_content
             if config is not None:
@@ -283,6 +303,9 @@ class PerfDatabase:
         p99_rt_ms: Optional[float] = None,
         timeline_metrics: Optional[list[dict]] = None,
         sampler_summary: Optional[list[dict]] = None,
+        jtl_rows: Optional[list[dict]] = None,
+        jtl_content: Optional[str] = None,
+        console_output: Optional[str] = None,
         ended_at: Optional[datetime] = None,
         error_message: Optional[str] = None,
     ) -> Optional[PerfRun]:
@@ -313,6 +336,12 @@ class PerfDatabase:
                 run.timeline_metrics = timeline_metrics
             if sampler_summary is not None:
                 run.sampler_summary = sampler_summary
+            if jtl_rows is not None:
+                run.jtl_rows = jtl_rows
+            if jtl_content is not None:
+                run.jtl_content = jtl_content
+            if console_output is not None:
+                run.console_output = console_output
             if ended_at is not None:
                 run.ended_at = ended_at
             if error_message is not None:
@@ -324,6 +353,7 @@ class PerfDatabase:
         self,
         project_id: Optional[int] = None,
         task_id: Optional[int] = None,
+        script_id: Optional[int] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[PerfRun], int]:
@@ -333,6 +363,8 @@ class PerfDatabase:
                 stmt = stmt.where(PerfRun.project_id == project_id)
             if task_id is not None:
                 stmt = stmt.where(PerfRun.task_id == task_id)
+            if script_id is not None:
+                stmt = stmt.where(PerfRun.script_id == script_id)
 
             all_items = session.execute(stmt).scalars().all()
             total = len(all_items)
@@ -344,3 +376,12 @@ class PerfDatabase:
             )
             items = session.execute(stmt).scalars().all()
             return list(items), total
+
+    def delete_run(self, run_id: int) -> bool:
+        with session_scope(self.db_path) as session:
+            stmt = select(PerfRun).where(PerfRun.id == run_id)
+            run = session.execute(stmt).scalar_one_or_none()
+            if not run:
+                return False
+            session.delete(run)
+            return True

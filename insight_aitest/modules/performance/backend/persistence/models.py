@@ -115,18 +115,20 @@ class PerfTaskScript(MappedAsDataclass, Base, kw_only=True):
 
 
 class PerfRun(MappedAsDataclass, Base, kw_only=True):
-    """任务执行记录与测试报告表。"""
+    """任务与场景执行记录与测试报告表。"""
 
     __tablename__ = "perf_runs"
     __table_args__ = (
         Index("idx_perf_runs_task", "task_id"),
+        Index("idx_perf_runs_script", "script_id"),
         Index("idx_perf_runs_project", "project_id"),
     )
 
     id: Mapped[int | None] = mapped_column(
         Integer, primary_key=True, autoincrement=True, default=None
     )
-    task_id: Mapped[int] = mapped_column(Integer)
+    task_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=0)
+    script_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     project_id: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(Text, default="running")
 
@@ -149,6 +151,14 @@ class PerfRun(MappedAsDataclass, Base, kw_only=True):
     sampler_summary: Mapped[list[dict]] = mapped_column(
         "sampler_summary_json", JSON, default_factory=list
     )
+    # 结构化 JTL 样本明细行（前数千条）
+    jtl_rows: Mapped[list[dict]] = mapped_column(
+        "jtl_rows_json", JSON, default_factory=list
+    )
+    # 原始 JTL 文件内容文本（CSV 格式）
+    jtl_content: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
+    # 运行时控制台完整输出文本
+    console_output: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
 
     started_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)

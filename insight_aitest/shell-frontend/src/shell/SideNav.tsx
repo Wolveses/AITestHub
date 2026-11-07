@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { ChevronDown, ChevronRight, FileText, Globe, Bug, ListChecks } from 'lucide-react';
+import { ChevronDown, ChevronRight, FileText, Globe, Bug, ListChecks, FileCode2, Gauge } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { moduleIcons, platformIcons } from './icons';
 import type { ModuleManifest } from './types';
@@ -191,6 +191,28 @@ export function SideNav({ modules, collapsed, isMobile, onNavigate }: SideNavPro
                             to="/kb/case"
                             icon={ListChecks}
                             label={t('nav.caseLibrary', '用例库')}
+                            isMobile={isMobile}
+                            onNavigate={onNavigate}
+                          />
+                        </div>
+                      );
+                    }
+
+                    // 针对性能测试模块：性能测试与性能监控统一作为平级的一级菜单入口
+                    if (m.id === 'performance') {
+                      return (
+                        <div key={m.id} style={{ display: 'flex', flexDirection: 'column' }}>
+                          <NavItem
+                            to="/performance/scripts"
+                            icon={FileCode2}
+                            label={t('nav.performance', '性能测试')}
+                            isMobile={isMobile}
+                            onNavigate={onNavigate}
+                          />
+                          <NavItem
+                            to="/performance/monitoring"
+                            icon={Gauge}
+                            label={t('nav.performanceMonitoring', '性能监控')}
                             isMobile={isMobile}
                             onNavigate={onNavigate}
                           />

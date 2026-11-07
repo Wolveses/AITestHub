@@ -76,6 +76,32 @@ class JmxGenerator:
 
         plan_hash_tree = ET.SubElement(tree_root, "hashTree")
 
+        # HTTP Request Defaults（统一设置 IP/域名、端口与协议）
+        http_defaults = ET.SubElement(
+            plan_hash_tree,
+            "ConfigTestElement",
+            guiclass="HttpDefaultsGui",
+            testclass="ConfigTestElement",
+            testname="HTTP Request Defaults",
+            enabled="true",
+        )
+        defaults_args = ET.SubElement(
+            http_defaults,
+            "elementProp",
+            name="HTTPsampler.Arguments",
+            elementType="Arguments",
+            guiclass="HTTPArgumentsPanel",
+            testclass="Arguments",
+            testname="User Defined Variables",
+            enabled="true",
+        )
+        ET.SubElement(defaults_args, "collectionProp", name="Arguments.arguments")
+        ET.SubElement(http_defaults, "stringProp", name="HTTPSampler.domain").text = domain
+        ET.SubElement(http_defaults, "stringProp", name="HTTPSampler.port").text = str(port) if port else ""
+        ET.SubElement(http_defaults, "stringProp", name="HTTPSampler.protocol").text = protocol
+        ET.SubElement(http_defaults, "stringProp", name="HTTPSampler.contentEncoding").text = "UTF-8"
+        ET.SubElement(plan_hash_tree, "hashTree")
+
         # Global HeaderManager
         header_mgr = ET.SubElement(
             plan_hash_tree,
@@ -125,7 +151,7 @@ class JmxGenerator:
 
         thread_hash_tree = ET.SubElement(plan_hash_tree, "hashTree")
 
-        # 遍历步骤生成 HTTP Sampler
+        # 遍历步骤生成 HTTP Sampler（IP/端口留空以继承 HTTP Request Defaults）
         for step in steps:
             s_name = step.get("name") or f"{step.get('method', 'GET')} {step.get('path', '')}"
             sampler = ET.SubElement(
@@ -136,11 +162,9 @@ class JmxGenerator:
                 testname=s_name,
                 enabled="true",
             )
-            if domain:
-                ET.SubElement(sampler, "stringProp", name="HTTPSampler.domain").text = domain
-            if port:
-                ET.SubElement(sampler, "stringProp", name="HTTPSampler.port").text = str(port)
-            ET.SubElement(sampler, "stringProp", name="HTTPSampler.protocol").text = protocol
+            ET.SubElement(sampler, "stringProp", name="HTTPSampler.domain").text = ""
+            ET.SubElement(sampler, "stringProp", name="HTTPSampler.port").text = ""
+            ET.SubElement(sampler, "stringProp", name="HTTPSampler.protocol").text = ""
             ET.SubElement(sampler, "stringProp", name="HTTPSampler.path").text = step.get("path", "")
             ET.SubElement(sampler, "stringProp", name="HTTPSampler.method").text = (
                 step.get("method", "GET").upper()

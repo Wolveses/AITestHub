@@ -63,15 +63,6 @@ class JmxParser:
         if test_plan is not None:
             out["test_name"] = test_plan.get("testname", "Performance Plan")
 
-        # 查找 Global HeaderManager
-        global_hm = root.find(".//HeaderManager[@testname='Global HTTP Headers']")
-        if global_hm is not None:
-            for elem in global_hm.findall(".//elementProp"):
-                name = elem.find("./stringProp[@name='Header.name']")
-                val = elem.find("./stringProp[@name='Header.value']")
-                if name is not None and val is not None and name.text:
-                    out["global_headers"][name.text] = val.text or ""
-
         # 查找 ThreadGroup
         tg = root.find(".//ThreadGroup")
         if tg is not None:
@@ -94,6 +85,22 @@ class JmxParser:
                     except ValueError:
                         out["loops"] = 1
 
+        # 查找 HTTP Request Defaults (ConfigTestElement guiclass="HttpDefaultsGui")
+        default_domain = ""
+        default_port = ""
+        default_protocol = "http"
+        http_defaults = root.find(".//ConfigTestElement[@guiclass='HttpDefaultsGui']")
+        if http_defaults is not None:
+            d_elem = http_defaults.find("./stringProp[@name='HTTPSampler.domain']")
+            if d_elem is not None and d_elem.text:
+                default_domain = d_elem.text.strip()
+            p_elem = http_defaults.find("./stringProp[@name='HTTPSampler.port']")
+            if p_elem is not None and p_elem.text:
+                default_port = p_elem.text.strip()
+            pr_elem = http_defaults.find("./stringProp[@name='HTTPSampler.protocol']")
+            if pr_elem is not None and pr_elem.text:
+                default_protocol = pr_elem.text.strip()
+
         # 查找所有 HTTPSamplerProxy 及其紧邻的 hashTree
         # 注意：在 JMeter hashTree 结构中，sampler 之后通常紧随对应的 hashTree 包含其子组件
         samplers = root.findall(".//HTTPSamplerProxy")
@@ -103,13 +110,13 @@ class JmxParser:
             method = (method_elem.text if method_elem is not None and method_elem.text else "GET").upper()
 
             domain_elem = sampler.find("./stringProp[@name='HTTPSampler.domain']")
-            domain = domain_elem.text if domain_elem is not None and domain_elem.text else ""
+            domain = (domain_elem.text.strip() if domain_elem is not None and domain_elem.text else "") or default_domain
 
             port_elem = sampler.find("./stringProp[@name='HTTPSampler.port']")
-            port = port_elem.text if port_elem is not None and port_elem.text else ""
+            port = (port_elem.text.strip() if port_elem is not None and port_elem.text else "") or default_port
 
             proto_elem = sampler.find("./stringProp[@name='HTTPSampler.protocol']")
-            protocol = proto_elem.text if proto_elem is not None and proto_elem.text else "http"
+            protocol = (proto_elem.text.strip() if proto_elem is not None and proto_elem.text else "") or default_protocol or "http"
 
             path_elem = sampler.find("./stringProp[@name='HTTPSampler.path']")
             path = path_elem.text if path_elem is not None and path_elem.text else ""
@@ -135,7 +142,7 @@ class JmxParser:
                 "domain": domain,
                 "port": port,
                 "path": path,
-                "headers": dict(out["global_headers"]),
+                "headers": {},
                 "body": body_val,
                 "extract": {},
                 "assertions": [],
@@ -175,3 +182,66 @@ class JmxParser:
                         )
                     except ValueError:
                         pass
+
+    @classmethod
+    def override_base_url(cls, jmx_content: str, base_url: str) -> str:
+        """同时覆盖 JMX 中 HTTP Request Defaults 与所有 HTTP Request 的协议、域名/IP、端口。"""
+        if not base_url or not base_url.strip():
+            return jmx_content
+
+        from urllib.parse import urlparse
+        import re
+
+        clean_url = base_url.strip()
+        if "://" not in clean_url:
+            clean_url = f"http://{clean_url}"
+        parsed_u = urlparse(clean_url)
+        if not parsed_u.hostname:
+            return jmx_content
+
+        domain_val = parsed_u.hostname
+        proto_val = parsed_u.scheme or "http"
+        port_val = str(parsed_u.port) if parsed_u.port else ""
+
+        def _set_prop(elem: ET.Element, prop_name: str, val: str) -> None:
+            prop = elem.find(f"./stringProp[@name='{prop_name}']")
+            if prop is None:
+                prop = ET.SubElement(elem, "stringProp", name=prop_name)
+            prop.text = val
+
+        try:
+            root = ET.fromstring(jmx_content)
+            # 1. 覆盖所有 HTTP Request Defaults (ConfigTestElement guiclass="HttpDefaultsGui")
+            for defaults_elem in root.findall(".//ConfigTestElement[@guiclass='HttpDefaultsGui']"):
+                _set_prop(defaults_elem, "HTTPSampler.protocol", proto_val)
+                _set_prop(defaults_elem, "HTTPSampler.domain", domain_val)
+                _set_prop(defaults_elem, "HTTPSampler.port", port_val)
+
+            # 2. 覆盖所有 HTTP Request (HTTPSamplerProxy)
+            for sampler_elem in root.findall(".//HTTPSamplerProxy"):
+                _set_prop(sampler_elem, "HTTPSampler.protocol", proto_val)
+                _set_prop(sampler_elem, "HTTPSampler.domain", domain_val)
+                _set_prop(sampler_elem, "HTTPSampler.port", port_val)
+
+            xml_str = ET.tostring(root, encoding="unicode")
+            if not xml_str.lstrip().startswith("<?xml"):
+                xml_str = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_str
+            return xml_str
+        except Exception:
+            # 正则兜底替换
+            res = re.sub(
+                r'<stringProp name="HTTPSampler\.domain">.*?</stringProp>',
+                f'<stringProp name="HTTPSampler.domain">{domain_val}</stringProp>',
+                jmx_content,
+            )
+            res = re.sub(
+                r'<stringProp name="HTTPSampler\.protocol">.*?</stringProp>',
+                f'<stringProp name="HTTPSampler.protocol">{proto_val}</stringProp>',
+                res,
+            )
+            res = re.sub(
+                r'<stringProp name="HTTPSampler\.port">.*?</stringProp>',
+                f'<stringProp name="HTTPSampler.port">{port_val}</stringProp>',
+                res,
+            )
+            return res

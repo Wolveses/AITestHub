@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import StreamingResponse
+from logzero import logger
 from pydantic import BaseModel
 
 from insight_aitest.modules.api.backend.deps import get_asset_db
@@ -21,6 +25,7 @@ from insight_aitest.modules.performance.backend.persistence.models import (
 )
 from insight_aitest.modules.performance.backend.services.ai_service import PerfAIService
 from insight_aitest.modules.performance.backend.services.debugger import ScriptDebugger
+from insight_aitest.modules.performance.backend.services.jmx_parser import JmxParser
 
 router = APIRouter(prefix="/server", tags=["performance-server"])
 
@@ -47,6 +52,7 @@ class ScriptSaveIn(BaseModel):
 class ScriptUpdateIn(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    plan_description: Optional[str] = None
     jmx_content: Optional[str] = None
     config: Optional[dict] = None
 
@@ -55,6 +61,12 @@ class ScriptDebugIn(BaseModel):
     jmx_content: str
     base_url: str = ""
     global_vars: dict = {}
+
+
+class ScriptRunIn(BaseModel):
+    engine_type: str = "jmeter_cli"
+    env_id: Optional[int] = None
+    env_base_url: str = ""
 
 
 class TaskCreateIn(BaseModel):
@@ -133,12 +145,24 @@ def create_script(
     body: ScriptSaveIn,
     db: PerfDatabase = Depends(get_perf_db),
 ) -> dict:
+    config = dict(body.config or {})
+    if body.jmx_content and not config.get("steps"):
+        try:
+            parsed = JmxParser.parse(body.jmx_content)
+            config["steps"] = parsed.get("steps", [])
+            if "concurrency" not in config:
+                config["concurrency"] = parsed.get("concurrency", 1)
+            if "duration" not in config:
+                config["duration"] = parsed.get("duration", 60)
+        except Exception as exc:
+            logger.warning(f"自动解析 JMX 链路失败: {exc}")
+
     script = PerfScript(
         project_id=body.project_id,
         name=body.name,
         description=body.description,
         plan_description=body.plan_description,
-        config=body.config,
+        config=config,
         jmx_content=body.jmx_content,
         asset_ids=body.asset_ids,
     )
@@ -183,13 +207,30 @@ def get_script(script_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
     s = db.get_script(script_id)
     if not s:
         raise HTTPException(404, "脚本不存在")
+
+    config = dict(s.config or {})
+    steps = config.get("steps") or []
+    if not steps and s.jmx_content:
+        try:
+            parsed = JmxParser.parse(s.jmx_content)
+            steps = parsed.get("steps", [])
+            config["steps"] = steps
+            if "concurrency" not in config:
+                config["concurrency"] = parsed.get("concurrency", 1)
+            if "duration" not in config:
+                config["duration"] = parsed.get("duration", 60)
+            db.update_script(s.id, config=config)
+        except Exception as exc:
+            logger.warning(f"获取脚本详情时解析 JMX 失败: {exc}")
+
     return {
         "id": s.id,
         "project_id": s.project_id,
         "name": s.name,
         "description": s.description,
         "plan_description": s.plan_description,
-        "config": s.config,
+        "config": config,
+        "parsed_steps": steps,
         "jmx_content": s.jmx_content,
         "asset_ids": s.asset_ids,
         "created_at": s.created_at.isoformat(),
@@ -201,12 +242,27 @@ def get_script(script_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
 def update_script(
     script_id: int, body: ScriptUpdateIn, db: PerfDatabase = Depends(get_perf_db)
 ) -> dict:
+    new_config = body.config
+    if body.jmx_content:
+        try:
+            parsed = JmxParser.parse(body.jmx_content)
+            cfg = dict(new_config or {})
+            cfg["steps"] = parsed.get("steps", [])
+            if "concurrency" not in cfg:
+                cfg["concurrency"] = parsed.get("concurrency", 1)
+            if "duration" not in cfg:
+                cfg["duration"] = parsed.get("duration", 60)
+            new_config = cfg
+        except Exception as exc:
+            logger.warning(f"更新脚本解析 JMX 失败: {exc}")
+
     s = db.update_script(
         script_id,
         name=body.name,
         description=body.description,
+        plan_description=body.plan_description,
         jmx_content=body.jmx_content,
-        config=body.config,
+        config=new_config,
     )
     if not s:
         raise HTTPException(404, "脚本不存在")
@@ -226,12 +282,108 @@ def download_script_jmx(script_id: int, db: PerfDatabase = Depends(get_perf_db))
     s = db.get_script(script_id)
     if not s:
         raise HTTPException(404, "脚本不存在")
-    filename = f"{s.name}.jmx"
+    raw_name = (s.name or f"script_{script_id}").strip()
+    safe_filename = f"{raw_name}.jmx"
+    quoted_name = quote(safe_filename)
+    content_bytes = (s.jmx_content or "").encode("utf-8")
     return Response(
-        content=s.jmx_content,
+        content=content_bytes,
         media_type="application/xml; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="script_{script_id}.jmx"; filename*=UTF-8\'\'{quoted_name}',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        },
     )
+
+
+@router.post("/scripts/{script_id}/run")
+async def run_script(
+    script_id: int,
+    body: Optional[ScriptRunIn] = None,
+    db: PerfDatabase = Depends(get_perf_db),
+) -> dict:
+    """启动单个性能测试场景运行，按照脚本原生配置执行并实时产出控制台日志与 JTL 报告。"""
+    script = db.get_script(script_id)
+    if not script:
+        raise HTTPException(404, "脚本不存在")
+
+    engine_type = body.engine_type if body else "jmeter_cli"
+    env_base_url = (body.env_base_url.strip() if body and body.env_base_url else "")
+    if not env_base_url and body and body.env_id:
+        try:
+            from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+
+            auto_db = get_automation_db()
+            env_obj = auto_db.get_env(body.env_id)
+            if env_obj and env_obj.base_url:
+                env_base_url = env_obj.base_url.strip()
+        except Exception:
+            pass
+
+    actual_concurrency = 1
+    if script.config and isinstance(script.config, dict):
+        actual_concurrency = script.config.get("concurrency", 1)
+
+    run = PerfRun(
+        task_id=0,
+        script_id=script_id,
+        project_id=script.project_id,
+        status="running",
+        engine_used=engine_type,
+        concurrency_actual=actual_concurrency,
+    )
+    run_id = db.create_run(run)
+
+    executor_mgr = get_executor_manager()
+    asyncio.create_task(
+        executor_mgr.execute_script(
+            script_id=script_id,
+            run_id=run_id,
+            perf_db=db,
+            engine_type=engine_type,
+            env_base_url=env_base_url,
+        )
+    )
+    return {"ok": True, "run_id": run_id}
+
+
+@router.get("/scripts/{script_id}/runs")
+def list_script_runs(
+    script_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    db: PerfDatabase = Depends(get_perf_db),
+) -> dict:
+    """获取指定场景的历史执行记录列表。"""
+    items, total = db.list_runs(script_id=script_id, page=page, page_size=page_size)
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "script_id": r.script_id,
+                "task_id": r.task_id,
+                "project_id": r.project_id,
+                "status": r.status,
+                "engine_used": r.engine_used,
+                "concurrency": r.concurrency_actual,
+                "total_samples": r.total_samples,
+                "failed_samples": r.failed_samples,
+                "error_rate": r.error_rate,
+                "avg_tps": r.avg_tps,
+                "avg_rt_ms": r.avg_rt_ms,
+                "p90_rt_ms": r.p90_rt_ms,
+                "p95_rt_ms": r.p95_rt_ms,
+                "p99_rt_ms": r.p99_rt_ms,
+                "started_at": r.started_at.isoformat(),
+                "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+                "error_message": r.error_message,
+            }
+            for r in items
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 # ===== 任务编排 (Tasks) 端点 =====
@@ -341,7 +493,7 @@ def delete_task(task_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
 
 
 @router.post("/tasks/{task_id}/execute")
-def execute_task(task_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
+async def execute_task(task_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
     """启动性能测试任务。"""
     task = db.get_task(task_id)
     if not task:
@@ -366,11 +518,12 @@ def execute_task(task_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
 
 @router.post("/runs/{run_id}/stop")
 def stop_run(run_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
-    """终止正在执行的压测任务。"""
+    """终止正在执行的测试场景或压测任务。"""
     executor_mgr = get_executor_manager()
     success = executor_mgr.stop_run(run_id)
-    db.update_run_metrics(run_id, status="stopped")
-    return {"ok": success}
+    if not success:
+        db.update_run_metrics(run_id, status="stopped")
+    return {"ok": True}
 
 
 # ===== 执行报告 (Runs) 端点 =====
@@ -378,18 +531,20 @@ def stop_run(run_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
 def list_runs(
     project_id: Optional[int] = Query(None),
     task_id: Optional[int] = Query(None),
+    script_id: Optional[int] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: PerfDatabase = Depends(get_perf_db),
 ) -> dict:
     items, total = db.list_runs(
-        project_id=project_id, task_id=task_id, page=page, page_size=page_size
+        project_id=project_id, task_id=task_id, script_id=script_id, page=page, page_size=page_size
     )
     return {
         "items": [
             {
                 "id": r.id,
                 "task_id": r.task_id,
+                "script_id": r.script_id,
                 "project_id": r.project_id,
                 "status": r.status,
                 "engine_used": r.engine_used,
@@ -422,6 +577,7 @@ def get_run_report(run_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict
     return {
         "id": r.id,
         "task_id": r.task_id,
+        "script_id": r.script_id,
         "project_id": r.project_id,
         "status": r.status,
         "engine_used": r.engine_used,
@@ -436,7 +592,73 @@ def get_run_report(run_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict
         "p99_rt_ms": r.p99_rt_ms,
         "timeline_metrics": r.timeline_metrics,
         "sampler_summary": r.sampler_summary,
+        "jtl_rows": r.jtl_rows or [],
+        "jtl_content": r.jtl_content or "",
+        "console_output": r.console_output or "",
         "started_at": r.started_at.isoformat(),
         "ended_at": r.ended_at.isoformat() if r.ended_at else None,
         "error_message": r.error_message,
     }
+
+
+@router.get("/runs/{run_id}/stream")
+async def stream_run_logs(run_id: int, db: PerfDatabase = Depends(get_perf_db)):
+    """SSE 实时输出运行控制台日志流与完成状态。"""
+    executor_mgr = get_executor_manager()
+    existing_logs, q = executor_mgr.subscribe_logs(run_id)
+
+    async def event_generator():
+        try:
+            for line in existing_logs:
+                payload = json.dumps({"type": "log", "text": line}, ensure_ascii=False)
+                yield f"data: {payload}\n\n"
+
+            # 检查是否已在数据库中进入终态
+            r = db.get_run(run_id)
+            if r and r.status in ("completed", "failed", "stopped"):
+                done_payload = json.dumps({
+                    "type": "done",
+                    "status": r.status,
+                    "run_id": run_id,
+                    "error": r.error_message,
+                }, ensure_ascii=False)
+                yield f"data: {done_payload}\n\n"
+                return
+
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=2.0)
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    if event.get("type") == "done":
+                        break
+                except asyncio.TimeoutError:
+                    r_check = db.get_run(run_id)
+                    if r_check and r_check.status in ("completed", "failed", "stopped"):
+                        done_payload = json.dumps({
+                            "type": "done",
+                            "status": r_check.status,
+                            "run_id": run_id,
+                            "error": r_check.error_message,
+                        }, ensure_ascii=False)
+                        yield f"data: {done_payload}\n\n"
+                        break
+                    yield ": ping\n\n"
+        finally:
+            executor_mgr.unsubscribe_logs(run_id, q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.delete("/runs/{run_id}")
+def delete_run_record(run_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
+    if not db.delete_run(run_id):
+        raise HTTPException(404, "记录不存在")
+    return {"ok": True}

@@ -25,6 +25,7 @@ class ScriptDebugger:
         jmx_content: str,
         env_base_url: str = "",
         global_vars: dict[str, Any] | None = None,
+        timeout: float = 5.0,
     ) -> dict[str, Any]:
         """在线调试运行一次 JMX 脚本中定义的 Sampler。"""
         parsed = JmxParser.parse(jmx_content)
@@ -35,7 +36,7 @@ class ScriptDebugger:
         all_passed = True
         total_time_ms = 0
 
-        async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
+        async with httpx.AsyncClient(verify=False, timeout=timeout, trust_env=False) as client:
             for idx, step in enumerate(steps):
                 step_name = step.get("name") or f"Step {idx + 1}"
                 method = step.get("method", "GET").upper()

@@ -495,7 +495,8 @@ export default {
       caseLibrary: '用例库',
       testcase: '用例管理',
       api: 'API 自动化',
-      performance: '性能监控',
+      performance: '性能测试',
+      performanceMonitoring: '性能监控',
       ui: 'UI 自动化',
     },
 

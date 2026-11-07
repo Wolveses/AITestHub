@@ -153,6 +153,17 @@ class PerfAIService:
             selected_asset_ids = [selected_assets[0].id]
 
         base_url = selected_assets[0].base_url or ""
+        try:
+            from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+
+            auto_db = get_automation_db()
+            env_list = auto_db.list_envs(project_id) or auto_db.list_envs(None)
+            if env_list:
+                default_env = next((e for e in env_list if getattr(e, "is_default", False)), env_list[0])
+                if getattr(default_env, "base_url", ""):
+                    base_url = default_env.base_url
+        except Exception as exc:
+            logger.debug(f"读取 UI 自动化默认环境失败，使用资产自带 base_url: {exc}")
         assembled_steps = []
 
         for idx, a in enumerate(selected_assets):
