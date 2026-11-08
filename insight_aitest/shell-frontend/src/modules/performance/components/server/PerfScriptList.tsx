@@ -404,7 +404,9 @@ export function PerfScriptList() {
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        {item.asset_ids?.length || 0} 接口
+                        {(item.asset_ids && item.asset_ids.length > 0)
+                          ? item.asset_ids.length
+                          : (Array.isArray(item.config?.steps) ? item.config.steps.length : (Array.isArray(item.config?.samplers) ? item.config.samplers.length : 0))} 接口
                       </span>
                     </div>
 

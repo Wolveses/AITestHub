@@ -36,6 +36,8 @@ export const PerfRunModal: React.FC<PerfRunModalProps> = ({
 }) => {
   const [envs, setEnvs] = useState<UIEnv[]>([]);
   const [selectedEnvId, setSelectedEnvId] = useState<number | ''>('');
+  const [execMode, setExecMode] = useState<'local' | 'distributed'>('local');
+  const [slaveHosts, setSlaveHosts] = useState('');
 
   const [running, setRunning] = useState<boolean>(false);
   const [stopping, setStopping] = useState<boolean>(false);
@@ -118,6 +120,8 @@ export const PerfRunModal: React.FC<PerfRunModalProps> = ({
           engine_type: 'jmeter_cli',
           env_id: chosenEnv ? chosenEnv.id : null,
           env_base_url: chosenEnv ? chosenEnv.base_url : '',
+          exec_mode: execMode,
+          slave_hosts: execMode === 'distributed' ? slaveHosts : '',
         }),
       });
 
@@ -305,7 +309,7 @@ export const PerfRunModal: React.FC<PerfRunModalProps> = ({
                   background: 'var(--bg-base)',
                   color: 'var(--text-primary)',
                   fontSize: 12,
-                  maxWidth: 260,
+                  maxWidth: 220,
                   cursor: running ? 'not-allowed' : 'pointer',
                 }}
               >
@@ -317,6 +321,47 @@ export const PerfRunModal: React.FC<PerfRunModalProps> = ({
                 ))}
               </select>
             </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+              <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>模式:</span>
+              <select
+                disabled={running}
+                value={execMode}
+                onChange={(e: any) => setExecMode(e.target.value)}
+                style={{
+                  padding: '5px 8px',
+                  borderRadius: 6,
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-base)',
+                  color: 'var(--text-primary)',
+                  fontSize: 12,
+                  cursor: running ? 'not-allowed' : 'pointer',
+                }}
+              >
+                <option value="local">🖥️ 本机单机</option>
+                <option value="distributed">🌐 Master分布式</option>
+              </select>
+            </div>
+
+            {execMode === 'distributed' && (
+              <input
+                disabled={running}
+                type="text"
+                value={slaveHosts}
+                onChange={(e) => setSlaveHosts(e.target.value)}
+                placeholder="Slave列表: 192.168.1.101:1099,..."
+                style={{
+                  padding: '5px 8px',
+                  borderRadius: 6,
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-base)',
+                  color: 'var(--text-primary)',
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  width: 200,
+                }}
+              />
+            )}
 
             {!running ? (
               <button
