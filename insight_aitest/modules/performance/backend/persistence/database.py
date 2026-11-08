@@ -11,26 +11,38 @@ from sqlalchemy import desc, select
 from insight_aitest.modules.performance.backend.persistence.models import (
     PerfRun,
     PerfScript,
+    PerfSlaveNode,
     PerfTask,
     PerfTaskScript,
 )
 from insight_aitest.platform.persistence import Base, ensure_schema, get_engine, session_scope
 
 
-def _ensure_perf_run_columns(db_path: str) -> None:
-    """增量迁移：给旧 perf_runs 表补 script_id、console_output、jtl 等列（幂等）。"""
+def _ensure_perf_columns(db_path: str) -> None:
+    """增量迁移：给旧 perf 表补字段（幂等）。"""
     import sqlite3
 
     with sqlite3.connect(db_path) as conn:
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(perf_runs)")}
-        if "script_id" not in cols:
+        run_cols = {row[1] for row in conn.execute("PRAGMA table_info(perf_runs)")}
+        if "script_id" not in run_cols:
             conn.execute("ALTER TABLE perf_runs ADD COLUMN script_id INTEGER")
-        if "console_output" not in cols:
+        if "console_output" not in run_cols:
             conn.execute("ALTER TABLE perf_runs ADD COLUMN console_output TEXT DEFAULT ''")
-        if "jtl_content" not in cols:
+        if "jtl_content" not in run_cols:
             conn.execute("ALTER TABLE perf_runs ADD COLUMN jtl_content TEXT DEFAULT ''")
-        if "jtl_rows_json" not in cols:
+        if "jtl_rows_json" not in run_cols:
             conn.execute("ALTER TABLE perf_runs ADD COLUMN jtl_rows_json JSON DEFAULT '[]'")
+        if "exec_mode" not in run_cols:
+            conn.execute("ALTER TABLE perf_runs ADD COLUMN exec_mode TEXT DEFAULT 'local'")
+        if "slave_hosts" not in run_cols:
+            conn.execute("ALTER TABLE perf_runs ADD COLUMN slave_hosts TEXT DEFAULT ''")
+
+        task_cols = {row[1] for row in conn.execute("PRAGMA table_info(perf_tasks)")}
+        if "exec_mode" not in task_cols:
+            conn.execute("ALTER TABLE perf_tasks ADD COLUMN exec_mode TEXT DEFAULT 'local'")
+        if "slave_hosts" not in task_cols:
+            conn.execute("ALTER TABLE perf_tasks ADD COLUMN slave_hosts TEXT DEFAULT ''")
+
         conn.commit()
 
 
@@ -47,9 +59,10 @@ class PerfDatabase:
                 PerfTask.__table__,
                 PerfTaskScript.__table__,
                 PerfRun.__table__,
+                PerfSlaveNode.__table__,
             ],
         )
-        ensure_schema(db_path, [_ensure_perf_run_columns])
+        ensure_schema(db_path, [_ensure_perf_columns])
 
     # ===== 脚本管理 (Scripts) =====
     def create_script(self, script: PerfScript) -> int:
@@ -186,6 +199,8 @@ class PerfDatabase:
         concurrency: Optional[int] = None,
         ramp_up_seconds: Optional[int] = None,
         engine_type: Optional[str] = None,
+        exec_mode: Optional[str] = None,
+        slave_hosts: Optional[str] = None,
         script_items: Optional[list[dict]] = None,
     ) -> Optional[PerfTask]:
         with session_scope(self.db_path) as session:
@@ -209,6 +224,10 @@ class PerfDatabase:
                 task.ramp_up_seconds = ramp_up_seconds
             if engine_type is not None:
                 task.engine_type = engine_type
+            if exec_mode is not None:
+                task.exec_mode = exec_mode
+            if slave_hosts is not None:
+                task.slave_hosts = slave_hosts
             task.updated_at = datetime.now()
 
             if script_items is not None:
@@ -384,4 +403,74 @@ class PerfDatabase:
             if not run:
                 return False
             session.delete(run)
+            return True
+
+    # ===== 分布式从机节点管理 (Slave Nodes) =====
+    def create_slave_node(self, node: PerfSlaveNode) -> int:
+        with session_scope(self.db_path) as session:
+            session.add(node)
+            session.flush()
+            return node.id
+
+    def get_slave_node(self, node_id: int) -> Optional[PerfSlaveNode]:
+        with session_scope(self.db_path) as session:
+            stmt = select(PerfSlaveNode).where(PerfSlaveNode.id == node_id)
+            return session.execute(stmt).scalar_one_or_none()
+
+    def update_slave_node(
+        self,
+        node_id: int,
+        name: Optional[str] = None,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        status: Optional[str] = None,
+        description: Optional[str] = None,
+        cpu_cores: Optional[int] = None,
+        memory_gb: Optional[float] = None,
+        last_heartbeat_at: Optional[datetime] = None,
+    ) -> Optional[PerfSlaveNode]:
+        with session_scope(self.db_path) as session:
+            stmt = select(PerfSlaveNode).where(PerfSlaveNode.id == node_id)
+            node = session.execute(stmt).scalar_one_or_none()
+            if not node:
+                return None
+            if name is not None:
+                node.name = name
+            if host is not None:
+                node.host = host
+            if port is not None:
+                node.port = port
+            if status is not None:
+                node.status = status
+            if description is not None:
+                node.description = description
+            if cpu_cores is not None:
+                node.cpu_cores = cpu_cores
+            if memory_gb is not None:
+                node.memory_gb = memory_gb
+            if last_heartbeat_at is not None:
+                node.last_heartbeat_at = last_heartbeat_at
+            node.updated_at = datetime.now()
+            session.flush()
+            return node
+
+    def list_slave_nodes(
+        self, project_id: Optional[int] = None
+    ) -> list[PerfSlaveNode]:
+        with session_scope(self.db_path) as session:
+            stmt = select(PerfSlaveNode)
+            if project_id is not None:
+                stmt = stmt.where(
+                    (PerfSlaveNode.project_id == project_id) | (PerfSlaveNode.project_id.is_(None))
+                )
+            stmt = stmt.order_by(PerfSlaveNode.id.asc())
+            return list(session.execute(stmt).scalars().all())
+
+    def delete_slave_node(self, node_id: int) -> bool:
+        with session_scope(self.db_path) as session:
+            stmt = select(PerfSlaveNode).where(PerfSlaveNode.id == node_id)
+            node = session.execute(stmt).scalar_one_or_none()
+            if not node:
+                return False
+            session.delete(node)
             return True

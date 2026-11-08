@@ -85,8 +85,13 @@ class PerfTask(MappedAsDataclass, Base, kw_only=True):
     concurrency: Mapped[int] = mapped_column(Integer, default=10)
     ramp_up_seconds: Mapped[int] = mapped_column(Integer, default=5)
 
-    # 引擎类型：builtin (Python轻量) 或 jmeter_cli (本地原生JMeter)
-    engine_type: Mapped[str] = mapped_column(Text, default="builtin")
+    # 引擎类型：jmeter_cli (本地原生JMeter，优先默认) 或 builtin (Python轻量备用)
+    engine_type: Mapped[str] = mapped_column(Text, default="jmeter_cli")
+
+    # 执行模式：local (本机单机执行，默认) 或 distributed (Master调度Slave分布式执行)
+    exec_mode: Mapped[str] = mapped_column(Text, default="local")
+    # 分布式模式下选中的从机IP/地址列表（形如 "192.168.1.101:1099,192.168.1.102:1099"）
+    slave_hosts: Mapped[str] = mapped_column(Text, default="")
 
     last_status: Mapped[str] = mapped_column(Text, default="idle")
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
@@ -133,6 +138,8 @@ class PerfRun(MappedAsDataclass, Base, kw_only=True):
     status: Mapped[str] = mapped_column(Text, default="running")
 
     engine_used: Mapped[str] = mapped_column(Text, default="builtin")
+    exec_mode: Mapped[str] = mapped_column(Text, default="local")
+    slave_hosts: Mapped[str] = mapped_column(Text, default="")
     concurrency_actual: Mapped[int] = mapped_column(Integer, default=0)
     total_samples: Mapped[int] = mapped_column(Integer, default=0)
     failed_samples: Mapped[int] = mapped_column(Integer, default=0)
@@ -163,3 +170,27 @@ class PerfRun(MappedAsDataclass, Base, kw_only=True):
     started_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+
+class PerfSlaveNode(MappedAsDataclass, Base, kw_only=True):
+    """分布式 JMeter Slave 从机节点池管理表。"""
+
+    __tablename__ = "perf_slave_nodes"
+    __table_args__ = (
+        Index("idx_perf_slave_nodes_project", "project_id"),
+    )
+
+    id: Mapped[int | None] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, default=None
+    )
+    project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    name: Mapped[str] = mapped_column(Text)
+    host: Mapped[str] = mapped_column(Text)
+    port: Mapped[int] = mapped_column(Integer, default=1099)
+    status: Mapped[str] = mapped_column(Text, default="offline")  # online, offline, busy
+    description: Mapped[str] = mapped_column(Text, default="")
+    cpu_cores: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    memory_gb: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
