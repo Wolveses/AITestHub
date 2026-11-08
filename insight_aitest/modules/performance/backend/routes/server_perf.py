@@ -67,6 +67,8 @@ class ScriptRunIn(BaseModel):
     engine_type: str = "jmeter_cli"
     env_id: Optional[int] = None
     env_base_url: str = ""
+    exec_mode: str = "local"
+    slave_hosts: str = ""
 
 
 class TaskCreateIn(BaseModel):
@@ -78,7 +80,9 @@ class TaskCreateIn(BaseModel):
     loop_count: int = 1
     concurrency: int = 10
     ramp_up_seconds: int = 5
-    engine_type: str = "builtin"
+    engine_type: str = "jmeter_cli"
+    exec_mode: str = "local"
+    slave_hosts: str = ""
     script_items: list[dict]  # [{"script_id": 1, "weight": 100}]
 
 
@@ -91,7 +95,22 @@ class TaskUpdateIn(BaseModel):
     concurrency: Optional[int] = None
     ramp_up_seconds: Optional[int] = None
     engine_type: Optional[str] = None
+    exec_mode: Optional[str] = None
+    slave_hosts: Optional[str] = None
     script_items: Optional[list[dict]] = None
+
+
+class SlaveNodeIn(BaseModel):
+    name: str
+    host: str
+    port: int = 1099
+    project_id: Optional[int] = None
+    description: str = ""
+
+
+class SlaveNodeTestPingIn(BaseModel):
+    host: str
+    port: int = 1099
 
 
 # ===== 脚本管理 (Scripts) 端点 =====
@@ -308,6 +327,8 @@ async def run_script(
         raise HTTPException(404, "脚本不存在")
 
     engine_type = body.engine_type if body else "jmeter_cli"
+    exec_mode = body.exec_mode if body else "local"
+    slave_hosts = (body.slave_hosts if body else "") or ""
     env_base_url = (body.env_base_url.strip() if body and body.env_base_url else "")
     if not env_base_url and body and body.env_id:
         try:
@@ -330,6 +351,8 @@ async def run_script(
         project_id=script.project_id,
         status="running",
         engine_used=engine_type,
+        exec_mode=exec_mode,
+        slave_hosts=slave_hosts,
         concurrency_actual=actual_concurrency,
     )
     run_id = db.create_run(run)
@@ -342,6 +365,8 @@ async def run_script(
             perf_db=db,
             engine_type=engine_type,
             env_base_url=env_base_url,
+            exec_mode=exec_mode,
+            slave_hosts=slave_hosts,
         )
     )
     return {"ok": True, "run_id": run_id}
@@ -399,6 +424,8 @@ def create_task(body: TaskCreateIn, db: PerfDatabase = Depends(get_perf_db)) -> 
         concurrency=body.concurrency,
         ramp_up_seconds=body.ramp_up_seconds,
         engine_type=body.engine_type,
+        exec_mode=body.exec_mode,
+        slave_hosts=body.slave_hosts,
     )
     tid = db.create_task(task, body.script_items)
     return {"ok": True, "id": tid}
@@ -430,6 +457,8 @@ def list_tasks(
                 "concurrency": t.concurrency,
                 "ramp_up_seconds": t.ramp_up_seconds,
                 "engine_type": t.engine_type,
+                "exec_mode": getattr(t, "exec_mode", "local") or "local",
+                "slave_hosts": getattr(t, "slave_hosts", "") or "",
                 "last_status": t.last_status,
                 "last_run_at": t.last_run_at.isoformat() if t.last_run_at else None,
                 "last_run_id": t.last_run_id,
@@ -457,6 +486,8 @@ def get_task(task_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
         "concurrency": t.concurrency,
         "ramp_up_seconds": t.ramp_up_seconds,
         "engine_type": t.engine_type,
+        "exec_mode": getattr(t, "exec_mode", "local") or "local",
+        "slave_hosts": getattr(t, "slave_hosts", "") or "",
         "last_status": t.last_status,
         "last_run_at": t.last_run_at.isoformat() if t.last_run_at else None,
         "last_run_id": t.last_run_id,
@@ -478,6 +509,8 @@ def update_task(
         concurrency=body.concurrency,
         ramp_up_seconds=body.ramp_up_seconds,
         engine_type=body.engine_type,
+        exec_mode=body.exec_mode,
+        slave_hosts=body.slave_hosts,
         script_items=body.script_items,
     )
     if not t:
@@ -504,6 +537,8 @@ async def execute_task(task_id: int, db: PerfDatabase = Depends(get_perf_db)) ->
         project_id=task.project_id,
         status="running",
         engine_used=task.engine_type,
+        exec_mode=getattr(task, "exec_mode", "local") or "local",
+        slave_hosts=getattr(task, "slave_hosts", "") or "",
         concurrency_actual=task.concurrency,
     )
     run_id = db.create_run(run)
@@ -581,6 +616,8 @@ def get_run_report(run_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict
         "project_id": r.project_id,
         "status": r.status,
         "engine_used": r.engine_used,
+        "exec_mode": getattr(r, "exec_mode", "local") or "local",
+        "slave_hosts": getattr(r, "slave_hosts", "") or "",
         "concurrency": r.concurrency_actual,
         "total_samples": r.total_samples,
         "failed_samples": r.failed_samples,
@@ -661,6 +698,144 @@ async def stream_run_logs(run_id: int, db: PerfDatabase = Depends(get_perf_db)):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ===== 分布式 Slave 从机节点管理端点 =====
+@router.get("/slave-nodes")
+def list_slave_nodes_endpoint(
+    project_id: Optional[int] = Query(None),
+    db: PerfDatabase = Depends(get_perf_db),
+) -> dict:
+    nodes = db.list_slave_nodes(project_id=project_id)
+    return {
+        "items": [
+            {
+                "id": n.id,
+                "project_id": n.project_id,
+                "name": n.name,
+                "host": n.host,
+                "port": n.port,
+                "status": n.status,
+                "description": n.description,
+                "last_heartbeat_at": n.last_heartbeat_at.isoformat() if n.last_heartbeat_at else None,
+                "created_at": n.created_at.isoformat() if n.created_at else None,
+            }
+            for n in nodes
+        ]
+    }
+
+
+@router.post("/slave-nodes")
+def create_slave_node_endpoint(
+    body: SlaveNodeIn,
+    db: PerfDatabase = Depends(get_perf_db),
+) -> dict:
+    import socket
+    from datetime import datetime
+    from insight_aitest.modules.performance.backend.persistence.models import PerfSlaveNode
+
+    host = body.host.strip()
+    port = body.port or 1099
+
+    # 创建时同步进行一次 TCP 端口连通探测
+    is_online = False
+    try:
+        with socket.create_connection((host, port), timeout=2.5):
+            is_online = True
+    except Exception:
+        is_online = False
+
+    node = PerfSlaveNode(
+        project_id=body.project_id,
+        name=body.name.strip(),
+        host=host,
+        port=port,
+        status="online" if is_online else "offline",
+        last_heartbeat_at=datetime.now() if is_online else None,
+        description=body.description,
+    )
+    nid = db.create_slave_node(node)
+    return {"ok": True, "id": nid, "status": node.status}
+
+
+@router.delete("/slave-nodes/{node_id}")
+def delete_slave_node_endpoint(
+    node_id: int,
+    db: PerfDatabase = Depends(get_perf_db),
+) -> dict:
+    if not db.delete_slave_node(node_id):
+        raise HTTPException(404, "从机节点不存在")
+    return {"ok": True}
+
+
+@router.post("/slave-nodes/{node_id}/ping")
+def ping_slave_node_endpoint(
+    node_id: int,
+    db: PerfDatabase = Depends(get_perf_db),
+) -> dict:
+    """连通性探测：尝试对从机 RMI 端口建立 TCP 连接。"""
+    import socket
+
+    node = db.get_slave_node(node_id)
+    if not node:
+        raise HTTPException(404, "从机节点不存在")
+
+    host = node.host.strip()
+    port = node.port or 1099
+    is_online = False
+    err_msg = ""
+
+    try:
+        with socket.create_connection((host, port), timeout=3.0):
+            is_online = True
+    except Exception as exc:
+        is_online = False
+        err_msg = str(exc)
+
+    new_status = "online" if is_online else "offline"
+    db.update_slave_node(
+        node_id,
+        status=new_status,
+        last_heartbeat_at=datetime.now() if is_online else None,
+    )
+
+    return {
+        "ok": is_online,
+        "status": new_status,
+        "host": host,
+        "port": port,
+        "error": err_msg,
+    }
+
+
+@router.post("/slave-nodes/test-ping")
+def test_ping_slave_node_endpoint(
+    body: SlaveNodeTestPingIn,
+) -> dict:
+    """对尚未保存或录入的从机 IP/端口进行实时连通性探测。"""
+    import socket
+
+    host = body.host.strip()
+    port = body.port or 1099
+    if not host:
+        raise HTTPException(400, "主机地址不能为空")
+
+    is_online = False
+    err_msg = ""
+
+    try:
+        with socket.create_connection((host, port), timeout=3.0):
+            is_online = True
+    except Exception as exc:
+        is_online = False
+        err_msg = str(exc)
+
+    return {
+        "ok": is_online,
+        "host": host,
+        "port": port,
+        "error": err_msg,
+    }
 
 
 @router.delete("/runs/{run_id}")
