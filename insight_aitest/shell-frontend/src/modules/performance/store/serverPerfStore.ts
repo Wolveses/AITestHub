@@ -23,6 +23,8 @@ export interface PerfTaskItem {
   concurrency: number;
   ramp_up_seconds: number;
   engine_type: 'builtin' | 'jmeter_cli';
+  exec_mode?: 'local' | 'distributed';
+  slave_hosts?: string;
   last_status: string;
   last_run_at: string | null;
   last_run_id: number | null;
@@ -36,6 +38,8 @@ export interface PerfRunItem {
   project_id: number;
   status: string;
   engine_used: string;
+  exec_mode?: string;
+  slave_hosts?: string;
   concurrency: number;
   total_samples: number;
   failed_samples: number;
@@ -52,20 +56,36 @@ export interface PerfRunItem {
   sampler_summary?: any[];
 }
 
+export interface PerfSlaveNodeItem {
+  id: number;
+  project_id: number | null;
+  name: string;
+  host: string;
+  port: number;
+  status: 'online' | 'offline' | 'busy';
+  description: string;
+  last_heartbeat_at: string | null;
+  created_at: string | null;
+}
+
 interface ServerPerfStore {
   scripts: PerfScriptItem[];
   tasks: PerfTaskItem[];
   runs: PerfRunItem[];
+  slaveNodes: PerfSlaveNodeItem[];
   loading: boolean;
   loadScripts: (projectId: number) => Promise<void>;
   loadTasks: (projectId: number) => Promise<void>;
   loadRuns: (projectId: number, taskId?: number) => Promise<void>;
+  loadSlaveNodes: (projectId?: number) => Promise<void>;
+  pingSlaveNode: (nodeId: number) => Promise<boolean>;
 }
 
 export const useServerPerfStore = create<ServerPerfStore>((set) => ({
   scripts: [],
   tasks: [],
   runs: [],
+  slaveNodes: [],
   loading: false,
 
   loadScripts: async (projectId: number) => {
@@ -100,6 +120,44 @@ export const useServerPerfStore = create<ServerPerfStore>((set) => ({
       set({ runs: data.items || [] });
     } finally {
       set({ loading: false });
+    }
+  },
+
+  loadSlaveNodes: async (projectId?: number) => {
+    try {
+      const url = projectId
+        ? `/api/modules/performance/server/slave-nodes?project_id=${projectId}`
+        : '/api/modules/performance/server/slave-nodes';
+      const res = await fetch(url);
+      const data = await res.json();
+      set({ slaveNodes: data.items || [] });
+    } catch {
+      // 忽略节点获取异常
+    }
+  },
+
+  pingSlaveNode: async (nodeId: number) => {
+    try {
+      const res = await fetch(`/api/modules/performance/server/slave-nodes/${nodeId}/ping`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.ok) {
+        set((state) => ({
+          slaveNodes: state.slaveNodes.map((n) =>
+            n.id === nodeId ? { ...n, status: 'online', last_heartbeat_at: new Date().toISOString() } : n
+          ),
+        }));
+        return true;
+      }
+      set((state) => ({
+        slaveNodes: state.slaveNodes.map((n) =>
+          n.id === nodeId ? { ...n, status: 'offline' } : n
+        ),
+      }));
+      return false;
+    } catch {
+      return false;
     }
   },
 }));
