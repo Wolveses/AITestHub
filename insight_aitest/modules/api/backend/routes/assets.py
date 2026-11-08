@@ -513,10 +513,135 @@ def asset_to_case(asset_id: int, db: AssetDatabase = Depends(get_asset_db)) -> d
         priority=CasePriority.P2,
         status=CaseStatus.DRAFT,
         test_design=TestType.POSITIVE,
-        content={"base_url": asset.base_url, "steps": [step]},
+        content={"base_url": "", "steps": [step]},
         tags=["ui-capture", f"asset:{asset.id}"],
         source="ui-capture",
         project_id=asset.project_id,
     )
     case_id = get_tc_db().create_case(case)
     return {"ok": True, "case_id": case_id}
+
+
+class HarParseIn(BaseModel):
+    har_text: str
+    project_id: int | None = None
+
+
+class HarImportItem(BaseModel):
+    fingerprint: str
+    method: str
+    path: str
+    path_template: str
+    base_url: str = ""
+    title: str = ""
+    headers: dict = {}
+    body: Any = None
+    response_status: int = 0
+    response_headers: dict = {}
+    response_body: Any = None
+    response_content_type: str = ""
+
+
+class HarImportIn(BaseModel):
+    project_id: int | None = None
+    items: list[HarImportItem]
+    conflict_strategy: str = "overwrite"  # "overwrite" (覆盖) 或 "skip" (跳过)
+    auto_enhance: bool = True  # 复用自动 AI 整理逻辑
+
+
+@router.post("/parse-har")
+def parse_har_endpoint(
+    body: HarParseIn, db: AssetDatabase = Depends(get_asset_db)
+) -> dict:
+    """粘贴 HAR 文本快速解析候选接口列表，并检测在当前项目中是否已存在。"""
+    from insight_aitest.modules.api.backend.services.har_parser import parse_har_to_candidates
+
+    try:
+        candidates = parse_har_to_candidates(body.har_text)
+        fps = [c["fingerprint"] for c in candidates]
+        existing_fps = set()
+        if fps:
+            try:
+                existing_assets = db.list_by_fingerprints(body.project_id, fps)
+                existing_fps = {a.fingerprint for a in existing_assets}
+            except Exception as e:
+                logger.warning(f"查询已存在接口失败: {e}")
+
+        # 标记是否存在
+        for c in candidates:
+            c["is_exists"] = c["fingerprint"] in existing_fps
+
+        exists_count = sum(1 for c in candidates if c.get("is_exists"))
+        return {
+            "ok": True,
+            "items": candidates,
+            "total": len(candidates),
+            "exists_count": exists_count,
+        }
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logger.exception(f"解析 HAR 异常: {exc}")
+        raise HTTPException(500, f"解析 HAR 失败: {exc}") from exc
+
+
+@router.post("/import-har")
+def import_har_endpoint(
+    body: HarImportIn, db: AssetDatabase = Depends(get_asset_db)
+) -> dict:
+    """将用户勾选的 HAR 接口导入到接口库，支持覆盖或跳过已存在接口，并复用后台异步 AI 整理能力。"""
+    if not body.items:
+        raise HTTPException(400, "请至少勾选一个要导入的接口")
+
+    items = [
+        {
+            "project_id": body.project_id,
+            "title": item.title or f"{item.method} {item.path_template}",
+            "method": item.method,
+            "path": item.path,
+            "path_template": item.path_template,
+            "base_url": "",
+            "headers": item.headers,
+            "body": item.body,
+            "response_status": item.response_status,
+            "response_headers": item.response_headers,
+            "response_body": item.response_body,
+            "response_content_type": item.response_content_type,
+            "fingerprint": item.fingerprint,
+            "source": "har-import",
+            "tags": ["har-import"],
+        }
+        for item in body.items
+    ]
+
+    try:
+        result = db.upsert_many(items, conflict_strategy=body.conflict_strategy)
+    except Exception as exc:
+        logger.exception(f"HAR 接口导入入库失败: {exc}")
+        raise HTTPException(500, f"导入接口库失败: {exc}") from exc
+
+    # 复用 capture.py 的后台异步整理机制
+    fingerprints = [item.fingerprint for item in body.items]
+    if body.auto_enhance and fingerprints:
+        import threading
+        from insight_aitest.modules.ui.backend.automation.capture import _auto_enhance_assets
+
+        threading.Thread(
+            target=_auto_enhance_assets,
+            kwargs={
+                "db": db,
+                "project_id": body.project_id,
+                "fingerprints": fingerprints,
+                "limit": len(fingerprints),
+            },
+            name="har-asset-auto-enhance",
+            daemon=True,
+        ).start()
+
+    return {
+        "ok": True,
+        "imported": result.get("imported", 0),
+        "updated": result.get("updated", 0),
+        "skipped": result.get("skipped", 0),
+        "total": len(body.items),
+    }

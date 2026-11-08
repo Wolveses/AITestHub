@@ -238,7 +238,7 @@ def build_assets(
             "method": method,
             "path": pathname + (f"?{query}" if query else ""),
             "path_template": path_template(pathname),
-            "base_url": f"{parts.scheme}://{parts.netloc}",
+            "base_url": "",
             "headers": clean_headers(record.get("request_headers")),
             "body": _parse_request_body(record.get("request_body")),
             "response_status": int(record.get("status") or 0),

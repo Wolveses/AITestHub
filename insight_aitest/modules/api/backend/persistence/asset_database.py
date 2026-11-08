@@ -16,10 +16,15 @@ class AssetDatabase:
         self.db_path = db_path
         Base.metadata.create_all(get_engine(db_path), tables=[ApiAsset.__table__])
 
-    def upsert_many(self, items: list[dict]) -> dict:
-        """按 (project_id, fingerprint) 幂等写入：命中则累加次数并刷新样本。"""
+    def upsert_many(self, items: list[dict], conflict_strategy: str = "overwrite") -> dict:
+        """按 (project_id, fingerprint) 写入：
+        conflict_strategy:
+          - "overwrite": 存在则更新内容并累加次数
+          - "skip": 存在则直接跳过不覆盖
+        """
         imported = 0
         updated = 0
+        skipped = 0
         now = datetime.now()
         with session_scope(self.db_path) as s:
             for item in items:
@@ -59,6 +64,10 @@ class AssetDatabase:
                     )
                     imported += 1
                 else:
+                    if conflict_strategy == "skip":
+                        skipped += 1
+                        continue
+
                     asset.times_seen = int(asset.times_seen or 0) + int(
                         item.get("times_seen") or 1
                     )
@@ -73,7 +82,7 @@ class AssetDatabase:
                     asset.response_content_type = item.get("response_content_type") or ""
                     asset.body_truncated = bool(item.get("body_truncated"))
                     updated += 1
-        return {"imported": imported, "updated": updated}
+        return {"imported": imported, "updated": updated, "skipped": skipped}
 
     def list_assets(
         self,
