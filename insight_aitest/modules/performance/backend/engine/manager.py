@@ -69,6 +69,8 @@ class TaskExecutorManager:
         perf_db: PerfDatabase,
         engine_type: str = "jmeter_cli",
         env_base_url: str = "",
+        exec_mode: str = "local",
+        slave_hosts: str = "",
     ) -> None:
         """异步执行单脚本/测试场景，按照脚本原生定义执行并实时流式输出控制台日志与 JTL 报告。"""
         from datetime import datetime
@@ -113,6 +115,8 @@ class TaskExecutorManager:
                 task_id=0,
                 run_id=run_id,
                 jmx_content=jmx_to_run,
+                exec_mode=exec_mode,
+                slave_hosts=slave_hosts,
                 on_metrics_tick=on_tick,
                 on_log=on_log,
             )
@@ -221,7 +225,7 @@ class TaskExecutorManager:
             if buf is not None:
                 buf.append(metric)
 
-        engine_type = task.engine_type or "builtin"
+        engine_type = task.engine_type or "jmeter_cli"
         engine: Any = None
 
         if engine_type == "jmeter_cli":
@@ -234,6 +238,8 @@ class TaskExecutorManager:
                 concurrency=task.concurrency,
                 ramp_up_seconds=task.ramp_up_seconds,
                 duration_seconds=task.duration_seconds,
+                exec_mode=getattr(task, "exec_mode", "local") or "local",
+                slave_hosts=getattr(task, "slave_hosts", "") or "",
                 on_metrics_tick=on_tick,
             )
         else:

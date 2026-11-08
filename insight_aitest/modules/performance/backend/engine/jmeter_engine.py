@@ -29,6 +29,8 @@ class JMeterCliEngine:
         concurrency: Optional[int] = None,
         ramp_up_seconds: Optional[int] = None,
         duration_seconds: Optional[int] = None,
+        exec_mode: str = "local",
+        slave_hosts: str = "",
         on_metrics_tick: Optional[Callable[[dict[str, Any]], None]] = None,
         on_log: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -38,6 +40,8 @@ class JMeterCliEngine:
         self.concurrency = concurrency
         self.ramp_up_seconds = ramp_up_seconds
         self.duration_seconds = duration_seconds
+        self.exec_mode = exec_mode or "local"
+        self.slave_hosts = (slave_hosts or "").strip()
         self.on_metrics_tick = on_metrics_tick
         self.on_log = on_log
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -105,13 +109,28 @@ class JMeterCliEngine:
             "-l",
             jtl_file,
         ]
-        # 若显式传入外部覆盖参数才附加 -J，否则完全遵照脚本内配置运行
-        if self.concurrency is not None:
-            cmd.append(f"-Jconcurrency={self.concurrency}")
-        if self.ramp_up_seconds is not None:
-            cmd.append(f"-Jramp_up={self.ramp_up_seconds}")
-        if self.duration_seconds is not None and self.duration_seconds > 0:
-            cmd.append(f"-Jduration={self.duration_seconds}")
+
+        is_distributed = (self.exec_mode == "distributed" and bool(self.slave_hosts))
+        if is_distributed:
+            self._emit_log(f"[{datetime.now().strftime('%H:%M:%S')}] 启用分布式集群压测模式，Master 调度远程从机: {self.slave_hosts}")
+            cmd.extend(["-R", self.slave_hosts, "-X"])
+            cmd.append("-Jserver.rmi.ssl.disable=true")
+            # 分布式模式使用 -G 广播参数给所有 Slave 节点
+            if self.concurrency is not None:
+                cmd.append(f"-Gconcurrency={self.concurrency}")
+            if self.ramp_up_seconds is not None:
+                cmd.append(f"-Gramp_up={self.ramp_up_seconds}")
+            if self.duration_seconds is not None and self.duration_seconds > 0:
+                cmd.append(f"-Gduration={self.duration_seconds}")
+        else:
+            self._emit_log(f"[{datetime.now().strftime('%H:%M:%S')}] 启用本地单机压测模式 (Master 本机施压)")
+            # 若显式传入外部覆盖参数才附加 -J，否则完全遵照脚本内配置运行
+            if self.concurrency is not None:
+                cmd.append(f"-Jconcurrency={self.concurrency}")
+            if self.ramp_up_seconds is not None:
+                cmd.append(f"-Jramp_up={self.ramp_up_seconds}")
+            if self.duration_seconds is not None and self.duration_seconds > 0:
+                cmd.append(f"-Jduration={self.duration_seconds}")
 
         cmd_display = " ".join(f'"{c}"' if " " in c else c for c in cmd)
         self._emit_log(f"[{datetime.now().strftime('%H:%M:%S')}] 启动命令行调度: {cmd_display}")
