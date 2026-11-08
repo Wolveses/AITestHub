@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Bot, FilePlus2, KeyRound, Loader2, Play, RefreshCw, Send, Trash2, VolumeX, X } from 'lucide-react';
+import { Bot, FilePlus2, KeyRound, Loader2, Play, RefreshCw, Send, Trash2, VolumeX, X, Upload } from 'lucide-react';
 import { useProjectStore } from '../../shared/store/projectStore';
 import { useConfirmStore } from '../../shared/store/confirmStore';
 import { useIsMobile } from '../../shared/hooks/useIsMobile';
 import { EnvironmentSelect } from './components/EnvironmentSelect';
+import { HarImportModal } from './components/HarImportModal';
 import { useEnvStore } from './store/envStore';
 import { useAssetStore, type ApiAsset, type AiMeta, type AuthTokenInfo, type DebugResult, type EnhanceProgress, fetchEnhanceProgress } from './store/assetStore';
 
@@ -117,6 +118,7 @@ export function AssetsTab() {
   const [authToken, setAuthToken] = useState('');
   const [authInfo, setAuthInfo] = useState<AuthTokenInfo | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
+  const [showHarModal, setShowHarModal] = useState(false);
 
   // 组合用例：多选资产串联成一条流程，入口已迁移到「用例执行 → 新建用例」
 
@@ -187,7 +189,7 @@ export function AssetsTab() {
     const envs = useEnvStore.getState().envs;
     const defaultEnv = envs.find((e) => e.is_default) || envs[0];
     const initialEnvId = defaultEnv ? defaultEnv.id : null;
-    const base = defaultEnv ? defaultEnv.base_url : (selected.base_url || '');
+    const base = defaultEnv ? defaultEnv.base_url : '';
 
     setDebugEnvId(initialEnvId);
     setDebugMethod(selected.method || 'GET');
@@ -318,193 +320,262 @@ export function AssetsTab() {
     : '';
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: isMobile ? 'column' : 'row', overflow: 'hidden' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* 顶部全局工具栏：跨越全宽向右拓展 */}
       <div style={{
-        width: isMobile ? '100%' : 460,
-        borderRight: isMobile ? 'none' : '1px solid var(--bg-card)',
-        borderBottom: isMobile ? '1px solid var(--bg-card)' : 'none',
-        display: 'flex', flexDirection: 'column', minHeight: 0,
-        ...(isMobile ? { maxHeight: 360 } : {}),
+        padding: '8px 16px',
+        borderBottom: '1px solid var(--bg-card)',
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 8,
+        alignItems: 'center',
+        flexShrink: 0,
+        background: 'var(--bg-base)',
       }}>
-        <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--bg-card)', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-          <span style={{ fontSize: 13, color: 'var(--text-secondary)', marginRight: 4 }}>{t('api.assetsTitle')}</span>
-          <select style={inputStyle} value={method} onChange={(e) => {
+        <select
+          style={inputStyle}
+          value={method}
+          onChange={(e) => {
             setMethod(e.target.value);
             setPage(1);
+          }}
+        >
+          {METHODS.map((m) => <option key={m} value={m}>{m || t('api.allMethods')}</option>)}
+        </select>
+        <input
+          style={{ ...inputStyle, width: 220 }}
+          placeholder={t('api.searchPath')}
+          value={keyword}
+          onChange={(e) => { setKeyword(e.target.value); setPage(1); }}
+        />
+        <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+          <input type="checkbox" checked={hideNoise} onChange={(e) => { setHideNoise(e.target.checked); setPage(1); }} />
+          {t('api.hideNoise')}
+        </label>
+        {checkedIds.length > 0 && (
+          <button
+            style={btnStyle(busy)}
+            disabled={busy}
+            onClick={() => {
+              confirm({
+                title: t('api.batchDelete', '批量删除'),
+                message: t('api.batchDeleteConfirm', { count: checkedIds.length }),
+                variant: 'danger',
+                onConfirm: () => {
+                  run(async () => {
+                    const deleted = await deleteChecked();
+                    toast.success(`${t('api.deleteDone')}（${deleted}）`);
+                  });
+                },
+              });
+            }}
+          >
+            <Trash2 size={12} strokeWidth={1.5} /> {t('api.batchDelete')} ({checkedIds.length})
+          </button>
+        )}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            style={{
+              ...btnStyle(false),
+              background: 'rgba(59, 130, 246, 0.08)',
+              borderColor: 'rgba(59, 130, 246, 0.3)',
+              color: 'var(--accent)',
+              fontWeight: 500,
+            }}
+            onClick={() => setShowHarModal(true)}
+            title="粘贴浏览器/抓包工具的 HAR 文本导入接口"
+          >
+            <Upload size={12} strokeWidth={1.8} /> 导入 HAR
+          </button>
+          <button style={btnStyle(loading)} disabled={loading} onClick={refresh}>
+            <RefreshCw size={12} strokeWidth={1.5} /> {t('api.refresh')}
+          </button>
+        </div>
+      </div>
+
+      {/* 主体两栏：左侧列表区域与右侧详情区域顶部对齐 */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: isMobile ? 'column' : 'row', overflow: 'hidden' }}>
+        <div style={{
+          width: isMobile ? '100%' : 420,
+          borderRight: isMobile ? 'none' : '1px solid var(--bg-card)',
+          borderBottom: isMobile ? '1px solid var(--bg-card)' : 'none',
+          display: 'flex', flexDirection: 'column', minHeight: 0,
+          ...(isMobile ? { maxHeight: 360 } : {}),
+        }}>
+          {/* 列表区域顶部锁定展示全选栏 */}
+          <div style={{
+            padding: '7px 12px',
+            borderBottom: '1px solid var(--bg-card)',
+            background: 'var(--bg-elevated)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            fontSize: 12,
+            flexShrink: 0,
+            userSelect: 'none',
           }}>
-            {METHODS.map((m) => <option key={m} value={m}>{m || t('api.allMethods')}</option>)}
-          </select>
-          <input
-            style={{ ...inputStyle, width: 140 }}
-            placeholder={t('api.searchPath')}
-            value={keyword}
-            onChange={(e) => { setKeyword(e.target.value); setPage(1); }}
-          />
-          <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <input type="checkbox" checked={hideNoise} onChange={(e) => { setHideNoise(e.target.checked); setPage(1); }} />
-            {t('api.hideNoise')}
-          </label>
-          {items.length > 0 && (
-            <label style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <label style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              cursor: items.length > 0 ? 'pointer' : 'default',
+              color: 'var(--text-secondary)',
+              fontWeight: 500,
+            }}>
               <input
                 type="checkbox"
-                checked={items.every((it) => checkedIds.includes(it.id))}
+                disabled={items.length === 0}
+                checked={items.length > 0 && items.every((it) => checkedIds.includes(it.id))}
                 onChange={(e) => setChecked(
                   e.target.checked
                     ? Array.from(new Set([...checkedIds, ...items.map((it) => it.id)]))
                     : checkedIds.filter((id) => !items.some((it) => it.id === id)),
                 )}
               />
-              {t('api.selectAll')}
+              <span>{t('api.selectAll')}</span>
             </label>
-          )}
-          {checkedIds.length > 0 && (
-            <button
-              style={btnStyle(busy)}
-              disabled={busy}
-              onClick={() => {
-                confirm({
-                  title: t('api.batchDelete', '批量删除'),
-                  message: t('api.batchDeleteConfirm', { count: checkedIds.length }),
-                  variant: 'danger',
-                  onConfirm: () => {
-                    run(async () => {
-                      const deleted = await deleteChecked();
-                      toast.success(`${t('api.deleteDone')}（${deleted}）`);
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              {checkedIds.length > 0 ? `已选 ${checkedIds.length} 项` : `本页 ${items.length} 条`}
+            </span>
+          </div>
+
+          <div style={{ flex: 1, overflow: 'auto' }}>
+            {loading && <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>{t('api.loading')}</div>}
+            {!loading && items.length === 0 && (
+              <div style={{ padding: 16, fontSize: 12, color: 'var(--text-muted)' }}>{t('api.noAssets')}</div>
+            )}
+            {items.map((it) => {
+              const active = it.id === selectedId
+              const aiRunning = progress?.status === 'running' && progress.pending_ids.includes(it.id)
+              const aiDone = progress?.done_ids.includes(it.id)
+              return (
+                <div
+                  key={it.id}
+                  onClick={() => selectAsset(it.id).catch((e) => toast.error(String(e)))}
+                  style={{
+                    padding: '8px 12px',
+                    paddingLeft: active ? 10 : 12,
+                    borderBottom: '1px solid var(--bg-card)',
+                    borderLeft: `2px solid ${active ? 'var(--accent)' : 'transparent'}`,
+                    cursor: 'pointer',
+                    background: active ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'transparent',
+                    opacity: active ? 1 : it.is_noise ? 0.55 : 1,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                    <input
+                      type="checkbox"
+                      checked={checkedIds.includes(it.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={() => toggleCheck(it.id)}
+                    />
+                    <span style={{ color: methodColor(it.method), fontWeight: 700, minWidth: 46 }}>{it.method}</span>
+                    <span style={{
+                      flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      color: active ? 'var(--accent)' : undefined,
+                      fontWeight: active ? 600 : 400,
+                    }}>{it.title || it.path_template || it.path}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 2, fontSize: 11, color: 'var(--text-muted)' }}>
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'monospace' }}>
+                      {it.path_template || it.path}
+                    </span>
+                    {it.is_noise && <span>{t('api.noiseTag')}</span>}
+                    {aiRunning
+                      ? <span style={{ color: '#d97706', fontWeight: 600 }}>{t('api.aiRowRunning')}</span>
+                      : (it.ai_meta || aiDone) && <span>{t('api.aiTag')}</span>}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <div style={{ padding: '6px 12px', borderTop: '1px solid var(--bg-card)', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
+            <span>{t('api.totalAssets', { total })}</span>
+            {progress?.status === 'running' && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: '#d97706' }}>
+                <Loader2 size={12} className="animate-spin" />
+                {t('api.aiAutoRunning', { done: progress.done + progress.failed, total: progress.total })}
+              </span>
+            )}
+            <button style={btnStyle(page <= 1)} disabled={page <= 1} onClick={() => setPage(page - 1)}>‹</button>
+            <span>{page}/{pages}</span>
+            <button style={btnStyle(page >= pages)} disabled={page >= pages} onClick={() => setPage(page + 1)}>›</button>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: '8px 16px', borderBottom: '1px solid var(--bg-card)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 13, flex: 1, minWidth: 80 }}>{selected ? `${selected.method} ${selected.path_template || selected.path}` : t('api.selectAsset')}</span>
+            {progress?.status === 'running' && selected && progress.pending_ids.includes(selected.id) && (
+              <span style={{ fontSize: 11, color: '#d97706', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <Loader2 size={11} className="animate-spin" /> {t('api.aiEnhancingDetail')}
+              </span>
+            )}
+            {selected && (debugMode ? (
+              <button style={btnStyle(sending)} disabled={sending} onClick={exitDebug}>
+                <X size={12} strokeWidth={1.5} /> {t('api.exitDebug')}
+              </button>
+            ) : (
+              <>
+                <button style={btnStyle(busy || enhancing)} disabled={busy || enhancing} onClick={async () => {
+                  setEnhancing(true);
+                  setMeta(null);
+                  toast.loading(t('api.aiEnhancing'), { id: 'asset-enhance' });
+                  try {
+                    const result = await enhanceAsset(selected.id);
+                    // 整理完成后自动应用并持久化到接口资产
+                    await updateAsset(selected.id, {
+                      title: result.title || selected.title,
+                      path_template: result.path_template || selected.path_template,
+                      is_noise: typeof result.is_noise === 'boolean' ? result.is_noise : selected.is_noise,
+                      ai_meta: result,
                     });
-                  },
-                });
-              }}
-            >
-              <Trash2 size={12} strokeWidth={1.5} /> {t('api.batchDelete')} ({checkedIds.length})
-            </button>
-          )}
-          <button style={btnStyle(loading)} disabled={loading} onClick={refresh}>
-            <RefreshCw size={12} strokeWidth={1.5} /> {t('api.refresh')}
-          </button>
-        </div>
-
-        <div style={{ flex: 1, overflow: 'auto' }}>
-          {loading && <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>{t('api.loading')}</div>}
-          {!loading && items.length === 0 && (
-            <div style={{ padding: 16, fontSize: 12, color: 'var(--text-muted)' }}>{t('api.noAssets')}</div>
-          )}
-          {items.map((it) => {
-            const active = it.id === selectedId
-            const aiRunning = progress?.status === 'running' && progress.pending_ids.includes(it.id)
-            const aiDone = progress?.done_ids.includes(it.id)
-            return (
-              <div
-                key={it.id}
-                onClick={() => selectAsset(it.id).catch((e) => toast.error(String(e)))}
-                style={{
-                  padding: '8px 12px',
-                  paddingLeft: active ? 10 : 12,
-                  borderBottom: '1px solid var(--bg-card)',
-                  borderLeft: `2px solid ${active ? 'var(--accent)' : 'transparent'}`,
-                  cursor: 'pointer',
-                  background: active ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'transparent',
-                  opacity: active ? 1 : it.is_noise ? 0.55 : 1,
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                  <input
-                    type="checkbox"
-                    checked={checkedIds.includes(it.id)}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={() => toggleCheck(it.id)}
-                  />
-                  <span style={{ color: methodColor(it.method), fontWeight: 700, minWidth: 46 }}>{it.method}</span>
-                  <span style={{
-                    flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    color: active ? 'var(--accent)' : undefined,
-                    fontWeight: active ? 600 : 400,
-                  }}>{it.title || it.path_template || it.path}</span>
-                </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 2, fontSize: 11, color: 'var(--text-muted)' }}>
-                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'monospace' }}>
-                    {it.path_template || it.path}
-                  </span>
-                  {it.is_noise && <span>{t('api.noiseTag')}</span>}
-                  {aiRunning
-                    ? <span style={{ color: '#d97706', fontWeight: 600 }}>{t('api.aiRowRunning')}</span>
-                    : (it.ai_meta || aiDone) && <span>{t('api.aiTag')}</span>}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-
-        <div style={{ padding: '6px 12px', borderTop: '1px solid var(--bg-card)', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
-          <span>{t('api.totalAssets', { total })}</span>
-          {progress?.status === 'running' && (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: '#d97706' }}>
-              <Loader2 size={12} className="animate-spin" />
-              {t('api.aiAutoRunning', { done: progress.done + progress.failed, total: progress.total })}
-            </span>
-          )}
-          <button style={btnStyle(page <= 1)} disabled={page <= 1} onClick={() => setPage(page - 1)}>‹</button>
-          <span>{page}/{pages}</span>
-          <button style={btnStyle(page >= pages)} disabled={page >= pages} onClick={() => setPage(page + 1)}>›</button>
-        </div>
-      </div>
-
-      <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ padding: '8px 16px', borderBottom: '1px solid var(--bg-card)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 13, flex: 1, minWidth: 80 }}>{selected ? `${selected.method} ${selected.path_template || selected.path}` : t('api.selectAsset')}</span>
-          {progress?.status === 'running' && selected && progress.pending_ids.includes(selected.id) && (
-            <span style={{ fontSize: 11, color: '#d97706', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <Loader2 size={11} className="animate-spin" /> {t('api.aiEnhancingDetail')}
-            </span>
-          )}
-          {selected && (debugMode ? (
-            <button style={btnStyle(sending)} disabled={sending} onClick={exitDebug}>
-              <X size={12} strokeWidth={1.5} /> {t('api.exitDebug')}
-            </button>
-          ) : (
-            <>
-              <button style={btnStyle(busy || enhancing)} disabled={busy || enhancing} onClick={async () => {
-                setEnhancing(true);
-                setMeta(null);
-                toast.loading(t('api.aiEnhancing'), { id: 'asset-enhance' });
-                try {
-                  const result = await enhanceAsset(selected.id);
-                  setMeta(result);
-                  toast.success(t('api.enhanceDone'), { id: 'asset-enhance' });
-                } catch (e) {
-                  toast.error(String(e), { id: 'asset-enhance' });
-                } finally {
-                  setEnhancing(false);
-                }
-              }}>
-                {enhancing
-                  ? <Loader2 size={12} strokeWidth={1.5} className="animate-spin" />
-                  : <Bot size={12} strokeWidth={1.5} />}
-                {enhancing ? t('api.aiEnhancing') : t('api.aiEnhance')}
-              </button>
-              <button style={btnStyle(busy)} disabled={busy} onClick={() => run(async () => {
-                await updateAsset(selected.id, { is_noise: !selected.is_noise });
-              }, selected.is_noise ? t('api.unmarkNoise') : t('api.markNoise'))}>
-                <VolumeX size={12} strokeWidth={1.5} /> {selected.is_noise ? t('api.unmarkNoise') : t('api.markNoise')}
-              </button>
-              <button style={btnStyle(busy)} disabled={busy} onClick={() => run(async () => {
-                const caseId = await toCase(selected.id);
-                toast.success(t('api.toCaseDone', { id: caseId }));
-              })}>
-                <FilePlus2 size={12} strokeWidth={1.5} /> {t('api.toCase')}
-              </button>
-              <button style={btnStyle(busy)} disabled={busy} onClick={() => run(async () => {
-                await deleteAsset(selected.id);
-                toast.success(t('api.deleteDone'));
-              })}>
-                <Trash2 size={12} strokeWidth={1.5} /> {t('api.delete')}
-              </button>
-              <button style={btnStyle(busy)} disabled={busy} onClick={enterDebug}>
-                <Play size={12} strokeWidth={1.5} /> {t('api.debug')}
-              </button>
-            </>
-          ))}
-        </div>
+                    setMeta(null);
+                    toast.success('AI 整理完成并已自动应用保存！', { id: 'asset-enhance' });
+                  } catch (e) {
+                    toast.error(String(e), { id: 'asset-enhance' });
+                  } finally {
+                    setEnhancing(false);
+                  }
+                }}>
+                  {enhancing
+                    ? <Loader2 size={12} strokeWidth={1.5} className="animate-spin" />
+                    : <Bot size={12} strokeWidth={1.5} />}
+                  {enhancing ? t('api.aiEnhancing') : t('api.aiEnhance')}
+                </button>
+                <button style={btnStyle(busy)} disabled={busy} onClick={() => run(async () => {
+                  await updateAsset(selected.id, { is_noise: !selected.is_noise });
+                }, selected.is_noise ? t('api.unmarkNoise') : t('api.markNoise'))}>
+                  <VolumeX size={12} strokeWidth={1.5} /> {selected.is_noise ? t('api.unmarkNoise') : t('api.markNoise')}
+                </button>
+                <button style={btnStyle(busy)} disabled={busy} onClick={() => run(async () => {
+                  const caseId = await toCase(selected.id);
+                  toast.success(t('api.toCaseDone', { id: caseId }));
+                })}>
+                  <FilePlus2 size={12} strokeWidth={1.5} /> {t('api.toCase')}
+                </button>
+                <button style={btnStyle(busy)} disabled={busy} onClick={() => {
+                  confirm({
+                    title: t('api.delete', '删除接口资产'),
+                    message: `确定要删除接口「${selected.method} ${selected.path_template || selected.path}」吗？此操作不可撤销。`,
+                    variant: 'danger',
+                    onConfirm: () => {
+                      run(async () => {
+                        await deleteAsset(selected.id);
+                        toast.success(t('api.deleteDone'));
+                      });
+                    },
+                  });
+                }}>
+                  <Trash2 size={12} strokeWidth={1.5} /> {t('api.delete')}
+                </button>
+                <button style={btnStyle(busy)} disabled={busy} onClick={enterDebug}>
+                  <Play size={12} strokeWidth={1.5} /> {t('api.debug')}
+                </button>
+              </>
+            ))}
+          </div>
 
         <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
           {!selected && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('api.selectAssetHint')}</div>}
@@ -723,21 +794,50 @@ export function AssetsTab() {
               )}
 
               <div>
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                  {t('api.request')} · {selected.path}
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8 }}>
+                  {t('api.request')} · <span style={{ fontFamily: 'monospace', fontWeight: 400 }}>{selected.path}</span>
                 </div>
-                <div style={boxStyle}>
-                  {pretty(selected.headers)}
-                  {selected.body != null && `\n\n${pretty(selected.body)}`}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                      {t('api.requestHeaders', '请求头 (Headers)')}
+                    </div>
+                    <div style={boxStyle}>
+                      {pretty(selected.headers) || t('api.emptyHeaders', '无自定义请求头')}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                      {t('api.requestBody', '请求体 (Body)')}
+                    </div>
+                    <div style={boxStyle}>
+                      {selected.body != null ? pretty(selected.body) : t('api.emptyBody', '无请求体')}
+                    </div>
+                  </div>
                 </div>
               </div>
 
               <div>
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                  {t('api.response')} · {selected.response_status} · {selected.response_content_type}
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8 }}>
+                  {t('api.response')} · {selected.response_status} · {selected.response_content_type || 'unknown'}
                   {selected.body_truncated && `（${t('api.truncated')}）`}
                 </div>
-                <div style={boxStyle}>{pretty(selected.response_body) || t('api.emptyBody')}</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                      {t('api.respHeaders', '响应头 (Response Headers)')}
+                    </div>
+                    <div style={boxStyle}>
+                      {pretty(selected.response_headers) || t('api.emptyHeaders', '无响应头信息')}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                      {t('api.respBody', '响应体 (Response Body)')}
+                    </div>
+                    <div style={boxStyle}>{pretty(selected.response_body) || t('api.emptyBody')}</div>
+                  </div>
+                </div>
               </div>
 
               {selected.jsonpath_samples.length > 0 && (
@@ -763,6 +863,16 @@ export function AssetsTab() {
         </div>
       </div>
 
+      {/* HAR 导入弹窗 */}
+      <HarImportModal
+        isOpen={showHarModal}
+        onClose={() => setShowHarModal(false)}
+        projectId={currentProjectId}
+        onImportSuccess={() => {
+          refresh();
+        }}
+      />
+      </div>
     </div>
   );
 }
