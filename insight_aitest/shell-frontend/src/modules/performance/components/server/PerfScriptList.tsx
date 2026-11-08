@@ -566,46 +566,6 @@ export function PerfScriptList() {
                   </button>
 
                   <button
-                    onClick={handleCopyJmx}
-                    disabled={!fullScript.jmx_content}
-                    style={{
-                      padding: '6px 12px',
-                      borderRadius: 6,
-                      border: '1px solid var(--border)',
-                      background: 'var(--bg-base)',
-                      color: 'var(--text-primary)',
-                      fontSize: 12,
-                      cursor: 'pointer',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 5,
-                    }}
-                  >
-                    {copied ? <Check size={13} color="#10b981" /> : <Copy size={13} />}
-                    {copied ? '已复制' : '复制 JMX'}
-                  </button>
-
-                  <button
-                    onClick={() => handleDownload(fullScript.id)}
-                    style={{
-                      padding: '6px 12px',
-                      borderRadius: 6,
-                      border: '1px solid var(--border)',
-                      background: 'var(--bg-base)',
-                      color: 'var(--accent)',
-                      fontSize: 12,
-                      fontWeight: 500,
-                      cursor: 'pointer',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 5,
-                    }}
-                  >
-                    <Download size={13} />
-                    下载 .jmx
-                  </button>
-
-                  <button
                     onClick={() => handleDelete(fullScript)}
                     style={{
                       padding: '6px 12px',
@@ -768,8 +728,50 @@ export function PerfScriptList() {
                         color: 'var(--text-muted)',
                       }}
                     >
-                      <span>XML 格式 (.jmx) · 标准 JMeter 5.x 测试计划</span>
-                      <span>{fullScript.jmx_content ? `${fullScript.jmx_content.length} 字符` : '无内容'}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span>XML 格式 (.jmx) · 标准 JMeter 5.x 测试计划</span>
+                        <span>{fullScript.jmx_content ? `${fullScript.jmx_content.length} 字符` : '无内容'}</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <button
+                          onClick={handleCopyJmx}
+                          disabled={!fullScript.jmx_content}
+                          style={{
+                            padding: '3px 10px',
+                            borderRadius: 5,
+                            border: '1px solid var(--border)',
+                            background: 'var(--bg-card)',
+                            color: 'var(--text-primary)',
+                            fontSize: 11,
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                          }}
+                        >
+                          {copied ? <Check size={12} color="#10b981" /> : <Copy size={12} />}
+                          {copied ? '已复制' : '复制 JMX'}
+                        </button>
+                        <button
+                          onClick={() => handleDownload(fullScript.id)}
+                          disabled={!fullScript.jmx_content}
+                          style={{
+                            padding: '3px 10px',
+                            borderRadius: 5,
+                            border: '1px solid var(--border)',
+                            background: 'var(--bg-card)',
+                            color: 'var(--accent)',
+                            fontSize: 11,
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                          }}
+                        >
+                          <Download size={12} />
+                          下载 .jmx
+                        </button>
+                      </div>
                     </div>
                     <pre
                       style={{

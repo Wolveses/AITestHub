@@ -593,6 +593,12 @@ def get_run_report(run_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict
         "timeline_metrics": r.timeline_metrics,
         "sampler_summary": r.sampler_summary,
         "jtl_rows": r.jtl_rows or [],
+        "jtl_tree": [
+            node for node in (r.jtl_rows or [])
+            if node.get("is_transaction") or not any(
+                node in parent.get("children", []) for parent in (r.jtl_rows or []) if parent.get("is_transaction")
+            )
+        ] if any(row.get("children") for row in (r.jtl_rows or [])) else None,
         "jtl_content": r.jtl_content or "",
         "console_output": r.console_output or "",
         "started_at": r.started_at.isoformat(),

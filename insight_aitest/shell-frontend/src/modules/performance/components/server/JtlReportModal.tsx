@@ -75,6 +75,64 @@ export const JtlReportModal: React.FC<JtlReportModalProps> = ({
       const res = await fetch(`/api/modules/performance/server/runs/${id}`);
       if (res.ok) {
         const data = await res.json();
+
+        // 兼容处理：若服务端未预存 jtl_tree，或打开的是老执行历史，则前端自动根据 JTL 规则动态构建树
+        if (!data.jtl_tree || data.jtl_tree.length === 0) {
+          const rows: any[] = data.jtl_rows || [];
+          const txRegex = /Number of samples in transaction\s*:\s*(\d+)/i;
+          const tree: any[] = [];
+          const threadBuffers: Record<string, any[]> = {};
+
+          rows.forEach((s) => {
+            const url = (s.URL || '').trim().toLowerCase();
+            const rm = s.responseMessage || '';
+            const matchTx = txRegex.exec(rm);
+            const isTx = s.is_transaction ?? ((!url || url === 'null') || matchTx !== null);
+            const childCount = matchTx ? parseInt(matchTx[1], 10) : (s.tx_child_count || 0);
+            const tName = s.threadName || 'default';
+
+            const itemNode = {
+              ...s,
+              is_transaction: isTx,
+              tx_child_count: childCount,
+              children: [],
+            };
+
+            if (!isTx) {
+              if (!threadBuffers[tName]) threadBuffers[tName] = [];
+              threadBuffers[tName].push(itemNode);
+            } else {
+              const buf = threadBuffers[tName] || [];
+              if (childCount > 0 && buf.length >= childCount) {
+                itemNode.children = buf.splice(-childCount, childCount);
+              } else {
+                itemNode.children = [...buf];
+                threadBuffers[tName] = [];
+              }
+              tree.push(itemNode);
+            }
+          });
+
+          // 把未归属事务的独立采样平铺加入
+          Object.values(threadBuffers).forEach((remaining) => {
+            remaining.forEach((r) => tree.push(r));
+          });
+
+          data.jtl_tree = tree;
+        }
+
+        // 聚合报表中兼容补齐 is_transaction 标记
+        if (data.sampler_summary && Array.isArray(data.sampler_summary)) {
+          const txLabelSet = new Set<string>();
+          (data.jtl_tree || []).forEach((n: any) => {
+            if (n.is_transaction && n.label) txLabelSet.add(n.label);
+          });
+          data.sampler_summary = data.sampler_summary.map((row: any) => ({
+            ...row,
+            is_transaction: row.is_transaction ?? txLabelSet.has(row.label),
+          }));
+        }
+
         setReport(data);
       }
     } catch {
