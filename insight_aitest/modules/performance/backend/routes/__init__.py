@@ -6,10 +6,12 @@ from fastapi import APIRouter
 from .devices import router as devices_router
 from .monitoring import router as monitoring_router
 from .server_perf import router as server_perf_router
+from .system_monitor import router as system_monitor_router
 
 router = APIRouter()
 router.include_router(devices_router)
 router.include_router(monitoring_router)
 router.include_router(server_perf_router)
+router.include_router(system_monitor_router)
 
 __all__ = ["router"]
