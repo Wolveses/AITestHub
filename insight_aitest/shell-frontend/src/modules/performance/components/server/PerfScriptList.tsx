@@ -14,22 +14,30 @@ import {
   Info,
   ChevronDown,
   ChevronUp,
+  ChevronRight,
   Pencil,
-  Play,
-  FileSpreadsheet,
-  Eye,
+  FolderTree,
 } from 'lucide-react';
 import { useProjectStore } from '../../../../shared/store/projectStore';
 import { useConfirmStore } from '../../../../shared/store/confirmStore';
 import { useServerPerfStore, type PerfScriptItem } from '../../store/serverPerfStore';
 import { CreateScenarioModal } from './CreateScenarioModal';
 import { EditScriptModal } from './EditScriptModal';
-import { PerfRunModal } from './PerfRunModal';
-import { JtlReportModal } from './JtlReportModal';
+
+interface JmxTreeNode {
+  tag: string;
+  testclass: string;
+  type_label: string;
+  name: string;
+  display: string;
+  enabled: boolean;
+  children: JmxTreeNode[];
+}
 
 interface FullScriptDetail extends PerfScriptItem {
   jmx_content?: string;
   parsed_steps?: any[];
+  component_tree?: JmxTreeNode[];
 }
 
 export function PerfScriptList() {
@@ -39,60 +47,14 @@ export function PerfScriptList() {
 
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editModalOpen, setEditModalOpen] = useState(false);
-  const [runModalOpen, setRunModalOpen] = useState(false);
-  const [reportModalOpen, setReportModalOpen] = useState(false);
-  const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [activeTab, setActiveTab] = useState<'samplers' | 'jmx' | 'plan' | 'runs'>('samplers');
+  const [activeTab, setActiveTab] = useState<'samplers' | 'tree' | 'jmx' | 'plan'>('tree');
 
   const [fullScript, setFullScript] = useState<FullScriptDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [copied, setCopied] = useState(false);
-
-  // 执行记录列表
-  const [scriptRuns, setScriptRuns] = useState<any[]>([]);
-  const [loadingRuns, setLoadingRuns] = useState(false);
-
-  const loadScriptRuns = async (scriptId: number) => {
-    setLoadingRuns(true);
-    try {
-      const res = await fetch(`/api/modules/performance/server/scripts/${scriptId}/runs`);
-      if (res.ok) {
-        const data = await res.json();
-        setScriptRuns(data.items || []);
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoadingRuns(false);
-    }
-  };
-
-  const handleDeleteRun = (runId: number) => {
-    confirm({
-      title: '确认删除执行记录',
-      message: `确定要删除执行记录 #RUN-${runId} 吗？删除后相关 JTL 采样数据与指标将无法恢复。`,
-      confirmText: '确认删除',
-      variant: 'danger',
-      onConfirm: async () => {
-        try {
-          const res = await fetch(`/api/modules/performance/server/runs/${runId}`, {
-            method: 'DELETE',
-          });
-          if (res.ok) {
-            toast.success('执行记录已删除');
-            if (fullScript) {
-              loadScriptRuns(fullScript.id);
-            }
-          }
-        } catch (err: any) {
-          toast.error(err.message || '删除记录失败');
-        }
-      },
-    });
-  };
 
   // 加载脚本列表
   useEffect(() => {
@@ -113,17 +75,15 @@ export function PerfScriptList() {
     }
   }, [scripts, selectedId]);
 
-  // 当选中的 selectedId 改变时，请求单个脚本详情获取完整 jmx_content 与执行记录
+  // 当选中的 selectedId 改变时，请求单个脚本详情获取完整 jmx_content
   useEffect(() => {
     if (!selectedId) {
       setFullScript(null);
-      setScriptRuns([]);
       return;
     }
 
     let isMounted = true;
     setLoadingDetail(true);
-    loadScriptRuns(selectedId);
 
     fetch(`/api/modules/performance/server/scripts/${selectedId}`)
       .then((res) => {
@@ -524,29 +484,6 @@ export function PerfScriptList() {
                 {/* 动作按钮组 */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                   <button
-                    onClick={() => setRunModalOpen(true)}
-                    disabled={!fullScript.jmx_content}
-                    title="运行性能测试场景，实时输出控制台日志并生成 JTL 报告"
-                    style={{
-                      padding: '6px 14px',
-                      borderRadius: 6,
-                      border: 'none',
-                      background: '#10b981',
-                      color: '#fff',
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      boxShadow: '0 1px 3px rgba(16, 185, 129, 0.3)',
-                    }}
-                  >
-                    <Play size={13} fill="#fff" />
-                    运行
-                  </button>
-
-                  <button
                     onClick={() => setEditModalOpen(true)}
                     title="编辑脚本名称、描述与 JMX 源码"
                     style={{
@@ -600,6 +537,25 @@ export function PerfScriptList() {
                 }}
               >
                 <button
+                  onClick={() => setActiveTab('tree')}
+                  style={{
+                    padding: '10px 4px',
+                    border: 'none',
+                    background: 'transparent',
+                    borderBottom: activeTab === 'tree' ? '2px solid var(--accent)' : '2px solid transparent',
+                    color: activeTab === 'tree' ? 'var(--accent)' : 'var(--text-secondary)',
+                    fontWeight: activeTab === 'tree' ? 600 : 400,
+                    fontSize: 13,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <FolderTree size={14} /> 脚本树状结构
+                </button>
+
+                <button
                   onClick={() => setActiveTab('samplers')}
                   style={{
                     padding: '10px 4px',
@@ -615,7 +571,7 @@ export function PerfScriptList() {
                     gap: 6,
                   }}
                 >
-                  <Layers size={14} /> 接口链路结构 ({samplers.length})
+                  <Layers size={14} /> 接口链路步骤 ({samplers.length})
                 </button>
 
                 <button
@@ -655,25 +611,6 @@ export function PerfScriptList() {
                 >
                   <Info size={14} /> 测试方案与配置
                 </button>
-
-                <button
-                  onClick={() => setActiveTab('runs')}
-                  style={{
-                    padding: '10px 4px',
-                    border: 'none',
-                    background: 'transparent',
-                    borderBottom: activeTab === 'runs' ? '2px solid var(--accent)' : '2px solid transparent',
-                    color: activeTab === 'runs' ? 'var(--accent)' : 'var(--text-secondary)',
-                    fontWeight: activeTab === 'runs' ? 600 : 400,
-                    fontSize: 13,
-                    cursor: 'pointer',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 6,
-                  }}
-                >
-                  <FileSpreadsheet size={14} /> 执行记录 ({scriptRuns.length})
-                </button>
               </div>
 
               {/* 详情内容区域 */}
@@ -682,6 +619,61 @@ export function PerfScriptList() {
                   <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
                     <RefreshCw size={18} style={{ animation: 'spin 1s linear infinite', marginBottom: 8 }} />
                     <div>正在加载脚本详情...</div>
+                  </div>
+                ) : activeTab === 'tree' ? (
+                  /* 脚本树状结构预览：顶级为测试计划，按层级展示所有组件 */
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                    <div
+                      style={{
+                        padding: '12px 16px',
+                        borderRadius: 8,
+                        background: 'var(--bg-card)',
+                        border: '1px solid var(--border)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                        <FolderTree size={16} color="var(--accent)" />
+                        JMeter 完整组件树状层级结构
+                      </div>
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        顶级为测试计划，各节点按 JMeter 真实父子层级关系展示（组件类型：组件名称）
+                      </span>
+                    </div>
+
+                    {(!fullScript.component_tree || fullScript.component_tree.length === 0) ? (
+                      <div
+                        style={{
+                          padding: 40,
+                          textAlign: 'center',
+                          color: 'var(--text-muted)',
+                          background: 'var(--bg-card)',
+                          borderRadius: 8,
+                          border: '1px solid var(--border)',
+                          fontSize: 13,
+                        }}
+                      >
+                        暂无组件树解析数据，请检查 JMX 脚本格式
+                      </div>
+                    ) : (
+                      <div
+                        style={{
+                          padding: '16px 20px',
+                          background: 'var(--bg-card)',
+                          borderRadius: 8,
+                          border: '1px solid var(--border)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 4,
+                        }}
+                      >
+                        {fullScript.component_tree.map((node, idx) => (
+                          <JmxTreeNodeView key={idx} node={node} level={0} />
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : activeTab === 'samplers' ? (
                   /* 接口链路结构可视化 */
@@ -884,186 +876,7 @@ export function PerfScriptList() {
                       </div>
                     )}
                   </div>
-                ) : (
-                  /* 执行记录列表与 JTL 预览入口 */
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-                        历史执行记录 ({scriptRuns.length})
-                      </span>
-                      <button
-                        onClick={() => fullScript && loadScriptRuns(fullScript.id)}
-                        style={{
-                          padding: '4px 10px',
-                          borderRadius: 4,
-                          border: '1px solid var(--border)',
-                          background: 'var(--bg-card)',
-                          color: 'var(--text-primary)',
-                          fontSize: 11,
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 4,
-                        }}
-                      >
-                        <RefreshCw size={12} style={{ animation: loadingRuns ? 'spin 1s linear infinite' : 'none' }} />
-                        刷新记录
-                      </button>
-                    </div>
-
-                    {scriptRuns.length === 0 ? (
-                      <div
-                        style={{
-                          border: '1px dashed var(--border)',
-                          borderRadius: 8,
-                          padding: 40,
-                          textAlign: 'center',
-                          color: 'var(--text-muted)',
-                          fontSize: 13,
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                          gap: 10,
-                        }}
-                      >
-                        <FileSpreadsheet size={32} opacity={0.4} />
-                        <div>该场景暂无执行记录</div>
-                        <button
-                          onClick={() => setRunModalOpen(true)}
-                          style={{
-                            padding: '6px 14px',
-                            borderRadius: 6,
-                            border: 'none',
-                            background: '#10b981',
-                            color: '#fff',
-                            fontSize: 12,
-                            fontWeight: 600,
-                            cursor: 'pointer',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 5,
-                          }}
-                        >
-                          <Play size={12} fill="#fff" /> 立即运行
-                        </button>
-                      </div>
-                    ) : (
-                      <div style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-card)', overflow: 'hidden' }}>
-                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, textAlign: 'left' }}>
-                          <thead>
-                            <tr style={{ background: 'var(--bg-base)', borderBottom: '1px solid var(--border)', color: 'var(--text-muted)' }}>
-                              <th style={{ padding: '8px 12px' }}>执行 ID</th>
-                              <th style={{ padding: '8px 12px' }}>状态</th>
-                              <th style={{ padding: '8px 12px' }}>引擎</th>
-                              <th style={{ padding: '8px 12px' }}>并发</th>
-                              <th style={{ padding: '8px 12px' }}>样本数</th>
-                              <th style={{ padding: '8px 12px' }}>错误率</th>
-                              <th style={{ padding: '8px 12px' }}>平均耗时</th>
-                              <th style={{ padding: '8px 12px' }}>P90</th>
-                              <th style={{ padding: '8px 12px' }}>TPS</th>
-                              <th style={{ padding: '8px 12px' }}>执行时间</th>
-                              <th style={{ padding: '8px 12px', textAlign: 'right' }}>操作</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {scriptRuns.map((run: any) => (
-                              <tr key={run.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                                <td style={{ padding: '10px 12px', fontFamily: 'monospace', fontWeight: 600, color: 'var(--accent)' }}>
-                                  #RUN-{run.id}
-                                </td>
-                                <td style={{ padding: '10px 12px' }}>
-                                  <span
-                                    style={{
-                                      fontSize: 11,
-                                      padding: '2px 8px',
-                                      borderRadius: 12,
-                                      background:
-                                        run.status === 'completed'
-                                          ? 'rgba(16, 185, 129, 0.1)'
-                                          : run.status === 'stopped'
-                                          ? 'rgba(245, 158, 11, 0.1)'
-                                          : run.status === 'failed'
-                                          ? 'rgba(239, 68, 68, 0.1)'
-                                          : 'rgba(59, 130, 246, 0.1)',
-                                      color:
-                                        run.status === 'completed'
-                                          ? '#10b981'
-                                          : run.status === 'stopped'
-                                          ? '#f59e0b'
-                                          : run.status === 'failed'
-                                          ? '#ef4444'
-                                          : 'var(--accent)',
-                                    }}
-                                  >
-                                    {run.status === 'completed'
-                                      ? '已完成'
-                                      : run.status === 'stopped'
-                                      ? '已停止'
-                                      : run.status === 'failed'
-                                      ? '失败'
-                                      : '运行中'}
-                                  </span>
-                                </td>
-                                <td style={{ padding: '10px 12px', color: 'var(--text-secondary)' }}>
-                                  {run.engine_used === 'jmeter_cli' ? 'JMeter CLI' : 'Builtin'}
-                                </td>
-                                <td style={{ padding: '10px 12px' }}>{run.concurrency || 1}</td>
-                                <td style={{ padding: '10px 12px' }}>{run.total_samples || 0}</td>
-                                <td style={{ padding: '10px 12px', color: (run.error_rate || 0) > 0 ? '#ef4444' : '#10b981', fontWeight: 600 }}>
-                                  {run.error_rate || 0}%
-                                </td>
-                                <td style={{ padding: '10px 12px' }}>{run.avg_rt_ms || 0} ms</td>
-                                <td style={{ padding: '10px 12px' }}>{run.p90_rt_ms || 0} ms</td>
-                                <td style={{ padding: '10px 12px', color: 'var(--accent)', fontWeight: 600 }}>{run.avg_tps || 0}</td>
-                                <td style={{ padding: '10px 12px', color: 'var(--text-muted)', fontSize: 11 }}>
-                                  {new Date(run.started_at).toLocaleString()}
-                                </td>
-                                <td style={{ padding: '10px 12px', textAlign: 'right' }}>
-                                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                                    <button
-                                      onClick={() => {
-                                        setSelectedRunId(run.id);
-                                        setReportModalOpen(true);
-                                      }}
-                                      style={{
-                                        padding: '4px 8px',
-                                        borderRadius: 4,
-                                        border: '1px solid var(--border)',
-                                        background: 'var(--bg-base)',
-                                        color: 'var(--accent)',
-                                        fontSize: 11,
-                                        cursor: 'pointer',
-                                        display: 'inline-flex',
-                                        alignItems: 'center',
-                                        gap: 3,
-                                      }}
-                                    >
-                                      <Eye size={12} /> 查看报表
-                                    </button>
-                                    <button
-                                      onClick={() => handleDeleteRun(run.id)}
-                                      style={{
-                                        padding: '4px 6px',
-                                        borderRadius: 4,
-                                        border: '1px solid var(--border)',
-                                        background: 'transparent',
-                                        color: '#ef4444',
-                                        fontSize: 11,
-                                        cursor: 'pointer',
-                                      }}
-                                    >
-                                      <Trash2 size={12} />
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
-                )}
+                ) : null}
               </div>
             </div>
           )}
@@ -1099,29 +912,6 @@ export function PerfScriptList() {
           }}
         />
       )}
-
-      {/* 运行性能测试场景 Modal（实时控制台输出） */}
-      {fullScript && (
-        <PerfRunModal
-          isOpen={runModalOpen}
-          onClose={() => setRunModalOpen(false)}
-          script={fullScript}
-          onRunFinished={(runId) => {
-            loadScriptRuns(fullScript.id);
-            setActiveTab('runs');
-            setSelectedRunId(runId);
-            setReportModalOpen(true);
-          }}
-        />
-      )}
-
-      {/* JTL 结构化信息与测试报表预览 Modal */}
-      <JtlReportModal
-        isOpen={reportModalOpen}
-        onClose={() => setReportModalOpen(false)}
-        runId={selectedRunId}
-        scriptName={fullScript?.name}
-      />
     </div>
   );
 }
@@ -1447,6 +1237,153 @@ function SamplerStepCard({ sampler, index }: { sampler: any; index: number }) {
               </button>
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * JMeter 组件树节点展示（支持展开/折叠、状态标识与组件类型徽章）。
+ * 展示格式：组件类型：组件名称
+ */
+function JmxTreeNodeView({ node, level = 0 }: { node: JmxTreeNode; level?: number }) {
+  const [expanded, setExpanded] = useState(true);
+  const hasChildren = node.children && node.children.length > 0;
+
+  // 组件徽章颜色分类
+  const getBadgeStyle = (tag: string, testclass: string) => {
+    if (tag === 'TestPlan' || testclass === 'TestPlan') {
+      return { bg: 'rgba(59, 130, 246, 0.15)', text: '#3b82f6', border: 'rgba(59, 130, 246, 0.3)' };
+    }
+    if (tag.includes('ThreadGroup') || testclass.includes('ThreadGroup')) {
+      return { bg: 'rgba(16, 185, 129, 0.15)', text: '#10b981', border: 'rgba(16, 185, 129, 0.3)' };
+    }
+    if (tag.includes('Sampler') || testclass.includes('Sampler') || tag.includes('Http')) {
+      return { bg: 'rgba(245, 158, 11, 0.15)', text: '#f59e0b', border: 'rgba(245, 158, 11, 0.3)' };
+    }
+    if (tag.includes('Controller') || testclass.includes('Controller')) {
+      return { bg: 'rgba(139, 92, 246, 0.15)', text: '#8b5cf6', border: 'rgba(139, 92, 246, 0.3)' };
+    }
+    if (tag.includes('Assertion') || testclass.includes('Assertion')) {
+      return { bg: 'rgba(239, 68, 68, 0.15)', text: '#ef4444', border: 'rgba(239, 68, 68, 0.3)' };
+    }
+    if (tag.includes('PostProcessor') || tag.includes('Extractor')) {
+      return { bg: 'rgba(14, 165, 233, 0.15)', text: '#0ea5e9', border: 'rgba(14, 165, 233, 0.3)' };
+    }
+    if (tag.includes('PreProcessor')) {
+      return { bg: 'rgba(236, 72, 153, 0.15)', text: '#ec4899', border: 'rgba(236, 72, 153, 0.3)' };
+    }
+    if (tag.includes('Timer')) {
+      return { bg: 'rgba(234, 179, 8, 0.15)', text: '#eab308', border: 'rgba(234, 179, 8, 0.3)' };
+    }
+    if (tag.includes('Collector') || tag.includes('Listener')) {
+      return { bg: 'rgba(100, 116, 139, 0.15)', text: '#64748b', border: 'rgba(100, 116, 139, 0.3)' };
+    }
+    return { bg: 'var(--bg-base)', text: 'var(--text-secondary)', border: 'var(--border)' };
+  };
+
+  const badge = getBadgeStyle(node.tag, node.testclass);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column' }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '5px 8px',
+          paddingLeft: level * 20 + 8,
+          borderRadius: 5,
+          transition: 'background 0.15s ease',
+          fontSize: 12,
+          color: node.enabled ? 'var(--text-primary)' : 'var(--text-muted)',
+          opacity: node.enabled ? 1 : 0.6,
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-base)')}
+        onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+      >
+        {/* 展开/折叠箭头 */}
+        {hasChildren ? (
+          <button
+            onClick={() => setExpanded(!expanded)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              color: 'var(--text-muted)',
+              padding: 0,
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        ) : (
+          <span style={{ width: 14, height: 14, display: 'inline-block' }} />
+        )}
+
+        {/* 树状层级线引导点 */}
+        <span
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: badge.text,
+            flexShrink: 0,
+          }}
+        />
+
+        {/* 组件类型徽章 */}
+        <span
+          style={{
+            fontSize: 11,
+            padding: '1px 6px',
+            borderRadius: 4,
+            fontWeight: 600,
+            background: badge.bg,
+            color: badge.text,
+            border: `1px solid ${badge.border}`,
+            flexShrink: 0,
+          }}
+        >
+          {node.type_label}
+        </span>
+
+        {/* 冒号与组件名称展示（满足需求：组件类型：组件名称） */}
+        <span style={{ color: 'var(--text-muted)', fontWeight: 600, margin: '0 1px' }}>:</span>
+        <span
+          style={{
+            fontWeight: level === 0 ? 700 : 500,
+            color: level === 0 ? 'var(--text-primary)' : 'var(--text-primary)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+          title={node.name}
+        >
+          {node.name}
+        </span>
+
+        {!node.enabled && (
+          <span style={{ fontSize: 10, color: '#ef4444', background: 'rgba(239,68,68,0.1)', padding: '0 4px', borderRadius: 2 }}>
+            已禁用
+          </span>
+        )}
+
+        {hasChildren && (
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+            {node.children.length} 个子元件
+          </span>
+        )}
+      </div>
+
+      {/* 递归渲染子组件树 */}
+      {hasChildren && expanded && (
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {node.children.map((child, cIdx) => (
+            <JmxTreeNodeView key={cIdx} node={child} level={level + 1} />
+          ))}
         </div>
       )}
     </div>
