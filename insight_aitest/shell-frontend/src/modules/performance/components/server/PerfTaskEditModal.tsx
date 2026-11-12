@@ -410,37 +410,53 @@ export function PerfTaskEditModal({
                 {execMode === 'distributed' && (
                   <div style={{ gridColumn: 'span 2', display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <label style={{ color: 'var(--text-muted)' }}>从机节点配置</label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <label style={{ color: 'var(--text-muted)' }}>选择从机节点</label>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                          (已选 {slaveHosts.split(',').map((h) => h.trim()).filter(Boolean).length} / {slaveNodes.length})
+                        </span>
+                      </div>
                       {slaveNodes.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const onlineHosts = slaveNodes.filter((n) => n.status === 'online').map((n) => `${n.host}:${n.port}`);
-                            if (onlineHosts.length === 0) {
-                              toast.warning('暂无在线从机节点');
-                              return;
-                            }
-                            setSlaveHosts(onlineHosts.join(', '));
-                          }}
-                          style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', padding: 0, fontSize: 11 }}
-                        >
-                          全选在线从机 ({slaveNodes.filter((n) => n.status === 'online').length})
-                        </button>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const onlineHosts = slaveNodes.filter((n) => n.status === 'online').map((n) => `${n.host}:${n.port}`);
+                              if (onlineHosts.length === 0) {
+                                toast.warning('暂无在线从机节点');
+                                return;
+                              }
+                              setSlaveHosts(onlineHosts.join(', '));
+                            }}
+                            style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', padding: 0, fontSize: 11 }}
+                          >
+                            全选在线从机 ({slaveNodes.filter((n) => n.status === 'online').length})
+                          </button>
+                          {slaveHosts && (
+                            <button
+                              type="button"
+                              onClick={() => setSlaveHosts('')}
+                              style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 0, fontSize: 11 }}
+                            >
+                              清空
+                            </button>
+                          )}
+                        </div>
                       )}
                     </div>
 
-                    {/* 可用从机节点快捷勾选列表 */}
+                    {/* 可用从机节点勾选列表（取消手动输入） */}
                     {slaveNodes.length > 0 ? (
                       <div
                         style={{
                           display: 'flex',
                           flexWrap: 'wrap',
                           gap: 6,
-                          padding: '6px 8px',
+                          padding: '8px 10px',
                           background: 'var(--bg-card)',
                           border: '1px solid var(--border)',
-                          borderRadius: 4,
-                          maxHeight: 90,
+                          borderRadius: 6,
+                          maxHeight: 120,
                           overflowY: 'auto',
                         }}
                       >
@@ -458,14 +474,15 @@ export function PerfTaskEditModal({
                               style={{
                                 display: 'inline-flex',
                                 alignItems: 'center',
-                                gap: 4,
+                                gap: 6,
                                 fontSize: 11,
                                 cursor: 'pointer',
-                                padding: '2px 6px',
+                                padding: '4px 8px',
                                 borderRadius: 4,
                                 background: isChecked ? 'rgba(59, 130, 246, 0.12)' : 'var(--bg-base)',
                                 border: `1px solid ${isChecked ? 'var(--accent)' : 'var(--border)'}`,
                                 color: isChecked ? 'var(--accent)' : 'var(--text-primary)',
+                                transition: 'all 0.15s ease',
                               }}
                             >
                               <input
@@ -485,14 +502,15 @@ export function PerfTaskEditModal({
                               <span
                                 style={{
                                   display: 'inline-block',
-                                  width: 6,
-                                  height: 6,
+                                  width: 7,
+                                  height: 7,
                                   borderRadius: '50%',
                                   background: node.status === 'online' ? '#10b981' : '#94a3b8',
                                 }}
+                                title={node.status === 'online' ? '在线' : '离线'}
                               />
-                              <span>{node.name || node.host}</span>
-                              <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>({hostPort})</span>
+                              <span style={{ fontWeight: 500 }}>{node.name || node.host}</span>
+                              <span style={{ color: 'var(--text-muted)', fontSize: 10, fontFamily: 'monospace' }}>({hostPort})</span>
                             </label>
                           );
                         })}
@@ -500,35 +518,18 @@ export function PerfTaskEditModal({
                     ) : (
                       <div
                         style={{
-                          fontSize: 11,
+                          fontSize: 12,
                           color: 'var(--text-muted)',
-                          padding: '4px 8px',
+                          padding: '12px 14px',
                           background: 'var(--bg-card)',
                           border: '1px dashed var(--border)',
-                          borderRadius: 4,
+                          borderRadius: 6,
+                          textAlign: 'center',
                         }}
                       >
-                        暂无注册从机节点，您可直接在下方手动输入从机 IP:Port
+                        暂无已注册的从机节点，请先在「从机节点管理」中添加并启动从机服务
                       </div>
                     )}
-
-                    <input
-                      type="text"
-                      placeholder="自定义从机节点列表 (如 192.168.1.101:1099, 192.168.1.102:1099)"
-                      value={slaveHosts}
-                      onChange={(e) => setSlaveHosts(e.target.value)}
-                      style={{
-                        width: '100%',
-                        height: 30,
-                        padding: '0 8px',
-                        borderRadius: 4,
-                        border: '1px solid var(--border)',
-                        background: 'var(--bg-card)',
-                        color: 'var(--text-primary)',
-                        fontFamily: 'monospace',
-                        fontSize: 11,
-                      }}
-                    />
                   </div>
                 )}
               </div>
