@@ -69,6 +69,7 @@ class ScriptRunIn(BaseModel):
     env_base_url: str = ""
     exec_mode: str = "local"
     slave_hosts: str = ""
+    custom_properties: dict = {}
 
 
 class TaskCreateIn(BaseModel):
@@ -83,6 +84,7 @@ class TaskCreateIn(BaseModel):
     engine_type: str = "jmeter_cli"
     exec_mode: str = "local"
     slave_hosts: str = ""
+    custom_properties: dict = {}
     script_items: list[dict]  # [{"script_id": 1, "weight": 100}]
 
 
@@ -97,7 +99,15 @@ class TaskUpdateIn(BaseModel):
     engine_type: Optional[str] = None
     exec_mode: Optional[str] = None
     slave_hosts: Optional[str] = None
+    custom_properties: Optional[dict] = None
     script_items: Optional[list[dict]] = None
+
+
+class TaskExecuteIn(BaseModel):
+    env_id: Optional[int] = None
+    env_base_url: Optional[str] = ""
+    exec_mode: Optional[str] = None
+    slave_hosts: Optional[str] = None
 
 
 class SlaveNodeIn(BaseModel):
@@ -165,10 +175,11 @@ def create_script(
     db: PerfDatabase = Depends(get_perf_db),
 ) -> dict:
     config = dict(body.config or {})
-    if body.jmx_content and not config.get("steps"):
+    if body.jmx_content:
         try:
             parsed = JmxParser.parse(body.jmx_content)
             config["steps"] = parsed.get("steps", [])
+            config["properties"] = parsed.get("properties", [])
             if "concurrency" not in config:
                 config["concurrency"] = parsed.get("concurrency", 1)
             if "duration" not in config:
@@ -221,6 +232,27 @@ def list_scripts(
     }
 
 
+@router.get("/scripts/batch/properties")
+def get_scripts_batch_properties(
+    script_ids: str = Query(..., description="逗号分隔的脚本ID列表，如 1,2,3"),
+    db: PerfDatabase = Depends(get_perf_db),
+) -> dict:
+    """批量解析并聚合一组脚本的全部动态外部参数清单。"""
+    sids = [int(x.strip()) for x in script_ids.split(",") if x.strip().isdigit()]
+    combined_props: dict[str, str] = {}
+    for sid in sids:
+        s = db.get_script(sid)
+        if not s or not s.jmx_content:
+            continue
+        props = JmxParser.extract_properties(s.jmx_content)
+        for p in props:
+            name = p["name"]
+            val = p.get("default_value", "")
+            if name not in combined_props or (not combined_props[name] and val):
+                combined_props[name] = val
+    return {"properties": [{"name": k, "default_value": v} for k, v in combined_props.items()]}
+
+
 @router.get("/scripts/{script_id}")
 def get_script(script_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
     s = db.get_script(script_id)
@@ -229,11 +261,14 @@ def get_script(script_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
 
     config = dict(s.config or {})
     steps = config.get("steps") or []
-    if not steps and s.jmx_content:
+    properties = config.get("properties")
+    if (not steps or properties is None) and s.jmx_content:
         try:
             parsed = JmxParser.parse(s.jmx_content)
             steps = parsed.get("steps", [])
+            properties = parsed.get("properties", [])
             config["steps"] = steps
+            config["properties"] = properties
             if "concurrency" not in config:
                 config["concurrency"] = parsed.get("concurrency", 1)
             if "duration" not in config:
@@ -241,6 +276,13 @@ def get_script(script_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
             db.update_script(s.id, config=config)
         except Exception as exc:
             logger.warning(f"获取脚本详情时解析 JMX 失败: {exc}")
+
+    component_tree = []
+    if s.jmx_content:
+        try:
+            component_tree = JmxParser.parse_component_tree(s.jmx_content)
+        except Exception as exc:
+            logger.warning(f"解析组件树失败: {exc}")
 
     return {
         "id": s.id,
@@ -250,6 +292,8 @@ def get_script(script_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
         "plan_description": s.plan_description,
         "config": config,
         "parsed_steps": steps,
+        "properties": properties or [],
+        "component_tree": component_tree,
         "jmx_content": s.jmx_content,
         "asset_ids": s.asset_ids,
         "created_at": s.created_at.isoformat(),
@@ -345,6 +389,8 @@ async def run_script(
     if script.config and isinstance(script.config, dict):
         actual_concurrency = script.config.get("concurrency", 1)
 
+    custom_props = (body.custom_properties if body else {}) or {}
+
     run = PerfRun(
         task_id=0,
         script_id=script_id,
@@ -353,6 +399,7 @@ async def run_script(
         engine_used=engine_type,
         exec_mode=exec_mode,
         slave_hosts=slave_hosts,
+        custom_properties=custom_props,
         concurrency_actual=actual_concurrency,
     )
     run_id = db.create_run(run)
@@ -367,6 +414,7 @@ async def run_script(
             env_base_url=env_base_url,
             exec_mode=exec_mode,
             slave_hosts=slave_hosts,
+            custom_properties=custom_props,
         )
     )
     return {"ok": True, "run_id": run_id}
@@ -426,6 +474,7 @@ def create_task(body: TaskCreateIn, db: PerfDatabase = Depends(get_perf_db)) -> 
         engine_type=body.engine_type,
         exec_mode=body.exec_mode,
         slave_hosts=body.slave_hosts,
+        custom_properties=body.custom_properties or {},
     )
     tid = db.create_task(task, body.script_items)
     return {"ok": True, "id": tid}
@@ -488,6 +537,7 @@ def get_task(task_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
         "engine_type": t.engine_type,
         "exec_mode": getattr(t, "exec_mode", "local") or "local",
         "slave_hosts": getattr(t, "slave_hosts", "") or "",
+        "custom_properties": getattr(t, "custom_properties", {}) or {},
         "last_status": t.last_status,
         "last_run_at": t.last_run_at.isoformat() if t.last_run_at else None,
         "last_run_id": t.last_run_id,
@@ -511,6 +561,7 @@ def update_task(
         engine_type=body.engine_type,
         exec_mode=body.exec_mode,
         slave_hosts=body.slave_hosts,
+        custom_properties=body.custom_properties,
         script_items=body.script_items,
     )
     if not t:
@@ -526,19 +577,28 @@ def delete_task(task_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
 
 
 @router.post("/tasks/{task_id}/execute")
-async def execute_task(task_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict:
+async def execute_task(
+    task_id: int,
+    body: Optional[TaskExecuteIn] = None,
+    db: PerfDatabase = Depends(get_perf_db),
+) -> dict:
     """启动性能测试任务。"""
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(404, "任务不存在")
+
+    env_base_url = (body.env_base_url or "").strip() if body else ""
+    exec_mode = getattr(task, "exec_mode", "local") or "local"
+    slave_hosts = getattr(task, "slave_hosts", "") or ""
 
     run = PerfRun(
         task_id=task.id,
         project_id=task.project_id,
         status="running",
         engine_used=task.engine_type,
-        exec_mode=getattr(task, "exec_mode", "local") or "local",
-        slave_hosts=getattr(task, "slave_hosts", "") or "",
+        exec_mode=exec_mode,
+        slave_hosts=slave_hosts,
+        custom_properties=getattr(task, "custom_properties", {}) or {},
         concurrency_actual=task.concurrency,
     )
     run_id = db.create_run(run)
@@ -546,7 +606,16 @@ async def execute_task(task_id: int, db: PerfDatabase = Depends(get_perf_db)) ->
 
     # 异步加入事件循环后台执行
     executor_mgr = get_executor_manager()
-    asyncio.create_task(executor_mgr.execute_task(task_id, run_id, db))
+    asyncio.create_task(
+        executor_mgr.execute_task(
+            task_id=task_id,
+            run_id=run_id,
+            perf_db=db,
+            env_base_url=env_base_url,
+            exec_mode=exec_mode,
+            slave_hosts=slave_hosts,
+        )
+    )
 
     return {"ok": True, "run_id": run_id}
 
@@ -574,12 +643,24 @@ def list_runs(
     items, total = db.list_runs(
         project_id=project_id, task_id=task_id, script_id=script_id, page=page, page_size=page_size
     )
+    task_map: dict[int, str] = {}
+    script_map: dict[int, str] = {}
+    for r in items:
+        if r.task_id and r.task_id not in task_map:
+            t = db.get_task(r.task_id)
+            task_map[r.task_id] = t.name if t else f"任务 #{r.task_id}"
+        if r.script_id and r.script_id not in script_map:
+            s = db.get_script(r.script_id)
+            script_map[r.script_id] = s.name if s else f"脚本 #{r.script_id}"
+
     return {
         "items": [
             {
                 "id": r.id,
                 "task_id": r.task_id,
+                "task_name": task_map.get(r.task_id, ""),
                 "script_id": r.script_id,
+                "script_name": script_map.get(r.script_id, ""),
                 "project_id": r.project_id,
                 "status": r.status,
                 "engine_used": r.engine_used,
@@ -609,10 +690,23 @@ def get_run_report(run_id: int, db: PerfDatabase = Depends(get_perf_db)) -> dict
     r = db.get_run(run_id)
     if not r:
         raise HTTPException(404, "报告记录不存在")
+    task_name = ""
+    if r.task_id:
+        t = db.get_task(r.task_id)
+        if t:
+            task_name = t.name
+    script_name = ""
+    if r.script_id:
+        s = db.get_script(r.script_id)
+        if s:
+            script_name = s.name
+
     return {
         "id": r.id,
         "task_id": r.task_id,
+        "task_name": task_name,
         "script_id": r.script_id,
+        "script_name": script_name,
         "project_id": r.project_id,
         "status": r.status,
         "engine_used": r.engine_used,
