@@ -3,7 +3,6 @@ import { FileText, Layers, Server } from 'lucide-react';
 import { PerfScriptList } from './PerfScriptList';
 import { PerfTaskList } from './PerfTaskList';
 import { PerfSlaveNodeList } from './PerfSlaveNodeList';
-import { PerfReportModal } from './PerfReportModal';
 
 type ServerSubTab = 'scripts' | 'tasks' | 'nodes';
 
@@ -12,7 +11,6 @@ type ServerSubTab = 'scripts' | 'tasks' | 'nodes';
  */
 export function ServerPerfWorkbench() {
   const [activeTab, setActiveTab] = useState<ServerSubTab>('scripts');
-  const [viewRunId, setViewRunId] = useState<number | null>(null);
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
@@ -101,14 +99,11 @@ export function ServerPerfWorkbench() {
         {activeTab === 'scripts' ? (
           <PerfScriptList />
         ) : activeTab === 'tasks' ? (
-          <PerfTaskList onOpenReport={(runId) => setViewRunId(runId)} />
+          <PerfTaskList />
         ) : (
           <PerfSlaveNodeList />
         )}
       </div>
-
-      {/* 报告弹窗 */}
-      <PerfReportModal runId={viewRunId} onClose={() => setViewRunId(null)} />
     </div>
   );
 }

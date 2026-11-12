@@ -180,7 +180,7 @@ export function PrometheusConfigModal({ open, onClose, onConfigSaved }: Promethe
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <Settings size={18} color="var(--accent)" />
             <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-              配置 Prometheus 主机数据源
+              配置 Prometheus 数据源
             </span>
           </div>
           <button
@@ -203,13 +203,13 @@ export function PrometheusConfigModal({ open, onClose, onConfigSaved }: Promethe
           {/* 地址输入 */}
           <div>
             <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 6 }}>
-              Prometheus 服务地址 (包含端口) <span style={{ color: '#ef4444' }}>*</span>
+              Prometheus 地址 <span style={{ color: '#ef4444' }}>*</span>
             </label>
             <div style={{ position: 'relative' }}>
               <Globe size={15} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
               <input
                 type="text"
-                placeholder="例如: http://192.2.8.100:9091 或 http://10.0.0.1:9090"
+                placeholder="例如: http://192.2.8.100:9091"
                 value={activeUrl}
                 onChange={(e) => setActiveUrl(e.target.value)}
                 style={{
@@ -224,21 +224,18 @@ export function PrometheusConfigModal({ open, onClose, onConfigSaved }: Promethe
                 }}
               />
             </div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-              支持直连 Prometheus 9091/9090 端口，或带有反向代理的统一域名。
-            </div>
           </div>
 
           {/* Token (可选) */}
           <div>
             <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 6 }}>
-              认证 Token / Bearer Token <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(可选，若内网免密可留空)</span>
+              认证 Token <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(可选)</span>
             </label>
             <div style={{ position: 'relative' }}>
               <Key size={15} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
               <input
                 type="password"
-                placeholder="若 Prometheus 开启了认证或走代理，在此输入 Token"
+                placeholder="免密可留空"
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
                 style={{
@@ -259,7 +256,7 @@ export function PrometheusConfigModal({ open, onClose, onConfigSaved }: Promethe
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
               <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)' }}>
-                常用 / 历史 Prometheus 节点列表:
+                预设节点列表:
               </span>
               <button
                 type="button"
@@ -276,7 +273,7 @@ export function PrometheusConfigModal({ open, onClose, onConfigSaved }: Promethe
                 }}
               >
                 <Plus size={12} />
-                <span>将当前地址存入列表</span>
+                <span>存入预设</span>
               </button>
             </div>
 

@@ -48,7 +48,7 @@ export function PerformanceMonitoringApp() {
           }}
         >
           <Server size={13} />
-          <span>服务器与容器监控 (Prometheus)</span>
+          <span>服务器监控</span>
         </button>
 
         <button
@@ -70,7 +70,7 @@ export function PerformanceMonitoringApp() {
           }}
         >
           <Smartphone size={13} />
-          <span>移动设备监控</span>
+          <span>移动端监控</span>
         </button>
       </div>
 

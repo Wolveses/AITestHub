@@ -105,10 +105,11 @@ export function SystemMonitorPanel() {
       const now = Math.floor(Date.now() / 1000);
       const start = now - timeRange;
 
-      const [overviewRes, containersRes, trendRes] = await Promise.all([
+      const [overviewRes, containersRes, cpuTrendRes, memTrendRes] = await Promise.all([
         fetch(`/api/modules/performance/system_monitor/overview?job=${encodeURIComponent(selectedHost)}`).then((r) => r.json()),
         fetch(`/api/modules/performance/system_monitor/containers?job=${encodeURIComponent(selectedHost)}&start=${start}&end=${now}&step=60`).then((r) => r.json()),
         fetch(`/api/modules/performance/system_monitor/trend?job=${encodeURIComponent(selectedHost)}&metric_type=cpu&start=${start}&end=${now}&step=60`).then((r) => r.json()),
+        fetch(`/api/modules/performance/system_monitor/trend?job=${encodeURIComponent(selectedHost)}&metric_type=memory&start=${start}&end=${now}&step=60`).then((r) => r.json()),
       ]);
 
       setOverview(overviewRes);
@@ -116,47 +117,87 @@ export function SystemMonitorPanel() {
         setContainers(containersRes);
       }
 
-      // 渲染 ECharts 趋势图
-      if (chartInstance.current && Array.isArray(trendRes)) {
+      // 渲染 ECharts 趋势图（单纵轴，左侧统一为 %）
+      if (chartInstance.current && Array.isArray(cpuTrendRes)) {
+        const memTotalGb = overviewRes?.mem_total_gb ?? 0;
         chartInstance.current.setOption({
           title: {
-            text: '宿主机 CPU 使用率走势 (%)',
-            textStyle: { fontSize: 13, color: 'var(--text-primary)' },
+            text: 'CPU / 内存走势 (%)',
+            textStyle: { fontSize: 13, color: '#334155', fontWeight: 600 },
+            left: 0,
+            top: 2,
           },
           tooltip: {
             trigger: 'axis',
+            backgroundColor: 'rgba(15, 23, 42, 0.95)',
+            borderColor: '#475569',
+            textStyle: { color: '#f8fafc', fontSize: 12 },
             formatter: (params: any) => {
               if (!params || !params[0]) return '';
               const date = new Date(params[0].value[0]);
               const timeStr = date.toLocaleTimeString();
-              return `${timeStr}<br/>CPU: <b>${params[0].value[1]}%</b>`;
+              let text = `<div style="font-weight:600;margin-bottom:6px;color:#94a3b8">${timeStr}</div>`;
+              params.forEach((p: any) => {
+                const val = Number(p.value[1]) || 0;
+                let extra = '';
+                if (p.seriesName === '内存' && memTotalGb > 0) {
+                  const usedGb = ((val / 100) * memTotalGb).toFixed(2);
+                  extra = ` <span style="color:#94a3b8;font-size:11px">(${usedGb} / ${memTotalGb} GB)</span>`;
+                }
+                text += `<div style="margin-bottom:2px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${p.color};margin-right:6px"></span>${p.seriesName}: <b style="color:#ffffff">${val}%</b>${extra}</div>`;
+              });
+              return text;
             },
           },
-          grid: { top: 35, right: 20, bottom: 25, left: 45 },
+          legend: {
+            data: ['CPU', '内存'],
+            right: 20,
+            top: 2,
+            icon: 'circle',
+            itemWidth: 9,
+            itemHeight: 9,
+            textStyle: { color: '#334155', fontSize: 13, fontWeight: 600 },
+          },
+          grid: { top: 38, right: 25, bottom: 25, left: 45 },
           xAxis: {
             type: 'time',
-            axisLabel: { color: 'var(--text-secondary)', fontSize: 11 },
+            axisLabel: { color: '#94a3b8', fontSize: 11 },
             splitLine: { show: false },
           },
           yAxis: {
             type: 'value',
             min: 0,
             max: 100,
-            axisLabel: { color: 'var(--text-secondary)', fontSize: 11, formatter: '{value}%' },
+            position: 'left',
+            axisLabel: { color: '#94a3b8', fontSize: 11, formatter: '{value}%' },
             splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
           },
           series: [
             {
-              name: 'CPU 使用率',
+              name: 'CPU',
               type: 'line',
               smooth: true,
               showSymbol: false,
-              data: trendRes,
-              itemStyle: { color: '#3b82f6' },
+              data: cpuTrendRes,
+              itemStyle: { color: '#3b82f6' }, // 蓝色
               areaStyle: {
                 color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-                  { offset: 0, color: 'rgba(59, 130, 246, 0.35)' },
-                  { offset: 1, color: 'rgba(59, 130, 246, 0.02)' },
+                  { offset: 0, color: 'rgba(59, 130, 246, 0.25)' },
+                  { offset: 1, color: 'rgba(59, 130, 246, 0.01)' },
+                ]),
+              },
+            },
+            {
+              name: '内存',
+              type: 'line',
+              smooth: true,
+              showSymbol: false,
+              data: Array.isArray(memTrendRes) ? memTrendRes : [],
+              itemStyle: { color: '#10b981' }, // 翠绿色
+              areaStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                  { offset: 0, color: 'rgba(16, 185, 129, 0.20)' },
+                  { offset: 1, color: 'rgba(16, 185, 129, 0.01)' },
                 ]),
               },
             },
@@ -243,7 +284,7 @@ export function SystemMonitorPanel() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', fontSize: 13, fontWeight: 500 }}>
             <Server size={16} />
-            <span>监控主机:</span>
+            <span>主机:</span>
           </div>
 
           <select
@@ -285,11 +326,11 @@ export function SystemMonitorPanel() {
                 outline: 'none',
               }}
             >
-              <option value={900}>最近 15 分钟</option>
-              <option value={3600}>最近 1 小时</option>
-              <option value={21600}>最近 6 小时</option>
-              <option value={86400}>最近 24 小时</option>
-              <option value={259200}>最近 3 天</option>
+              <option value={900}>15 分钟</option>
+              <option value={3600}>1 小时</option>
+              <option value={21600}>6 小时</option>
+              <option value={86400}>24 小时</option>
+              <option value={259200}>3 天</option>
             </select>
           </div>
         </div>
@@ -297,7 +338,6 @@ export function SystemMonitorPanel() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <button
             onClick={() => setConfigModalOpen(true)}
-            title="配置 Prometheus 主机地址"
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -315,8 +355,8 @@ export function SystemMonitorPanel() {
             <Settings size={13} color="var(--accent)" />
             <span>配置数据源</span>
             {activePromUrl && (
-              <span style={{ fontSize: 10, color: 'var(--text-muted)', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                ({activePromUrl.replace(/^https?:\/\//, '')})
+              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                {activePromUrl.replace(/^https?:\/\//, '')}
               </span>
             )}
           </button>
@@ -328,7 +368,7 @@ export function SystemMonitorPanel() {
               onChange={(e) => setAutoRefresh(e.target.checked)}
               style={{ cursor: 'pointer' }}
             />
-            <span>自动刷新 (15s)</span>
+            <span>自动刷新</span>
           </label>
 
           <button
@@ -362,7 +402,7 @@ export function SystemMonitorPanel() {
             <Cpu size={22} />
           </div>
           <div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>主机 CPU 利用率 ({overview?.cpu_cores ?? 1} 核)</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>CPU 利用率</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-primary)' }}>{overview?.cpu_percent ?? 0}%</div>
           </div>
         </div>
@@ -372,7 +412,7 @@ export function SystemMonitorPanel() {
             <Activity size={22} />
           </div>
           <div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>主机内存占用 ({overview?.mem_used_gb ?? 0} / {overview?.mem_total_gb ?? 0} GB)</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>内存占用 ({overview?.mem_used_gb ?? 0} / {overview?.mem_total_gb ?? 0} GB)</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-primary)' }}>{overview?.mem_percent ?? 0}%</div>
           </div>
         </div>
@@ -382,7 +422,7 @@ export function SystemMonitorPanel() {
             <HardDrive size={22} />
           </div>
           <div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>根分区磁盘占用 ({overview?.disk_used_gb ?? 0} / {overview?.disk_total_gb ?? 0} GB)</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>磁盘占用 ({overview?.disk_used_gb ?? 0} / {overview?.disk_total_gb ?? 0} GB)</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-primary)' }}>{overview?.disk_percent ?? 0}%</div>
           </div>
         </div>
@@ -392,7 +432,7 @@ export function SystemMonitorPanel() {
             <TrendingUp size={22} />
           </div>
           <div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>系统 1m 负载</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>系统负载 (1m)</div>
             <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-primary)' }}>{overview?.load1 ?? 0}</div>
           </div>
         </div>
@@ -440,15 +480,15 @@ export function SystemMonitorPanel() {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <Layers size={16} color="var(--accent)" />
               <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-                Docker 容器服务性能排行 ({filteredContainers.length} 个服务)
+                容器排行 ({filteredContainers.length})
               </span>
             </div>
 
-            <div style={{ position: 'relative', width: 220 }}>
+            <div style={{ position: 'relative', width: 200 }}>
               <Search size={14} style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
               <input
                 type="text"
-                placeholder="搜索容器服务名称..."
+                placeholder="搜索容器..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 style={{
@@ -496,7 +536,7 @@ export function SystemMonitorPanel() {
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <span>CPU 最大值</span>
+                      <span>CPU 峰值</span>
                       {renderSortIcon('cpu_max')}
                     </div>
                   </th>
@@ -526,7 +566,7 @@ export function SystemMonitorPanel() {
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <span>CPU 当前</span>
+                      <span>当前 CPU</span>
                       {renderSortIcon('cpu_current')}
                     </div>
                   </th>
@@ -541,7 +581,7 @@ export function SystemMonitorPanel() {
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <span>内存 RSS 最大 (MB)</span>
+                      <span>RSS 峰值 (MB)</span>
                       {renderSortIcon('rss_max_mb')}
                     </div>
                   </th>
@@ -556,23 +596,23 @@ export function SystemMonitorPanel() {
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <span>内存 RSS 均值 (MB)</span>
+                      <span>RSS 均值 (MB)</span>
                       {renderSortIcon('rss_avg_mb')}
                     </div>
                   </th>
                   <th
-                    onClick={() => handleSort('usage_max_mb')}
+                    onClick={() => handleSort('rss_current_mb')}
                     style={{
                       padding: '8px 12px',
-                      color: sortField === 'usage_max_mb' ? 'var(--accent)' : 'var(--text-secondary)',
+                      color: sortField === 'rss_current_mb' ? 'var(--accent)' : 'var(--text-secondary)',
                       fontWeight: 600,
                       cursor: 'pointer',
                       userSelect: 'none',
                     }}
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                      <span>内存 Usage 峰值 (MB)</span>
-                      {renderSortIcon('usage_max_mb')}
+                      <span>当前 RSS (MB)</span>
+                      {renderSortIcon('rss_current_mb')}
                     </div>
                   </th>
                 </tr>
@@ -605,7 +645,7 @@ export function SystemMonitorPanel() {
                         {c.rss_max_mb} MB
                       </td>
                       <td style={{ padding: '8px 12px', color: 'var(--text-primary)' }}>{c.rss_avg_mb} MB</td>
-                      <td style={{ padding: '8px 12px', color: 'var(--text-muted)' }}>{c.usage_max_mb} MB</td>
+                      <td style={{ padding: '8px 12px', color: 'var(--text-secondary)' }}>{c.rss_current_mb} MB</td>
                     </tr>
                   );
                 })}
