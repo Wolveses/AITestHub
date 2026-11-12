@@ -25,6 +25,7 @@ export interface PerfTaskItem {
   engine_type: 'builtin' | 'jmeter_cli';
   exec_mode?: 'local' | 'distributed';
   slave_hosts?: string;
+  custom_properties?: Record<string, any>;
   last_status: string;
   last_run_at: string | null;
   last_run_id: number | null;
