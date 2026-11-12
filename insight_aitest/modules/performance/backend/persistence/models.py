@@ -93,6 +93,11 @@ class PerfTask(MappedAsDataclass, Base, kw_only=True):
     # 分布式模式下选中的从机IP/地址列表（形如 "192.168.1.101:1099,192.168.1.102:1099"）
     slave_hosts: Mapped[str] = mapped_column(Text, default="")
 
+    # 动态自定义参数键值对（JSON），例如 {"threads": "50", "duration": "120", "host": "1.2.3.4"}
+    custom_properties: Mapped[dict] = mapped_column(
+        "custom_properties_json", JSON, default_factory=dict
+    )
+
     last_status: Mapped[str] = mapped_column(Text, default="idle")
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     last_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
@@ -140,6 +145,10 @@ class PerfRun(MappedAsDataclass, Base, kw_only=True):
     engine_used: Mapped[str] = mapped_column(Text, default="builtin")
     exec_mode: Mapped[str] = mapped_column(Text, default="local")
     slave_hosts: Mapped[str] = mapped_column(Text, default="")
+    # 实际执行生效的自定义属性参数字典
+    custom_properties: Mapped[dict] = mapped_column(
+        "custom_properties_json", JSON, default_factory=dict
+    )
     concurrency_actual: Mapped[int] = mapped_column(Integer, default=0)
     total_samples: Mapped[int] = mapped_column(Integer, default=0)
     failed_samples: Mapped[int] = mapped_column(Integer, default=0)

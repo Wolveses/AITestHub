@@ -52,6 +52,7 @@ class AsyncPerfEngine:
         duration_seconds: int = 60,
         loop_count: int = 1,
         strategy_type: str = "duration",
+        custom_properties: Optional[dict[str, Any]] = None,
         on_metrics_tick: Optional[Callable[[dict[str, Any]], None]] = None,
     ) -> None:
         self.task_id = task_id
@@ -62,7 +63,23 @@ class AsyncPerfEngine:
         self.duration_seconds = max(1, duration_seconds)
         self.loop_count = loop_count
         self.strategy_type = strategy_type
+        self.custom_properties = dict(custom_properties or {})
         self.on_metrics_tick = on_metrics_tick
+
+        # 若自定义参数中明确指定了并发、持续时长或预热时间，动态以 custom_properties 为最高优先级
+        prop_digits = {k.lower(): int(str(v).strip()) for k, v in self.custom_properties.items() if str(v).strip().isdigit()}
+        for k in ("concurrency", "threads", "num_threads", "thread_num", "vusers", "users"):
+            if k in prop_digits and prop_digits[k] > 0:
+                self.concurrency = prop_digits[k]
+                break
+        for k in ("duration", "duration_seconds", "test_duration", "test_time", "time"):
+            if k in prop_digits and prop_digits[k] > 0:
+                self.duration_seconds = prop_digits[k]
+                break
+        for k in ("ramp_up", "ramp_up_seconds", "rampup", "warm_up"):
+            if k in prop_digits and prop_digits[k] >= 0:
+                self.ramp_up_seconds = prop_digits[k]
+                break
 
         self._stop_event = asyncio.Event()
         self._samples: list[SampleResult] = []

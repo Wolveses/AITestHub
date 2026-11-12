@@ -36,12 +36,16 @@ def _ensure_perf_columns(db_path: str) -> None:
             conn.execute("ALTER TABLE perf_runs ADD COLUMN exec_mode TEXT DEFAULT 'local'")
         if "slave_hosts" not in run_cols:
             conn.execute("ALTER TABLE perf_runs ADD COLUMN slave_hosts TEXT DEFAULT ''")
+        if "custom_properties_json" not in run_cols:
+            conn.execute("ALTER TABLE perf_runs ADD COLUMN custom_properties_json JSON DEFAULT '{}'")
 
         task_cols = {row[1] for row in conn.execute("PRAGMA table_info(perf_tasks)")}
         if "exec_mode" not in task_cols:
             conn.execute("ALTER TABLE perf_tasks ADD COLUMN exec_mode TEXT DEFAULT 'local'")
         if "slave_hosts" not in task_cols:
             conn.execute("ALTER TABLE perf_tasks ADD COLUMN slave_hosts TEXT DEFAULT ''")
+        if "custom_properties_json" not in task_cols:
+            conn.execute("ALTER TABLE perf_tasks ADD COLUMN custom_properties_json JSON DEFAULT '{}'")
 
         conn.commit()
 
@@ -201,6 +205,7 @@ class PerfDatabase:
         engine_type: Optional[str] = None,
         exec_mode: Optional[str] = None,
         slave_hosts: Optional[str] = None,
+        custom_properties: Optional[dict] = None,
         script_items: Optional[list[dict]] = None,
     ) -> Optional[PerfTask]:
         with session_scope(self.db_path) as session:
@@ -228,6 +233,8 @@ class PerfDatabase:
                 task.exec_mode = exec_mode
             if slave_hosts is not None:
                 task.slave_hosts = slave_hosts
+            if custom_properties is not None:
+                task.custom_properties = custom_properties
             task.updated_at = datetime.now()
 
             if script_items is not None:

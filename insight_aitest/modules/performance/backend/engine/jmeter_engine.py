@@ -17,6 +17,8 @@ import tempfile
 from typing import Any, Callable, Optional
 from logzero import logger
 
+from insight_aitest.modules.performance.backend.services.jmx_parser import JmxParser
+
 
 class JMeterCliEngine:
     """本地 JMeter 原生 CLI 执行器。"""
@@ -29,6 +31,7 @@ class JMeterCliEngine:
         concurrency: Optional[int] = None,
         ramp_up_seconds: Optional[int] = None,
         duration_seconds: Optional[int] = None,
+        custom_properties: Optional[dict[str, Any]] = None,
         exec_mode: str = "local",
         slave_hosts: str = "",
         on_metrics_tick: Optional[Callable[[dict[str, Any]], None]] = None,
@@ -40,6 +43,7 @@ class JMeterCliEngine:
         self.concurrency = concurrency
         self.ramp_up_seconds = ramp_up_seconds
         self.duration_seconds = duration_seconds
+        self.custom_properties = dict(custom_properties or {})
         self.exec_mode = exec_mode or "local"
         self.slave_hosts = (slave_hosts or "").strip()
         self.on_metrics_tick = on_metrics_tick
@@ -96,8 +100,10 @@ class JMeterCliEngine:
         jmx_file = os.path.join(temp_dir, "plan.jmx")
         jtl_file = os.path.join(temp_dir, "result.jtl")
 
+        jmx_to_execute = JmxParser.parameterize_thread_group(self.jmx_content)
+        jmx_to_execute = JmxParser.adjust_thread_group_for_properties(jmx_to_execute, self.custom_properties)
         with open(jmx_file, "w", encoding="utf-8") as f:
-            f.write(self.jmx_content)
+            f.write(jmx_to_execute)
 
         self._emit_log(f"[{datetime.now().strftime('%H:%M:%S')}] 生成临时 JMX 方案文件: {jmx_file}")
 
@@ -111,26 +117,22 @@ class JMeterCliEngine:
         ]
 
         is_distributed = (self.exec_mode == "distributed" and bool(self.slave_hosts))
+        prop_prefix = "-G" if is_distributed else "-J"
+
         if is_distributed:
             self._emit_log(f"[{datetime.now().strftime('%H:%M:%S')}] 启用分布式集群压测模式，Master 调度远程从机: {self.slave_hosts}")
             cmd.extend(["-R", self.slave_hosts, "-X"])
             cmd.append("-Jserver.rmi.ssl.disable=true")
-            # 分布式模式使用 -G 广播参数给所有 Slave 节点
-            if self.concurrency is not None:
-                cmd.append(f"-Gconcurrency={self.concurrency}")
-            if self.ramp_up_seconds is not None:
-                cmd.append(f"-Gramp_up={self.ramp_up_seconds}")
-            if self.duration_seconds is not None and self.duration_seconds > 0:
-                cmd.append(f"-Gduration={self.duration_seconds}")
         else:
             self._emit_log(f"[{datetime.now().strftime('%H:%M:%S')}] 启用本地单机压测模式 (Master 本机施压)")
-            # 若显式传入外部覆盖参数才附加 -J，否则完全遵照脚本内配置运行
-            if self.concurrency is not None:
-                cmd.append(f"-Jconcurrency={self.concurrency}")
-            if self.ramp_up_seconds is not None:
-                cmd.append(f"-Jramp_up={self.ramp_up_seconds}")
-            if self.duration_seconds is not None and self.duration_seconds > 0:
-                cmd.append(f"-Jduration={self.duration_seconds}")
+
+        # 动态透传自定义参数 (支持用户脚本中任意 __P、__property、props.get 属性)
+        # 统一由脚本动态参数全面控制并发、时长、预热及业务变量，不再写死硬编码兜底参数
+        for prop_name, prop_val in (self.custom_properties or {}).items():
+            if prop_name and prop_val is not None and str(prop_val).strip() != "":
+                clean_name = str(prop_name).strip()
+                clean_val = str(prop_val).strip()
+                cmd.append(f"{prop_prefix}{clean_name}={clean_val}")
 
         cmd_display = " ".join(f'"{c}"' if " " in c else c for c in cmd)
         self._emit_log(f"[{datetime.now().strftime('%H:%M:%S')}] 启动命令行调度: {cmd_display}")
