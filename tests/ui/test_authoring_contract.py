@@ -557,5 +557,37 @@ def test_error_result_marks_is_error():
 
     result = _error(svc.fail("BUSY", "该用例正被其他本地 Agent 操作"))
     assert result.is_error is True
-    assert result.structured_content["code"] == "BUSY"
-    assert result.structured_content["retryable"] is True
+    # 严格客户端会用成功态 outputSchema 校验 structuredContent，所以错误体只走 text
+    assert result.structured_content is None
+    body = result.content[0].text
+    assert '"code": "BUSY"' in body
+    assert '"retryable": true' in body
+
+
+def test_read_only_annotations_for_contract_and_validate():
+    tools = _tools()
+    assert tools["ui.contract.get"].annotations.read_only_hint is True
+    assert tools["ui.script.validate"].annotations.read_only_hint is True
+    assert tools["ui.script.submit"].annotations.read_only_hint is False
+
+
+def test_files_input_schema_is_modeled():
+    tools = _tools()
+    for name in ("ui.script.validate", "ui.script.dry_run", "ui.script.submit"):
+        schema = tools[name].input_schema
+        files = schema["properties"]["files"]
+        ref = files["items"].get("$ref") or ""
+        item = schema["$defs"][ref.rsplit("/", 1)[-1]] if ref else files["items"]
+        assert set(item["properties"]) == {"path", "content"}, name
+        assert set(item["required"]) == {"path", "content"}, name
+        assert files.get("maxItems") == 20, name
+
+
+def test_summary_result_keeps_payload_out_of_text():
+    from insight_aitest.modules.ui.backend.automation.mcp_server import _result
+
+    payload = {"ok": True, "blob": "x" * 5000}
+    result = _result("【摘要】ok", payload)
+    assert result.is_error is False
+    assert result.structured_content["blob"] == "x" * 5000
+    assert len(result.content[0].text) < 200

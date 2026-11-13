@@ -13,7 +13,7 @@ import re
 
 from insight_aitest.modules.ui.backend.automation import contract, corpus, lessons, paths
 
-TOTAL_CHAR_LIMIT = 24_000
+TOTAL_CHAR_LIMIT = 12_000
 MAX_EXAMPLES = 3
 MAX_SNIPPETS = 8
 SNIPPET_CHAR_LIMIT = 700

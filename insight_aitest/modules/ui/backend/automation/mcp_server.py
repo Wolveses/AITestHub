@@ -145,14 +145,28 @@ class RunLatestPayload(ToolPayload):
 
 
 _READ = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
-_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 _ENV = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True)
 _DRY_RUN = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True)
 _SUBMIT = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False)
 
+# ---- 入参模型：files 显式建模，避免 schema 退化成 additionalProperties: true ----
+
+class FileItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(description="文件路径；仅允许 case.py、pages/<name>.py、common/<name>.py", min_length=1)
+    content: str = Field(description="文件全文；单个文件不超过 512KB", min_length=1)
+
+
 CaseId = Annotated[int, Field(description="平台用例 ID；必须是当前 Token 所属项目内的用例", ge=1)]
-Files = Annotated[list[dict], Field(description="完整文件集合 [{path, content}]；path 仅允许 case.py、pages/<name>.py、common/<name>.py")]
+Files = Annotated[
+    list[FileItem],
+    Field(description="完整文件集合；最多 20 个，单个不超过 512KB，path 仅允许 case.py / pages/<name>.py / common/<name>.py", min_length=1, max_length=20),
+]
 SourceHash = Annotated[str, Field(description="ui.script.validate 返回的 source_hash；30 分钟内有效，且必须与本次 files 内容一致")]
+
+
+def _file_dicts(files: list[FileItem]) -> list[dict]:
+    return [item.model_dump() for item in files]
 
 INSTRUCTIONS = """Insight-AITest：UI 自动化脚本「本地编写 + 平台校验入库」服务。
 - 认证：请求头 Authorization: Bearer <token>，Token 绑定项目；不要写入脚本、不要提交仓库。
@@ -165,11 +179,23 @@ INSTRUCTIONS = """Insight-AITest：UI 自动化脚本「本地编写 + 平台校
 
 
 def _error(payload: dict) -> CallToolResult:
-    """业务失败：isError=true + 结构化错误体（此路径不受 outputSchema 约束）。"""
+    """业务失败：isError=true，错误体只走 text。
+
+    structuredContent 不填：严格客户端会用成功态的 outputSchema 校验它，
+    反而把真正的 fix 提示变成校验异常。
+    """
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, default=str))],
-        structured_content=payload,
         is_error=True,
+    )
+
+
+def _result(summary: str, payload: dict) -> CallToolResult:
+    """大返回：content 只放摘要，完整数据走 structuredContent，避免同一份 JSON 传两遍。"""
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary.strip())],
+        structured_content=payload,
+        is_error=False,
     )
 
 
@@ -232,7 +258,7 @@ def _build_server() -> MCPServer:
         title="Insight-AITest UI 自动化",
         description="UI 自动化脚本「本地编写 + 平台校验入库」服务",
         instructions=INSTRUCTIONS,
-        version="1.1.0",
+        version="1.2.0",
     )
 
     @server.tool(
@@ -242,9 +268,10 @@ def _build_server() -> MCPServer:
             "读取用例编写契约：用例快照与 case_rev、现有脚本版本与源码、当前环境摘要、"
             "项目 pages/common 资产清单、文件与 import 规则、硬编码/日志约束、错误码表，"
             "以及本次应遵循的 workflow。契约是脚本编写的唯一事实来源。"
-            "副作用：把用例标记为「生成中」，用于平台进度展示，不影响已有校验结果。"
+            "进度记录：调用后平台会把该用例标记为「生成中」，仅用于前端进度展示，"
+            "不修改用例、脚本或项目资产。"
         ),
-        annotations=_WRITE,
+        annotations=_READ,
     )
     def contract_get(case_id: CaseId) -> ContractPayload:
         db, case, err = _case_or_none(case_id)
@@ -254,7 +281,18 @@ def _build_server() -> MCPServer:
         env = resolve_current_env(db, int(case.project_id))
         payload = contract.contract_payload(case, env, intent=svc.case_intent(db, case))
         payload["ok"] = True
-        return payload
+        case_info = payload.get("case") or {}
+        script_info = payload.get("script") or {}
+        summary = "\n".join(
+            [
+                f"【编写契约】contract_version={payload.get('contract_version')} intent={payload.get('intent')}",
+                f"case_rev={case_info.get('case_rev')} script_version={script_info.get('version')} "
+                f"assets={len(payload.get('assets') or [])}",
+                f"workflow={(payload.get('workflow') or {}).get('id')}；"
+                "完整 rules / env / assets / workflow 见 structuredContent",
+            ]
+        )
+        return _result(summary, payload)
 
     @server.tool(
         name="ui.env.get",
@@ -321,7 +359,18 @@ def _build_server() -> MCPServer:
             return _error(svc.fail("CASE_NOT_FOUND", "用例均不存在或不属于当前 Token 的项目"))
         result = svc.triage_cases(db, cases)
         result["ok"] = True
-        return result
+        summary = result.get("summary") or {}
+        lines = [
+            "【用例分诊】"
+            + " ".join(f"{k}={v}" for k, v in summary.items()),
+        ]
+        for item in (result.get("items") or [])[:20]:
+            lines.append(
+                f"- {item.get('case_id')} {item.get('title') or ''} → {item.get('action')}"
+                f"（{item.get('reason') or ''}）"
+            )
+        lines.append("逐例明细与 next_tool 见 structuredContent")
+        return _result("\n".join(lines), result)
 
     @server.tool(
         name="ui.example.get",
@@ -345,7 +394,18 @@ def _build_server() -> MCPServer:
             case, db, max_examples=max_examples, include_assets=include_assets
         )
         payload["ok"] = True
-        return payload
+        summary = "\n".join(
+            [
+                f"【项目经验】hard_rules={len(payload.get('hard_rules') or [])} "
+                f"known_traps={len(payload.get('known_traps') or [])} "
+                f"lessons={len(payload.get('lessons') or [])} "
+                f"routes={len(payload.get('known_routes') or [])} "
+                f"examples={len(payload.get('examples') or [])} "
+                f"assets={len(payload.get('assets') or [])}",
+                "片段、资产签名与最小骨架 template 见 structuredContent",
+            ]
+        )
+        return _result(summary, payload)
 
     @server.tool(
         name="ui.script.validate",
@@ -355,14 +415,15 @@ def _build_server() -> MCPServer:
             "与 L2 pytest --collect-only。成功返回 source_hash（30 分钟内有效，供试跑与入库引用）；"
             "失败返回 isError=true 与 violations[]（每条含 code 与 fix）。"
             "文件路径仅允许 case.py、pages/<name>.py、common/<name>.py，最多 20 个、单个不超过 512KB。"
+            "校验记录仅用于前端进度展示，不修改用例、脚本或项目资产。"
         ),
-        annotations=_WRITE,
+        annotations=_READ,
     )
     async def script_validate(case_id: CaseId, files: Files) -> ValidatePayload:
         db, case, err = _case_or_none(case_id)
         if err:
             return _error(err)
-        result = await asyncio.to_thread(svc.validate, db, case, files)
+        result = await asyncio.to_thread(svc.validate, db, case, _file_dicts(files))
         return result if result.get("ok") else _error(result)
 
     @server.tool(
@@ -384,7 +445,7 @@ def _build_server() -> MCPServer:
         if not svc.acquire_lease(db, case, owner):
             return _error(svc.fail("BUSY", "该用例正被其他本地 Agent 操作，请稍后重试"))
         try:
-            result = await asyncio.to_thread(svc.dry_run, db, case, files, source_hash)
+            result = await asyncio.to_thread(svc.dry_run, db, case, _file_dicts(files), source_hash)
             return result if result.get("ok") else _error(result)
         finally:
             svc.release_lease(db, case)
@@ -396,6 +457,7 @@ def _build_server() -> MCPServer:
             "把已通过试跑的脚本写入平台：归档旧版本、版本号 +1、用例状态置为「已实现」。"
             "硬前置：source_hash、expect_case_rev、expect_script_version 必须与平台一致；"
             "覆盖 pages/common 需 force_assets=true（覆盖前自动备份）。写入不可回滚。"
+            "默认路径为版本化新增并归档旧版；仅当 force_assets=true 时才替换已有项目资产。"
         ),
         annotations=_SUBMIT,
     )
@@ -419,7 +481,7 @@ def _build_server() -> MCPServer:
                 svc.submit,
                 db,
                 case,
-                files,
+                _file_dicts(files),
                 source_hash,
                 expect_case_rev,
                 expect_script_version,
@@ -448,7 +510,21 @@ def _build_server() -> MCPServer:
         db, case, err = _case_or_none(case_id)
         if err:
             return _error(err)
-        return svc.latest_run_summary(db, case, run_id=run_id, history=history)
+        payload = svc.latest_run_summary(db, case, run_id=run_id, history=history)
+        payload["ok"] = True
+        run = payload.get("run") or {}
+        if not run:
+            summary = "【最近执行】无执行记录"
+        else:
+            summary = "\n".join(
+                [
+                    f"【最近执行】status={run.get('status')} run_id={run.get('id')} "
+                    f"duration_ms={run.get('duration_ms')}",
+                    f"失败原因：{(run.get('error') or '无')[:200]}",
+                    "日志尾部、截图与历史记录见 structuredContent",
+                ]
+            )
+        return _result(summary, payload)
 
     # ---- MCP prompts：把编写/修复文案交给客户端原生渲染，替代手工粘贴 ----
 
