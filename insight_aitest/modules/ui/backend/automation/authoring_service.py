@@ -112,6 +112,78 @@ def case_payload(case) -> dict:
     }
 
 
+# ===== 分诊（统一入口：create / fix / skip）=====
+
+TRIAGE_CREATE = "create"
+TRIAGE_FIX = "fix"
+TRIAGE_SKIP = "skip"
+
+_NEXT_TOOL_BY_ACTION = {TRIAGE_CREATE: "ui.contract.get", TRIAGE_FIX: "ui.run.latest", TRIAGE_SKIP: None}
+
+
+def case_action(case, last_run: dict | None) -> tuple[str, str]:
+    """判定用例本轮该做什么，以及原因。
+
+    规则：无脚本 → create；最近执行通过/执行中/无记录 → skip；最近执行失败 → fix。
+    """
+    has_script = bool(getattr(case, "script_rel_path", "")) and int(getattr(case, "script_version", 0) or 0) > 0
+    if case.status != CaseStatus.IMPLEMENTED or not has_script:
+        return TRIAGE_CREATE, "无可用脚本"
+    if last_run is None:
+        return TRIAGE_SKIP, "无执行记录，视为通过"
+    status = str(last_run.get("status") or "")
+    if status == "passed":
+        return TRIAGE_SKIP, "最近执行通过"
+    if status == "running":
+        return TRIAGE_SKIP, "执行中，勿重复触发"
+    error = str(last_run.get("error") or "").strip()
+    reason = f"最近执行失败（{error[:80]}）" if error else f"最近执行失败（{status or 'unknown'}）"
+    return TRIAGE_FIX, reason
+
+
+def triage_cases(db, cases) -> dict:
+    """批量分诊：返回逐用例 action 与汇总计数。只读，不写任何状态。"""
+    runs = db.latest_script_runs([int(c.id) for c in cases])
+    items: list[dict] = []
+    summary = {TRIAGE_CREATE: 0, TRIAGE_FIX: 0, TRIAGE_SKIP: 0}
+    for case in cases:
+        run = runs.get(int(case.id))
+        action, reason = case_action(case, run)
+        summary[action] += 1
+        last_run = None
+        if run is not None:
+            last_run = {
+                "run_id": run.get("id"),
+                "status": run.get("status"),
+                "finished_at": run.get("finished_at"),
+                "duration_ms": run.get("duration_ms"),
+                "error": str(run.get("error") or "")[:300],
+            }
+        items.append(
+            {
+                "case_id": int(case.id),
+                "title": case.title or "",
+                "site": case.site,
+                "status": case.status,
+                "case_rev": contract.case_rev(case),
+                "has_script": bool(getattr(case, "script_rel_path", "")),
+                "script_version": int(getattr(case, "script_version", 0) or 0),
+                "last_run": last_run,
+                "action": action,
+                "reason": reason,
+                "next_tool": _NEXT_TOOL_BY_ACTION[action],
+            }
+        )
+    return {"items": items, "summary": summary}
+
+
+def case_intent(db, case) -> str:
+    """contract.get 用：按当前状态决定返回新建还是修复流程（skip 仍给新建流程）。"""
+    run = db.latest_script_runs([int(case.id)]).get(int(case.id))
+    action, _ = case_action(case, run)
+    return "fix" if action == TRIAGE_FIX else "create"
+
+
 def _run_artifacts(run: dict, limit: int = 4000) -> tuple[str, list[str]]:
     """读执行产物目录：返回 (stdout.log 尾部, 截图文件名)；目录被清理时返回空。"""
     rel = run.get("artifacts_rel_path") or ""

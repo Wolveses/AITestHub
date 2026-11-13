@@ -128,6 +128,32 @@ WORKFLOW_CREATE = {
     "max_retry_same_error": 3,
 }
 
+# 修复流程：以现有脚本为基线的最小改动
+WORKFLOW_FIX = {
+    "id": "ui.fix@1",
+    "steps": [
+        {
+            "tool": "ui.run.latest",
+            "required": True,
+            "gives": ["failure_point", "log_tail", "screenshots"],
+            "on_fail": "无执行记录时按 ui.create@1 处理",
+        },
+        {
+            "tool": "ui.contract.get",
+            "required": True,
+            "gives": ["rules", "script.content", "script.version", "case.case_rev"],
+        },
+        {"tool": "ui.case.get", "required": True},
+        {"tool": "ui.example.get", "required": False, "when": "需要同类失败的历史解法"},
+        {"tool": "ui.script.validate", "required": True, "on_fail": "按 violations[].fix 修正后重试本步"},
+        {"tool": "ui.script.dry_run", "required": True, "on_fail": "按 log_tail 修正后回到 ui.script.validate"},
+        {"tool": "ui.script.submit", "required": True},
+    ],
+    "resume": {"on_stale": "ui.contract.get", "on_conflict": "ui.script.validate"},
+    "stop_on": sorted(FATAL_CODES),
+    "max_retry_same_error": 3,
+}
+
 _IMPORT_FROM_ASSET = re.compile(r"^(?:from\s+(pages|common)\.([A-Za-z0-9_]+)\s+import|import\s+(pages|common)\.([A-Za-z0-9_]+))", re.M)
 
 
@@ -505,8 +531,11 @@ def current_script_source(case) -> str:
         return ""
 
 
-def contract_payload(case, env) -> dict:
-    """单用例的完整契约快照（contract.get 的返回体）。"""
+def contract_payload(case, env, intent: str = "create") -> dict:
+    """单用例的完整契约快照（contract.get 的返回体）。
+
+    intent=fix 时返回以现有脚本为基线的修复流程，否则返回新建流程。
+    """
     project_id = int(case.project_id)
     script = {
         "path": getattr(case, "script_rel_path", "") or "",
@@ -533,7 +562,8 @@ def contract_payload(case, env) -> dict:
         "env": _env_summary(env, case) if env is not None else None,
         "assets": asset_catalog(project_id),
         "rules": contract_rules(),
-        "workflow": WORKFLOW_CREATE,
+        "intent": "fix" if intent == "fix" else "create",
+        "workflow": WORKFLOW_FIX if intent == "fix" else WORKFLOW_CREATE,
     }
     return payload
 

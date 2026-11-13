@@ -493,6 +493,22 @@ class UIAutomationDatabase:
             ).scalars()
             return [self._run_dict(r) for r in rows]
 
+    def latest_script_runs(self, case_ids: list[int]) -> dict[int, dict]:
+        """批量取每个用例最近一条脚本执行记录（按 case_id 索引），避免逐条查询。"""
+        if not case_ids:
+            return {}
+        with session_scope(self.db_path) as s:
+            rows = s.execute(
+                select(RunRecord)
+                .where(RunRecord.case_id.in_(case_ids), RunRecord.runner == "script")
+                .order_by(RunRecord.id.desc())
+            ).scalars()
+            out: dict[int, dict] = {}
+            for row in rows:
+                if int(row.case_id) not in out:
+                    out[int(row.case_id)] = self._run_dict(row)
+            return out
+
     def get_script_run(self, run_id: int) -> dict | None:
         with session_scope(self.db_path) as s:
             r = s.get(RunRecord, run_id)

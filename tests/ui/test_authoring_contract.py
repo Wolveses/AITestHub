@@ -413,6 +413,7 @@ EXPECTED_TOOLS = [
     "ui.contract.get",
     "ui.env.get",
     "ui.case.get",
+    "ui.case.triage",
     "ui.example.get",
     "ui.script.validate",
     "ui.script.dry_run",
@@ -464,10 +465,80 @@ def test_prompts_and_resources_registered():
 def test_contract_payload_carries_workflow(case):
     payload = contract.contract_payload(case, None)
     workflow = payload["workflow"]
+    assert payload["intent"] == "create"
     assert workflow["id"] == "ui.create@1"
     assert workflow["steps"][0]["tool"] == "ui.contract.get"
     assert workflow["max_retry_same_error"] == 3
     assert "flow" not in payload["rules"]
+
+
+def test_contract_payload_switches_to_fix_workflow(case):
+    payload = contract.contract_payload(case, None, intent="fix")
+    assert payload["intent"] == "fix"
+    assert payload["workflow"]["id"] == "ui.fix@1"
+    assert payload["workflow"]["steps"][0]["tool"] == "ui.run.latest"
+
+
+# ===== 统一入口分诊 =====
+
+
+class _FakeRunsDb:
+    def __init__(self, runs: dict[int, dict]):
+        self._runs = runs
+
+    def latest_script_runs(self, case_ids):
+        return {k: v for k, v in self._runs.items() if k in case_ids}
+
+
+def _implemented(case, version: int = 3):
+    case.status = CaseStatus.IMPLEMENTED
+    case.script_rel_path = f"scripts/{case.project_id}/case.py"
+    case.script_version = version
+    return case
+
+
+def test_triage_create_when_no_script(case):
+    action, reason = svc.case_action(case, None)
+    assert action == "create"
+    assert "无可用脚本" in reason
+
+
+def test_triage_skip_cases(case):
+    _implemented(case)
+    assert svc.case_action(case, None) == ("skip", "无执行记录，视为通过")
+    assert svc.case_action(case, {"status": "passed"}) == ("skip", "最近执行通过")
+    assert svc.case_action(case, {"status": "running"})[0] == "skip"
+
+
+def test_triage_fix_when_last_run_failed(case):
+    _implemented(case)
+    action, reason = svc.case_action(case, {"status": "failed", "error": "SELECTOR_NOT_FOUND: 登录按钮"})
+    assert action == "fix"
+    assert "SELECTOR_NOT_FOUND" in reason
+
+
+def test_triage_summary_counts(db, case):
+    passed_id = db.create_case(
+        project_id=1, kb_document_id=102, title="已通过", precondition="",
+        steps=["a"], expected="b", site="frontend",
+    )
+    failed_id = db.create_case(
+        project_id=1, kb_document_id=103, title="待修复", precondition="",
+        steps=["a"], expected="b", site="frontend",
+    )
+    passed_case = _implemented(db.get_case(passed_id))
+    failed_case = _implemented(db.get_case(failed_id))
+    case = db.get_case(case.id)  # 未实现 → create
+
+    runs = _FakeRunsDb({passed_id: {"status": "passed"}, failed_id: {"status": "failed", "error": "boom"}})
+    result = svc.triage_cases(runs, [case, passed_case, failed_case])
+    assert result["summary"] == {"create": 1, "fix": 1, "skip": 1}
+    by_id = {item["case_id"]: item for item in result["items"]}
+    assert by_id[int(case.id)]["action"] == "create"
+    assert by_id[passed_id]["action"] == "skip"
+    assert by_id[failed_id]["action"] == "fix"
+    assert by_id[failed_id]["next_tool"] == "ui.run.latest"
+    assert by_id[passed_id]["next_tool"] is None
 
 
 def test_fail_envelope_guides_next_tool():

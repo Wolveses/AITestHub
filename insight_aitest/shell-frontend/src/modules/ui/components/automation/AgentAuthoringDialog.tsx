@@ -125,13 +125,13 @@ export function AgentAuthoringDialog({
       open={open}
       onOpenChange={(v) => !v && onClose()}
       width="min(900px, 95vw)"
-      title={t('ui.auto.agentAuthoringTitle', '本地 Agent 编写脚本')}
+      title={t('ui.auto.agentAuthoringTitle', '交给本地 Agent')}
     >
       <div style={{ padding: '4px 20px 18px', maxHeight: '76vh', overflowY: 'auto' }}>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.7 }}>
           {t(
             'ui.auto.agentAuthoringDesc',
-            '把下面的文案粘贴到你的本地 Agent（Claude Code / Cursor / TRAE 等），它会通过平台 MCP 服务读取契约与环境、编写并校验脚本，最后直接入库。Token 只显示这一次。'
+            '把下面的文案粘贴到你的本地 Agent（Claude Code / Cursor / TRAE 等）。它会先调用 MCP 分诊，未实现的自动编写、最近执行失败的自动修复、已通过的跳过。Token 只显示这一次。'
           )}
         </div>
 
@@ -140,30 +140,53 @@ export function AgentAuthoringDialog({
 
         {prompt && (
           <>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>MCP: <code style={{ color: 'var(--accent)' }}>{prompt.mcp_url}</code></span>
-              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Token: <code>{prompt.token.slice(0, 18)}…</code></span>
-              <div style={{ flex: 1 }} />
-              <Btn size="sm" onClick={() => copy(prompt.token, ' Token')}>
-                <Copy size={12} /> Token
-              </Btn>
-              <Btn size="sm" variant="primary" onClick={() => copy(prompt.prompt, '文案')}>
-                <Copy size={12} /> {t('ui.auto.copyPrompt', '复制文案')}
-              </Btn>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 10, fontSize: 12 }}>
+              <span style={{ color: '#0ea5e9' }}>{t('ui.auto.triageCreate', '编写')} {prompt.summary.create}</span>
+              <span style={{ color: '#f97316' }}>{t('ui.auto.triageFix', '修复')} {prompt.summary.fix}</span>
+              <span style={{ color: 'var(--text-muted)' }}>{t('ui.auto.triageSkip', '跳过')} {prompt.summary.skip}</span>
             </div>
-            <textarea
-              readOnly
-              value={prompt.prompt}
-              style={{
-                ...inputStyle,
-                width: '100%',
-                height: 260,
-                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-                fontSize: 12,
-                lineHeight: 1.6,
-                resize: 'vertical',
-              }}
-            />
+
+            {prompt.prompt === null ? (
+              <div
+                style={{
+                  padding: '10px 12px',
+                  border: '1px solid var(--border)',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  color: 'var(--text-secondary)',
+                  background: 'var(--bg-base)',
+                }}
+              >
+                {t('ui.auto.nothingToDo', '选中用例均已通过或正在执行，无需交给本地 Agent 处理。')}
+              </div>
+            ) : (
+              <>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>MCP: <code style={{ color: 'var(--accent)' }}>{prompt.mcp_url}</code></span>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Token: <code>{(prompt.token || '').slice(0, 18)}…</code></span>
+                  <div style={{ flex: 1 }} />
+                  <Btn size="sm" onClick={() => copy(prompt.token || '', ' Token')}>
+                    <Copy size={12} /> Token
+                  </Btn>
+                  <Btn size="sm" variant="primary" onClick={() => copy(prompt.prompt || '', '文案')}>
+                    <Copy size={12} /> {t('ui.auto.copyPrompt', '复制文案')}
+                  </Btn>
+                </div>
+                <textarea
+                  readOnly
+                  value={prompt.prompt}
+                  style={{
+                    ...inputStyle,
+                    width: '100%',
+                    height: 260,
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                    fontSize: 12,
+                    lineHeight: 1.6,
+                    resize: 'vertical',
+                  }}
+                />
+              </>
+            )}
             {prompt.skipped_case_ids.length > 0 && (
               <div style={{ fontSize: 11, color: '#fbbf24', marginTop: 6 }}>
                 {t('ui.auto.skippedCases', '以下用例不属于当前项目，已跳过：{{ids}}', { ids: prompt.skipped_case_ids.join(', ') })}
@@ -189,6 +212,7 @@ export function AgentAuthoringDialog({
               const stage = item ? stageOf(item, submitted) : '';
               const meta = STAGE_META[stage] || STAGE_META[''];
               const last = item?.recent_events?.[item.recent_events.length - 1];
+              const action = prompt?.cases.find((c) => c.case_id === cid)?.action;
               return (
                 <div
                   key={cid}
@@ -210,7 +234,9 @@ export function AgentAuthoringDialog({
                   <span style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={last?.message || item?.last_error || ''}>
                     {last?.message || item?.last_error || ''}
                   </span>
-                  <span style={{ color: meta.color, fontWeight: 600, whiteSpace: 'nowrap' }}>{meta.label}</span>
+                  <span style={{ color: action === 'skip' ? 'var(--text-muted)' : meta.color, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                    {action === 'skip' ? t('ui.auto.triageSkip', '跳过') : meta.label}
+                  </span>
                 </div>
               );
             })}

@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Download, Globe, Play, RefreshCw, Search, Sparkles, Wrench, Eye, Square, Bot, Activity } from 'lucide-react';
 import { useProjectStore } from '../../../../shared/store/projectStore';
 import { useConfirmStore } from '../../../../shared/store/confirmStore';
 import { ModuleHelpButton } from '../../../../shared/components/ModuleHelpButton';
-import { useAutomationStore, type AutomationCase, fetchAuthoringActive } from '../../store/automationStore';
+import { useAutomationStore, type AutomationCase, fetchAuthoringActive, fetchAuthoringTriage, type AuthoringTriageSummary } from '../../store/automationStore';
 import { CategoryTree } from './CategoryTree';
 import { ImportCasesDialog } from './ImportCasesDialog';
 import { CaseDetailDrawer } from './CaseDetailDrawer';
@@ -50,9 +50,13 @@ export function AutomationPage() {
   const [agentOpen, setAgentOpen] = useState(false);
   const [progressOpen, setProgressOpen] = useState(false);
   const [activeCount, setActiveCount] = useState(0);
+  const [triageSummary, setTriageSummary] = useState<AuthoringTriageSummary | null>(null);
+  // 本地 Agent 处理进度快照：用例从进行中消失（已入库）或版本变化时刷新列表
+  const activeSnapshot = useRef<Map<number, string> | null>(null);
 
   const selectedIds = useMemo(() => Array.from(selected), [selected]);
   const allSelected = cases.length > 0 && cases.every((c) => selected.has(c.id));
+  const nothingToDo = !!triageSummary && triageSummary.create + triageSummary.fix === 0;
 
   const toggleSelect = (id: number) => {
     setSelected((prev) => {
@@ -106,15 +110,46 @@ export function AutomationPage() {
     return () => clearInterval(timer);
   }, [hasActive, loadCases]);
 
+  // 勾选后预判本轮动作（防抖；失败静默，不影响按钮可用）
+  useEffect(() => {
+    if (projectId === null || selectedIds.length === 0) {
+      setTriageSummary(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      fetchAuthoringTriage(projectId, selectedIds)
+        .then((r) => {
+          if (!cancelled) setTriageSummary(r.summary);
+        })
+        .catch(() => {
+          if (!cancelled) setTriageSummary(null);
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [projectId, selectedIds]);
+
   // 进行中的编写任务数量（弹窗打开时由弹窗自身轮询并回传，避免重复请求）
   useEffect(() => {
     if (projectId === null || progressOpen) return;
+    activeSnapshot.current = null;
     let stopped = false;
     const tick = async () => {
       if (document.hidden) return;
       try {
         const list = await fetchAuthoringActive(projectId);
-        if (!stopped) setActiveCount(list.length);
+        if (stopped) return;
+        setActiveCount(list.length);
+        const next = new Map(list.map((item) => [item.case_id, `${item.stage}|${item.script_version}`]));
+        const prev = activeSnapshot.current;
+        // 首次只建基线；之后有新增/消失/阶段或版本变化，说明脚本链路推进了，刷新列表状态
+        if (prev && (prev.size !== next.size || Array.from(prev).some(([id, key]) => next.get(id) !== key))) {
+          void loadCases();
+        }
+        activeSnapshot.current = next;
       } catch {
         /* 静默，等待下次 */
       }
@@ -243,14 +278,22 @@ export function AutomationPage() {
 
         <Btn
           onClick={() => setAgentOpen(true)}
-          disabled={projectId === null || selected.size === 0}
+          disabled={projectId === null || selected.size === 0 || nothingToDo}
           title={
             selected.size === 0
               ? t('ui.auto.selectCasesFirst', '请先勾选用例')
-              : t('ui.auto.agentAuthoringHint', '生成文案并粘贴到本地 Agent，由它通过 MCP 校验后直接入库')
+              : nothingToDo
+                ? t('ui.auto.nothingToDo', '选中用例均已通过或正在执行，无需处理')
+                : triageSummary
+                  ? t('ui.auto.triageHint', '编写 {{create}} · 修复 {{fix}} · 跳过 {{skip}}', {
+                      create: triageSummary.create,
+                      fix: triageSummary.fix,
+                      skip: triageSummary.skip,
+                    })
+                  : t('ui.auto.agentAuthoringHint', '生成文案并粘贴到本地 Agent，由它分诊后编写或修复')
           }
         >
-          <Bot size={14} /> {t('ui.auto.agentAuthoring', '本地 Agent 编写')}
+          <Bot size={14} /> {t('ui.auto.agentAuthoring', '本地 Agent 生成/修复')}
           {selected.size > 0 ? ` (${selected.size})` : ''}
         </Btn>
 
@@ -486,6 +529,7 @@ export function AutomationPage() {
         open={agentOpen}
         onClose={() => {
           setAgentOpen(false);
+          setTriageSummary(null);
           loadCases();
         }}
         projectId={projectId}
@@ -493,7 +537,10 @@ export function AutomationPage() {
       />
       <AuthoringProgressDialog
         open={progressOpen}
-        onClose={() => setProgressOpen(false)}
+        onClose={() => {
+          setProgressOpen(false);
+          loadCases();
+        }}
         projectId={projectId}
         onCount={setActiveCount}
       />

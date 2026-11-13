@@ -460,16 +460,46 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
 
 // ===== 本地 Agent 编写（MCP）=====
 
+export interface AuthoringTriageItem {
+  case_id: number;
+  title: string;
+  site: string;
+  status: string;
+  case_rev: string;
+  has_script: boolean;
+  script_version: number;
+  last_run: {
+    run_id: number;
+    status: string;
+    finished_at: string | null;
+    duration_ms: number | null;
+    error: string;
+  } | null;
+  action: 'create' | 'fix' | 'skip';
+  reason: string;
+  next_tool: string | null;
+}
+
+export interface AuthoringTriageSummary {
+  create: number;
+  fix: number;
+  skip: number;
+}
+
 export interface AuthoringPrompt {
   ok: boolean;
   project_id: number;
   project_name: string;
   case_ids: number[];
   skipped_case_ids: number[];
-  prompt: string;
-  token: string;
+  mode: 'auto' | 'create' | 'fix';
+  action_required: number;
+  summary: AuthoringTriageSummary;
+  cases: AuthoringTriageItem[];
+  prompt: string | null;
+  token: string | null;
   mcp_url: string;
-  token_id: number;
+  token_id: number | null;
   expires_at: string | null;
 }
 
@@ -528,11 +558,26 @@ export async function fetchAuthoringActive(projectId: number): Promise<Authoring
   return data.items || [];
 }
 
-export async function requestAuthoringPrompt(projectId: number, caseIds: number[]): Promise<AuthoringPrompt> {
+export async function fetchAuthoringTriage(
+  projectId: number,
+  caseIds: number[]
+): Promise<{ summary: AuthoringTriageSummary; items: AuthoringTriageItem[] }> {
+  if (caseIds.length === 0) return { summary: { create: 0, fix: 0, skip: 0 }, items: [] };
+  const r = await fetch(`${BASE}/authoring/triage?project_id=${projectId}&case_ids=${caseIds.join(',')}`);
+  if (!r.ok) throw new Error(await parseError(r));
+  const data = await r.json();
+  return { summary: data.summary || { create: 0, fix: 0, skip: 0 }, items: data.items || [] };
+}
+
+export async function requestAuthoringPrompt(
+  projectId: number,
+  caseIds: number[],
+  mode: 'auto' | 'create' | 'fix' = 'auto'
+): Promise<AuthoringPrompt> {
   const r = await fetch(`${BASE}/authoring/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project_id: projectId, case_ids: caseIds }),
+    body: JSON.stringify({ project_id: projectId, case_ids: caseIds, mode }),
   });
   if (!r.ok) throw new Error(await parseError(r));
   return await r.json();

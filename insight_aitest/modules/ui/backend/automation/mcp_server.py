@@ -3,7 +3,8 @@
 
 挂载点：``/mcp``（Bearer Token 鉴权，Token 由平台前端生成文案时创建）。
 工具清单：
-- ``ui.contract.get`` / ``ui.env.get`` / ``ui.case.get`` / ``ui.example.get`` / ``ui.run.latest``
+- ``ui.contract.get`` / ``ui.env.get`` / ``ui.case.get`` / ``ui.case.triage`` / ``ui.example.get``
+  / ``ui.run.latest``
 - ``ui.script.validate`` / ``ui.script.dry_run`` / ``ui.script.submit``
 附：prompts ``ui.create`` / ``ui.fix``，resources ``insight://rules`` / ``insight://template``。
 """
@@ -74,7 +75,13 @@ class ContractPayload(ToolPayload):
     env: dict | None = None
     assets: list = Field(default_factory=list)
     rules: dict = Field(default_factory=dict)
+    intent: str = "create"
     workflow: dict = Field(default_factory=dict)
+
+
+class TriagePayload(ToolPayload):
+    summary: dict = Field(default_factory=dict)
+    items: list = Field(default_factory=list)
 
 
 class EnvPayload(ToolPayload):
@@ -149,7 +156,8 @@ SourceHash = Annotated[str, Field(description="ui.script.validate 返回的 sour
 
 INSTRUCTIONS = """Insight-AITest：UI 自动化脚本「本地编写 + 平台校验入库」服务。
 - 认证：请求头 Authorization: Bearer <token>，Token 绑定项目；不要写入脚本、不要提交仓库。
-- 流程：不预设固定顺序，只以 ui.contract.get 返回的 workflow 为准。
+- 流程：不预设固定顺序，只以 ui.contract.get 返回的 workflow 为准；返回体的 intent 表示新建还是修复。
+- 批量处理：先调用 ui.case.triage 判定每个用例该 create / fix / skip，skip 的用例不要改动。
 - 规则优先级：本次 ui.contract.get 的 rules > ui.example.get 的 lessons/known_traps > 通用经验；与实测页面冲突时以实测为准。
 - 失败处理：isError=true 时读 code/fix/required_next 再决定是否重试；同一错误码连续 3 次不推进就停止并说明原因。
 - 终止条件：PERMISSION_DENIED / CASE_NOT_FOUND / ENV_NOT_CONFIGURED / ENV_NOT_ALLOWED 立即停止。
@@ -244,7 +252,7 @@ def _build_server() -> MCPServer:
             return _error(err)
         svc.mark_generating(db, case)
         env = resolve_current_env(db, int(case.project_id))
-        payload = contract.contract_payload(case, env)
+        payload = contract.contract_payload(case, env, intent=svc.case_intent(db, case))
         payload["ok"] = True
         return payload
 
@@ -275,8 +283,9 @@ def _build_server() -> MCPServer:
         name="ui.case.get",
         title="读取用例详情",
         description=(
-            "读取用例详情：标题、前置、步骤、预期、端、参数定义，以及 case_rev 与 script.version。"
-            "后两者在入库时作为 expect_case_rev / expect_script_version 原样回传。"
+            "读取用例详情：标题、前置、步骤、预期、端、参数定义，以及 case_rev、script.version "
+            "与 script.content（当前脚本全文，修复时作为基线）。"
+            "case_rev 与 script.version 在入库时作为 expect_case_rev / expect_script_version 原样回传。"
         ),
         annotations=_READ,
     )
@@ -287,6 +296,32 @@ def _build_server() -> MCPServer:
         payload = svc.case_payload(case)
         payload["ok"] = True
         return payload
+
+    @server.tool(
+        name="ui.case.triage",
+        title="用例分诊",
+        description=(
+            "批量判定每个用例本轮该做什么：create（无脚本）、fix（最近执行失败）、"
+            "skip（最近执行通过、执行中或无执行记录）。"
+            "返回每个用例的状态、case_rev、脚本版本、最近一次执行摘要，以及 action 与 next_tool。"
+            "只读，不写任何状态；skip 的用例不要调用其他工具或改动脚本。"
+        ),
+        annotations=_READ,
+    )
+    def case_triage(
+        case_ids: Annotated[
+            list[int],
+            Field(description="要判定的用例 ID 列表；单次最多 50 个，且必须属于当前 Token 的项目", min_length=1, max_length=50),
+        ],
+    ) -> TriagePayload:
+        project_id = _project_id()
+        db = _db()
+        cases = [c for c in (svc.resolve_case(db, cid, project_id) for cid in case_ids) if c is not None]
+        if not cases:
+            return _error(svc.fail("CASE_NOT_FOUND", "用例均不存在或不属于当前 Token 的项目"))
+        result = svc.triage_cases(db, cases)
+        result["ok"] = True
+        return result
 
     @server.tool(
         name="ui.example.get",

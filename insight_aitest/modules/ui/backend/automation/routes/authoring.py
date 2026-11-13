@@ -76,11 +76,46 @@ def build_prompt(case_ids: list[int], token: str, mcp_url: str) -> str:
 """
 
 
+def build_auto_prompt(cases: list, token: str, mcp_url: str) -> str:
+    """统一入口文案：不写死动作，交由 Agent 调 ui.case.triage 判定 create / fix / skip。"""
+    ids = [int(c.id) for c in cases]
+    listing = "\n".join(f"{int(c.id)} {c.title or ''}".rstrip() for c in cases)
+    return f"""你是资深 Playwright UI 自动化测试工程师。请通过 Insight-AITest 平台 MCP 服务处理下列用例。
+
+【MCP 接入】
+- 服务地址：{mcp_url}（Streamable HTTP）
+- 请求头：Authorization: Bearer {token}
+- Token 30 天内有效，只在本会话使用；不要写入脚本、不要提交到仓库。
+- 本机需已启用 Playwright MCP 与 Chromium，用于页面探索。
+
+【本轮用例（{len(ids)} 个）】
+{listing}
+
+【要求】
+1. 先调用 ui.case.triage(case_ids=[{",".join(str(i) for i in ids)}])，未拿到结果前不要开始处理任何用例。
+2. 逐例串行处理：上一个用例 ui.script.submit 完成后，再开始下一个；不要并行调用工具。
+3. 按 triage 返回的 action 进入对应流程：
+   - create：调用 ui.contract.get 获得 ui.create@1 流程，按其 steps 执行；
+   - fix：先调用 ui.run.latest 复核失败，再调用 ui.contract.get 获得 ui.fix@1 流程，以现有脚本为基线最小修改；
+   - skip：不要调用其他工具、不要改动脚本。
+   若 contract.get 返回的 intent 与 triage 不一致（例如执行状态已变化），以 contract.get 为准。
+4. 单用例失败不阻塞其他用例；同一错误码连续 3 次无进展就放弃该用例并继续下一个。
+5. 不要改动与失败无关的步骤；不要为了通过而删除或放宽断言。
+
+【最终回报】
+1. 处理总览（create / fix / skip 各几个）
+2. 每个已处理用例：根因、改动点（文件+行为）、validate / dry_run 结果、入库后的脚本版本
+3. 跳过的用例与原因
+4. 未解决项与建议
+"""
+
+
 @router.post("/prompt")
 async def create_prompt(request: Request, body: dict):
-    """生成可直接粘贴给本地 Agent 的文案（同时创建一次性可见的 Bearer Token）。"""
+    """生成可粘贴给本地 Agent 的文案（mode=auto 时先分诊，全部无需处理则不建 Token）。"""
     project_id = int(body.get("project_id") or 0)
     case_ids = [int(x) for x in (body.get("case_ids") or []) if str(x).isdigit()]
+    mode = str(body.get("mode") or "auto").strip().lower()
     if not project_id:
         raise HTTPException(400, "缺少 project_id")
     if not case_ids:
@@ -88,32 +123,62 @@ async def create_prompt(request: Request, body: dict):
 
     db = get_automation_db()
     valid_ids: list[int] = []
+    cases: list = []
     for cid in case_ids:
         case = svc.resolve_case(db, cid, project_id)
         if case is not None:
             valid_ids.append(cid)
+            cases.append(case)
     if not valid_ids:
         raise HTTPException(404, "勾选的用例均不属于当前项目")
 
-    token, row = mcp_tokens.create_token(project_id, name=f"本地 Agent {datetime.now():%m-%d %H:%M}")
     base = str(request.base_url).rstrip("/")
-    prompt = build_prompt(valid_ids, token, f"{base}/mcp")
-    for cid in valid_ids:
-        case = db.get_case(cid)
-        if case is not None:
-            svc.record_event(db, case, "prompt_ready", "已生成本地编写文案", {"token_id": row.id})
-    return {
+    mcp_url = f"{base}/mcp"
+    triage = svc.triage_cases(db, cases)
+    action_required = triage["summary"]["create"] + triage["summary"]["fix"]
+
+    result = {
         "ok": True,
         "project_id": project_id,
         "project_name": project_name(project_id),
         "case_ids": valid_ids,
         "skipped_case_ids": [c for c in case_ids if c not in valid_ids],
-        "prompt": prompt,
-        "token": token,
-        "mcp_url": f"{base}/mcp",
-        "token_id": row.id,
-        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        "mode": mode,
+        "action_required": action_required,
+        "summary": triage["summary"],
+        "cases": triage["items"],
+        "prompt": None,
+        "token": None,
+        "mcp_url": mcp_url,
+        "token_id": None,
+        "expires_at": None,
     }
+    if mode == "auto" and action_required == 0:
+        return result
+
+    token, row = mcp_tokens.create_token(project_id, name=f"本地 Agent {datetime.now():%m-%d %H:%M}")
+    prompt = build_auto_prompt(cases, token, mcp_url) if mode == "auto" else build_prompt(valid_ids, token, mcp_url)
+    for case in cases:
+        svc.record_event(db, case, "prompt_ready", "已生成本地编写文案", {"token_id": row.id, "mode": mode})
+    result.update(
+        {
+            "prompt": prompt,
+            "token": token,
+            "token_id": row.id,
+            "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        }
+    )
+    return result
+
+
+@router.get("/triage")
+def triage(project_id: int = Query(...), case_ids: str = Query("")):
+    """只读预检：勾选用例本轮分别该 create / fix / skip。"""
+    ids = [int(x) for x in case_ids.split(",") if x.strip().isdigit()]
+    db = get_automation_db()
+    cases = [c for c in (svc.resolve_case(db, cid, project_id) for cid in ids) if c is not None]
+    result = svc.triage_cases(db, cases)
+    return {"ok": True, **result}
 
 
 @router.get("/tokens")
