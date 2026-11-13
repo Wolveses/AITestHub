@@ -10,6 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from insight_aitest.modules.ui.backend.automation.database import UIAutomationDatabase
+from insight_aitest.modules.ui.backend.automation.current_env import (
+    current_env_id,
+    set_current_env,
+)
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 from insight_aitest.modules.ui.backend.automation.env_service import (
     AUTH_SCRIPT_TEMPLATES,
@@ -36,6 +40,7 @@ class EnvIn(BaseModel):
     token_name: str = "token"
     token_prefix: str = ""
     is_default: bool = False
+    allow_local_agent: bool = True
 
 
 class EnvPatch(BaseModel):
@@ -49,6 +54,7 @@ class EnvPatch(BaseModel):
     token_prefix: str | None = None
     clear_password: bool = False
     is_default: bool | None = None
+    allow_local_agent: bool | None = None
 
 
 class EnvCloneIn(BaseModel):
@@ -110,7 +116,10 @@ def create_env(body: EnvIn, db: UIAutomationDatabase = Depends(get_automation_db
         token_name=body.token_name or "token",
         token_prefix=body.token_prefix or "",
         is_default=1 if body.is_default else 0,
+        allow_local_agent=1 if body.allow_local_agent else 0,
     )
+    if body.is_default:
+        set_current_env(body.project_id, env_id)
     return env_public(db.get_env(env_id))
 
 
@@ -132,7 +141,11 @@ def update_env(
     fields.pop("password", None)
     if "is_default" in fields:
         fields["is_default"] = 1 if fields["is_default"] else 0
+    if "allow_local_agent" in fields:
+        fields["allow_local_agent"] = 1 if fields["allow_local_agent"] else 0
     db.update_env(env_id, **fields)
+    if fields.get("is_default") == 1:
+        set_current_env(env.project_id, env_id)
     return env_public(db.get_env(env_id))
 
 
@@ -143,6 +156,8 @@ def delete_env(env_id: int, db: UIAutomationDatabase = Depends(get_automation_db
         raise HTTPException(404, "环境不存在")
     if env.password_ref:
         delete_password(env.password_ref)
+    if current_env_id(env.project_id) == env_id:
+        set_current_env(env.project_id, None)
     db.delete_env(env_id)
     return {"deleted": env_id}
 

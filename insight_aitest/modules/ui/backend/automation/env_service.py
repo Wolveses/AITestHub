@@ -111,6 +111,7 @@ def env_public(env) -> dict:
         "token_prefix": getattr(env, "token_prefix", "") or "",
         "is_default": bool(env.is_default),
         "has_storage_state": bool(env.storage_state_rel),
+        "allow_local_agent": bool(getattr(env, "allow_local_agent", 1)),
     }
 
 

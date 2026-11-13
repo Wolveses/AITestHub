@@ -14,8 +14,24 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 
-from insight_aitest.platform.persistence import Base, get_engine, session_scope
+from insight_aitest.platform.persistence import (
+    Base,
+    ensure_schema,
+    get_engine,
+    session_scope,
+)
 from insight_aitest.platform.persistence.project_models import Project, ProjectVersion
+
+
+def _ensure_project_current_env(db_path: str) -> None:
+    """给旧 projects 表补 current_env_id 列（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+        if cols and "current_env_id" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN current_env_id INTEGER")
+            conn.commit()
 
 
 class ProjectDatabase:
@@ -25,6 +41,7 @@ class ProjectDatabase:
             get_engine(db_path),
             tables=[Project.__table__, ProjectVersion.__table__],
         )
+        ensure_schema(db_path, [_ensure_project_current_env])
 
     # ===== Project =====
 
@@ -70,6 +87,16 @@ class ProjectDatabase:
             if p is None:
                 return False
             s.delete(p)  # CASCADE 删除关联 versions
+            return True
+
+    def set_current_env(self, project_id: int, env_id: int | None) -> bool:
+        """记录项目当前选中的环境（UI 自动化本地 Agent 读取认证信息时使用）。"""
+        with session_scope(self.db_path) as s:
+            p = s.get(Project, project_id)
+            if p is None:
+                return False
+            p.current_env_id = env_id
+            p.updated_at = datetime.now()
             return True
 
     def count_versions(self, project_id: int) -> int:

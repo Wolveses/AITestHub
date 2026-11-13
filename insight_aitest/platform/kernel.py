@@ -110,7 +110,12 @@ def build_app() -> FastAPI:
             ).start()
         except Exception as e:
             logger.warning(f"UI 工作区维护提示: {e}")
-        yield
+        # 本地 Agent MCP 服务（Bearer Token 鉴权）；不可用则启动失败，不提供降级路径
+        from insight_aitest.modules.ui.backend.automation.mcp_server import get_mcp_server
+
+        async with get_mcp_server().session_manager.run():
+            logger.info("MCP 服务已启动: /mcp")
+            yield
         logger.info("Insight-AITest 平台关闭")
 
     app = FastAPI(
@@ -154,6 +159,12 @@ def build_app() -> FastAPI:
             ws_path = f"/api/modules/{lm.manifest.id}/ws/monitoring/{{session_id}}"
             app.websocket(ws_path)(lm.websocket)
             logger.info(f"已注册模块 WebSocket: {ws_path}")
+
+    # 5.1 本地 Agent MCP 服务（供个人 Agent 读取契约/环境并提交脚本）
+    from insight_aitest.modules.ui.backend.automation.mcp_server import mount_mcp
+
+    mount_mcp(app)
+    logger.info("已挂载 MCP 服务: /mcp")
 
     @app.get("/")
     async def root():

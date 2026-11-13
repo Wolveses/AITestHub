@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Download, Globe, Play, RefreshCw, Search, Sparkles, Wrench, Eye, Square } from 'lucide-react';
+import { Download, Globe, Play, RefreshCw, Search, Sparkles, Wrench, Eye, Square, Bot } from 'lucide-react';
 import { useProjectStore } from '../../../../shared/store/projectStore';
 import { useConfirmStore } from '../../../../shared/store/confirmStore';
 import { ModuleHelpButton } from '../../../../shared/components/ModuleHelpButton';
@@ -9,6 +9,7 @@ import { useAutomationStore, type AutomationCase } from '../../store/automationS
 import { CategoryTree } from './CategoryTree';
 import { ImportCasesDialog } from './ImportCasesDialog';
 import { CaseDetailDrawer } from './CaseDetailDrawer';
+import { AgentAuthoringDialog } from './AgentAuthoringDialog';
 import { Btn, ErrorCategoryTag, StatusBadge, inputStyle } from './common';
 
 const ACTIVE_STATUSES = new Set(['generating', 'fixing', 'running']);
@@ -44,6 +45,27 @@ export function AutomationPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [agentOpen, setAgentOpen] = useState(false);
+
+  const selectedIds = useMemo(() => Array.from(selected), [selected]);
+  const allSelected = cases.length > 0 && cases.every((c) => selected.has(c.id));
+
+  const toggleSelect = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelected((prev) => {
+      if (cases.every((c) => prev.has(c.id))) return new Set();
+      return new Set(cases.map((c) => c.id));
+    });
+  };
 
   useEffect(() => {
     loadProjects();
@@ -115,6 +137,12 @@ export function AutomationPage() {
       onConfirm: async () => {
         try {
           await deleteCase(c.id);
+          setSelected((prev) => {
+            if (!prev.has(c.id)) return prev;
+            const next = new Set(prev);
+            next.delete(c.id);
+            return next;
+          });
           toast.success(t('ui.auto.deleted', '已删除'));
         } catch (e) {
           toast.error((e as Error).message);
@@ -182,6 +210,19 @@ export function AutomationPage() {
       >
         <Btn variant="primary" onClick={() => setImportOpen(true)} disabled={projectId === null}>
           <Download size={14} /> {t('ui.auto.importCases', '导入用例')}
+        </Btn>
+
+        <Btn
+          onClick={() => setAgentOpen(true)}
+          disabled={projectId === null || selected.size === 0}
+          title={
+            selected.size === 0
+              ? t('ui.auto.selectCasesFirst', '请先勾选用例')
+              : t('ui.auto.agentAuthoringHint', '生成文案并粘贴到本地 Agent，由它通过 MCP 校验后直接入库')
+          }
+        >
+          <Bot size={14} /> {t('ui.auto.agentAuthoring', '本地 Agent 编写')}
+          {selected.size > 0 ? ` (${selected.size})` : ''}
         </Btn>
 
         {/* 环境快速切换下拉 */}
@@ -256,7 +297,7 @@ export function AutomationPage() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 60px 110px 120px',
+              gridTemplateColumns: '28px 1fr 60px 110px 120px',
               gap: 8,
               padding: '8px 16px',
               fontSize: 11,
@@ -266,6 +307,15 @@ export function AutomationPage() {
               flexShrink: 0,
             }}
           >
+            <span style={{ display: 'flex', alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleSelectAll}
+                title={t('ui.auto.selectAll', '全选当前列表')}
+                style={{ accentColor: 'var(--accent)', cursor: 'pointer' }}
+              />
+            </span>
             <span>{t('ui.auto.caseTitle', '用例标题')}</span>
             <span>{t('ui.auto.site', '端')}</span>
             <span>{t('ui.auto.status', '状态')}</span>
@@ -287,7 +337,7 @@ export function AutomationPage() {
                     onClick={() => setDetailId(c.id)}
                     style={{
                       display: 'grid',
-                      gridTemplateColumns: '1fr 60px 110px 120px',
+                      gridTemplateColumns: '28px 1fr 60px 110px 120px',
                       gap: 8,
                       alignItems: 'center',
                       padding: '9px 16px',
@@ -298,6 +348,14 @@ export function AutomationPage() {
                     onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-hover)')}
                     onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
                   >
+                    <span style={{ display: 'flex', alignItems: 'center' }} onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(c.id)}
+                        onChange={() => toggleSelect(c.id)}
+                        style={{ accentColor: 'var(--accent)', cursor: 'pointer' }}
+                      />
+                    </span>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.title}>
                         {c.title}
@@ -386,6 +444,15 @@ export function AutomationPage() {
 
       <ImportCasesDialog open={importOpen} onClose={() => setImportOpen(false)} />
       <CaseDetailDrawer caseId={detailId} onClose={() => setDetailId(null)} />
+      <AgentAuthoringDialog
+        open={agentOpen}
+        onClose={() => {
+          setAgentOpen(false);
+          loadCases();
+        }}
+        projectId={projectId}
+        caseIds={selectedIds}
+      />
     </div>
   );
 }

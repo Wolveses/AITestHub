@@ -8,8 +8,11 @@ from datetime import datetime
 from sqlalchemy import func, select
 
 from insight_aitest.modules.ui.backend.automation.models import (
+    AuthoringEvent,
+    AuthoringState,
     CaseStatus,
     GenerationStatus,
+    McpToken,
     UiCase,
     UiEnv,
     UiGeneration,
@@ -124,6 +127,37 @@ def _ensure_ui_envs_auth_script(db_path: str) -> None:
         conn.commit()
 
 
+def _ensure_ui_envs_local_agent(db_path: str) -> None:
+    """给旧 ui_envs 表补 allow_local_agent 列（幂等，默认允许本地 Agent 读取认证信息）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ui_envs)")}
+        if cols and "allow_local_agent" not in cols:
+            conn.execute(
+                "ALTER TABLE ui_envs ADD COLUMN allow_local_agent INTEGER NOT NULL DEFAULT 1"
+            )
+            conn.commit()
+
+
+def _ensure_ui_cases_authoring(db_path: str) -> None:
+    """给旧 ui_cases 表补本地 Agent 编写来源列（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ui_cases)")}
+        if not cols:
+            return
+        for name, ddl in (
+            ("source", "TEXT NOT NULL DEFAULT 'ai'"),
+            ("authoring_by", "TEXT NOT NULL DEFAULT ''"),
+            ("authoring_at", "DATETIME"),
+        ):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE ui_cases ADD COLUMN {name} {ddl}")
+        conn.commit()
+
+
 class UIAutomationDatabase:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -134,6 +168,9 @@ class UIAutomationDatabase:
                 UiEnv.__table__,
                 UiGeneration.__table__,
                 UiLesson.__table__,
+                McpToken.__table__,
+                AuthoringState.__table__,
+                AuthoringEvent.__table__,
                 RunRecord.__table__,
                 UiTask.__table__,
                 UiTaskCase.__table__,
@@ -149,6 +186,8 @@ class UIAutomationDatabase:
                 _ensure_generation_metrics,
                 _drop_flow_assets,
                 _ensure_ui_envs_auth_script,
+                _ensure_ui_envs_local_agent,
+                _ensure_ui_cases_authoring,
             ],
         )
 
@@ -727,3 +766,140 @@ class UIAutomationDatabase:
             s.flush()
             s.expunge(r)
             return r
+
+    # ===== 本地 Agent：MCP Token =====
+
+    def create_mcp_token(
+        self,
+        project_id: int,
+        name: str,
+        token_hash: str,
+        token_prefix: str,
+        expires_at: datetime | None = None,
+    ) -> McpToken:
+        token = McpToken(
+            project_id=project_id,
+            name=name,
+            token_hash=token_hash,
+            token_prefix=token_prefix,
+            expires_at=expires_at,
+        )
+        with session_scope(self.db_path) as s:
+            s.add(token)
+            s.flush()
+            s.expunge(token)
+            return token
+
+    def get_mcp_token(self, token_id: int) -> McpToken | None:
+        with session_scope(self.db_path) as s:
+            row = s.get(McpToken, token_id)
+            if row is not None:
+                s.expunge(row)
+            return row
+
+    def get_mcp_token_by_hash(self, token_hash: str) -> McpToken | None:
+        with session_scope(self.db_path) as s:
+            row = s.scalar(select(McpToken).where(McpToken.token_hash == token_hash))
+            if row is not None:
+                s.expunge(row)
+            return row
+
+    def list_mcp_tokens(self, project_id: int) -> list[McpToken]:
+        with session_scope(self.db_path) as s:
+            rows = list(
+                s.scalars(
+                    select(McpToken)
+                    .where(McpToken.project_id == project_id)
+                    .order_by(McpToken.id.desc())
+                )
+            )
+            for row in rows:
+                s.expunge(row)
+            return rows
+
+    def revoke_mcp_token(self, token_id: int, project_id: int) -> bool:
+        with session_scope(self.db_path) as s:
+            row = s.get(McpToken, token_id)
+            if row is None or int(row.project_id) != int(project_id):
+                return False
+            if row.revoked_at is None:
+                row.revoked_at = datetime.now()
+            return True
+
+    def touch_mcp_token(self, token_id: int) -> None:
+        with session_scope(self.db_path) as s:
+            row = s.get(McpToken, token_id)
+            if row is not None:
+                row.last_used_at = datetime.now()
+
+    # ===== 本地 Agent：校验状态 =====
+
+    def get_authoring_state(self, case_id: int) -> AuthoringState | None:
+        with session_scope(self.db_path) as s:
+            row = s.get(AuthoringState, case_id)
+            if row is not None:
+                s.expunge(row)
+            return row
+
+    def upsert_authoring_state(self, case_id: int, **fields) -> AuthoringState:
+        with session_scope(self.db_path) as s:
+            row = s.get(AuthoringState, case_id)
+            if row is None:
+                row = AuthoringState(case_id=case_id)
+                s.add(row)
+            for k, v in fields.items():
+                if hasattr(row, k):
+                    setattr(row, k, v)
+            row.updated_at = datetime.now()
+            s.flush()
+            s.expunge(row)
+            return row
+
+    # ===== 本地 Agent：进度事件 =====
+
+    def add_authoring_event(
+        self,
+        case_id: int,
+        project_id: int,
+        kind: str,
+        message: str = "",
+        payload: dict | None = None,
+    ) -> int:
+        event = AuthoringEvent(
+            case_id=case_id,
+            project_id=project_id,
+            kind=kind,
+            message=message[:2000],
+            payload=payload or {},
+        )
+        with session_scope(self.db_path) as s:
+            s.add(event)
+            s.flush()
+            return int(event.id)
+
+    def list_authoring_events(
+        self, case_id: int, after_id: int = 0, limit: int = 200
+    ) -> list[AuthoringEvent]:
+        with session_scope(self.db_path) as s:
+            rows = list(
+                s.scalars(
+                    select(AuthoringEvent)
+                    .where(AuthoringEvent.case_id == case_id, AuthoringEvent.id > after_id)
+                    .order_by(AuthoringEvent.id.asc())
+                    .limit(limit)
+                )
+            )
+            for row in rows:
+                s.expunge(row)
+            return rows
+
+    def latest_authoring_event_id(self, case_id: int) -> int:
+        with session_scope(self.db_path) as s:
+            return (
+                s.scalar(
+                    select(func.max(AuthoringEvent.id)).where(
+                        AuthoringEvent.case_id == case_id
+                    )
+                )
+                or 0
+            )

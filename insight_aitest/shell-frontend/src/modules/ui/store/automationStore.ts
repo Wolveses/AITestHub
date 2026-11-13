@@ -85,6 +85,8 @@ export interface UIEnv {
   token_prefix?: string;
   is_default: boolean;
   has_storage_state: boolean;
+  /** 是否允许本地 Agent 通过 MCP 获取该环境的认证信息 */
+  allow_local_agent?: boolean;
 }
 
 export interface ScriptTemplate {
@@ -455,3 +457,83 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
     return await r.json();
   },
 }));
+
+// ===== 本地 Agent 编写（MCP）=====
+
+export interface AuthoringPrompt {
+  ok: boolean;
+  project_id: number;
+  project_name: string;
+  case_ids: number[];
+  skipped_case_ids: number[];
+  prompt: string;
+  token: string;
+  mcp_url: string;
+  token_id: number;
+  expires_at: string | null;
+}
+
+export interface AuthoringToken {
+  id: number;
+  name: string;
+  prefix: string;
+  created_at: string | null;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked: boolean;
+  expired: boolean;
+  active: boolean;
+}
+
+export interface AuthoringEvent {
+  id: number;
+  case_id: number;
+  kind: string;
+  message: string;
+  payload: Record<string, unknown>;
+  created_at: string | null;
+}
+
+export interface AuthoringStatusItem {
+  case_id: number;
+  exists: boolean;
+  title?: string;
+  status?: string;
+  script_version?: number;
+  source?: string;
+  authoring_at?: string | null;
+  stage?: string;
+  last_error?: string;
+  latest_event_id?: number;
+  recent_events?: AuthoringEvent[];
+}
+
+export async function requestAuthoringPrompt(projectId: number, caseIds: number[]): Promise<AuthoringPrompt> {
+  const r = await fetch(`${BASE}/authoring/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: projectId, case_ids: caseIds }),
+  });
+  if (!r.ok) throw new Error(await parseError(r));
+  return await r.json();
+}
+
+export async function fetchAuthoringTokens(projectId: number): Promise<AuthoringToken[]> {
+  const r = await fetch(`${BASE}/authoring/tokens?project_id=${projectId}`);
+  if (!r.ok) throw new Error(await parseError(r));
+  const data = await r.json();
+  return data.items || [];
+}
+
+export async function revokeAuthoringToken(projectId: number, tokenId: number): Promise<void> {
+  const r = await fetch(`${BASE}/authoring/tokens/${tokenId}?project_id=${projectId}`, { method: 'DELETE' });
+  if (!r.ok) throw new Error(await parseError(r));
+}
+
+export async function fetchAuthoringStatus(caseIds: number[]): Promise<AuthoringStatusItem[]> {
+  if (caseIds.length === 0) return [];
+  const r = await fetch(`${BASE}/authoring/status?case_ids=${caseIds.join(',')}`);
+  if (!r.ok) throw new Error(await parseError(r));
+  const data = await r.json();
+  return data.items || [];
+}

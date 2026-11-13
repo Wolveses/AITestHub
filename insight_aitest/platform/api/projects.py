@@ -71,6 +71,7 @@ def _project_to_dict(p, version_count: int = 0) -> dict[str, Any]:
         "color": p.color,
         "version_count": version_count,
         "env_count": _count_project_envs(p.id),
+        "current_env_id": getattr(p, "current_env_id", None),
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
     }

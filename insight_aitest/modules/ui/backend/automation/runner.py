@@ -178,8 +178,8 @@ def run_script(
     """执行一个固化脚本，返回结果摘要（不写 ui_runs，由调用方决定是否落库）。
 
     retries: 失败后额外重试次数（仅用于吸收 UI 抖动，默认 0）。
-    pages_root: 覆盖项目资产根目录（含 common/ 与 pages/ 包）。生成期首跑传暂存目录，
-        避免未验证的资产污染正式目录；不传时默认 ``scripts/<project_id>``。
+    pages_root: 资产根目录（含 common/ 与 pages/ 包）的**优先**覆盖。生成期首跑传暂存目录，
+        暂存目录内的同名资产优先；未提交的存量资产仍从 ``scripts/<project_id>`` 解析。
     cancel_check: 生成期首跑传入终止检查，返回 True 时立即杀掉 pytest 子进程。
     capture_network: 仅生成期首跑开启，脚手架据此采集网络请求（默认关闭）。
     """
@@ -244,17 +244,16 @@ def run_script(
             "PYTHONUTF8": "1",
         }
     )
-    # 子进程 cwd 在用例目录，需显式补仓库根目录（import 脚手架插件）与资产根目录（import common/pages）
+    # 子进程 cwd 在用例目录，需显式补仓库根目录（import 脚手架插件）与资产根目录（import common/pages）。
+    # 暂存目录必须排在项目资产目录之前：同名资产以本次提交为准，未提交的存量资产仍可复用。
     existing = child_env.get("PYTHONPATH") or ""
-    child_env["PYTHONPATH"] = os.pathsep.join(
-        p
-        for p in (
-            str(REPO_ROOT),
-            str(pages_root or paths.project_scripts_dir(project_id)),
-            existing,
-        )
-        if p
-    )
+    roots = [str(REPO_ROOT)]
+    if pages_root:
+        roots.append(str(pages_root))
+    roots.append(str(paths.project_scripts_dir(project_id)))
+    if existing:
+        roots.append(existing)
+    child_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(p for p in roots if p))
 
     started = time.time()
     status = RunStatus.ERROR

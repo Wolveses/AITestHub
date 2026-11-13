@@ -13,6 +13,7 @@ interface EnvForm {
   username: string;
   password: string;
   is_default: boolean;
+  allow_local_agent: boolean;
 }
 
 const EMPTY_ENV: EnvForm = {
@@ -21,6 +22,7 @@ const EMPTY_ENV: EnvForm = {
   username: '',
   password: '',
   is_default: true,
+  allow_local_agent: true,
 };
 
 export interface EnvManagerDialogProps {
@@ -101,6 +103,7 @@ export function EnvManagerDialog({
           username: initialEditEnv.username,
           password: '',
           is_default: initialEditEnv.is_default,
+          allow_local_agent: initialEditEnv.allow_local_agent !== false,
         });
       } else {
         setEditEnvId(null);
@@ -127,6 +130,7 @@ export function EnvManagerDialog({
       username: env.username,
       password: '',
       is_default: env.is_default,
+      allow_local_agent: env.allow_local_agent !== false,
     });
   };
 
@@ -482,6 +486,17 @@ export function EnvManagerDialog({
                     onChange={(e) => setEnvForm({ ...envForm, is_default: e.target.checked })}
                   />
                   {t('ui.auto.defaultHint', '生成/执行时默认使用该环境')}
+                </label>
+              </Field>
+
+              <Field label={t('ui.auto.allowLocalAgent', '允许本地 Agent 获取认证信息')}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, height: 26 }}>
+                  <input
+                    type="checkbox"
+                    checked={envForm.allow_local_agent}
+                    onChange={(e) => setEnvForm({ ...envForm, allow_local_agent: e.target.checked })}
+                  />
+                  {t('ui.auto.allowLocalAgentHint', '本地 Agent 编写脚本时可通过 MCP 获取该环境登录态')}
                 </label>
               </Field>
 
