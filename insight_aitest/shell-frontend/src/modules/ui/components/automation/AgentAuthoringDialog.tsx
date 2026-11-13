@@ -129,10 +129,7 @@ export function AgentAuthoringDialog({
     >
       <div style={{ padding: '4px 20px 18px', maxHeight: '76vh', overflowY: 'auto' }}>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.7 }}>
-          {t(
-            'ui.auto.agentAuthoringDesc',
-            '把下面的文案粘贴到你的本地 Agent（Claude Code / Cursor / TRAE 等）。它会先调用 MCP 分诊，未实现的自动编写、最近执行失败的自动修复、已通过的跳过。Token 只显示这一次。'
-          )}
+          {t('ui.auto.agentAuthoringDesc', '把下面的文案粘贴到你的本地 Agent 执行')}
         </div>
 
         {loading && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('ui.auto.generatingPrompt', '正在生成文案…')}</div>}
@@ -140,12 +137,6 @@ export function AgentAuthoringDialog({
 
         {prompt && (
           <>
-            <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 10, fontSize: 12 }}>
-              <span style={{ color: '#0ea5e9' }}>{t('ui.auto.triageCreate', '编写')} {prompt.summary.create}</span>
-              <span style={{ color: '#f97316' }}>{t('ui.auto.triageFix', '修复')} {prompt.summary.fix}</span>
-              <span style={{ color: 'var(--text-muted)' }}>{t('ui.auto.triageSkip', '跳过')} {prompt.summary.skip}</span>
-            </div>
-
             {prompt.prompt === null ? (
               <div
                 style={{
@@ -201,9 +192,6 @@ export function AgentAuthoringDialog({
             <Btn size="sm" variant="ghost" onClick={() => void refreshStatus()}>
               <RefreshCw size={12} />
             </Btn>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-              {t('ui.auto.authoringProgressHint', '本地探索阶段无法回传，提交/校验事件实时回显')}
-            </span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {caseIds.map((cid) => {
