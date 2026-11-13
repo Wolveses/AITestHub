@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Download, Globe, Play, RefreshCw, Search, Sparkles, Wrench, Eye, Square, Bot } from 'lucide-react';
+import { Download, Globe, Play, RefreshCw, Search, Sparkles, Wrench, Eye, Square, Bot, Activity } from 'lucide-react';
 import { useProjectStore } from '../../../../shared/store/projectStore';
 import { useConfirmStore } from '../../../../shared/store/confirmStore';
 import { ModuleHelpButton } from '../../../../shared/components/ModuleHelpButton';
-import { useAutomationStore, type AutomationCase } from '../../store/automationStore';
+import { useAutomationStore, type AutomationCase, fetchAuthoringActive } from '../../store/automationStore';
 import { CategoryTree } from './CategoryTree';
 import { ImportCasesDialog } from './ImportCasesDialog';
 import { CaseDetailDrawer } from './CaseDetailDrawer';
 import { AgentAuthoringDialog } from './AgentAuthoringDialog';
+import { AuthoringProgressDialog } from './AuthoringProgressDialog';
 import { Btn, ErrorCategoryTag, StatusBadge, inputStyle } from './common';
 
 const ACTIVE_STATUSES = new Set(['generating', 'fixing', 'running']);
@@ -47,6 +48,8 @@ export function AutomationPage() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [agentOpen, setAgentOpen] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(false);
+  const [activeCount, setActiveCount] = useState(0);
 
   const selectedIds = useMemo(() => Array.from(selected), [selected]);
   const allSelected = cases.length > 0 && cases.every((c) => selected.has(c.id));
@@ -102,6 +105,32 @@ export function AutomationPage() {
     }, 4000);
     return () => clearInterval(timer);
   }, [hasActive, loadCases]);
+
+  // 进行中的编写任务数量（弹窗打开时由弹窗自身轮询并回传，避免重复请求）
+  useEffect(() => {
+    if (projectId === null || progressOpen) return;
+    let stopped = false;
+    const tick = async () => {
+      if (document.hidden) return;
+      try {
+        const list = await fetchAuthoringActive(projectId);
+        if (!stopped) setActiveCount(list.length);
+      } catch {
+        /* 静默，等待下次 */
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 5000);
+    const onVisible = () => {
+      if (!document.hidden) void tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [projectId, progressOpen]);
 
   const activeProjectName = projects.find((p) => p.id === projectId)?.name || '';
 
@@ -223,6 +252,15 @@ export function AutomationPage() {
         >
           <Bot size={14} /> {t('ui.auto.agentAuthoring', '本地 Agent 编写')}
           {selected.size > 0 ? ` (${selected.size})` : ''}
+        </Btn>
+
+        <Btn
+          onClick={() => setProgressOpen(true)}
+          disabled={projectId === null}
+          title={t('ui.auto.authoringProgressHint', '查看当前项目中校验/试跑通过、尚未入库的用例')}
+        >
+          <Activity size={14} /> {t('ui.auto.authoringProgress', '编写进度')}
+          {activeCount > 0 ? ` (${activeCount})` : ''}
         </Btn>
 
         {/* 环境快速切换下拉 */}
@@ -452,6 +490,12 @@ export function AutomationPage() {
         }}
         projectId={projectId}
         caseIds={selectedIds}
+      />
+      <AuthoringProgressDialog
+        open={progressOpen}
+        onClose={() => setProgressOpen(false)}
+        projectId={projectId}
+        onCount={setActiveCount}
       />
     </div>
   );

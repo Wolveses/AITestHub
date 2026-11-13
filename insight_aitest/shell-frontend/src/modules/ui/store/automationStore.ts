@@ -508,6 +508,26 @@ export interface AuthoringStatusItem {
   recent_events?: AuthoringEvent[];
 }
 
+export interface AuthoringActiveItem {
+  case_id: number;
+  title: string;
+  status: string;
+  stage: string;
+  script_version: number;
+  source_hash: string;
+  last_error: string;
+  updated_at: string | null;
+  busy: boolean;
+  latest_event: { message: string; created_at: string | null } | null;
+}
+
+export async function fetchAuthoringActive(projectId: number): Promise<AuthoringActiveItem[]> {
+  const r = await fetch(`${BASE}/authoring/active?project_id=${projectId}`);
+  if (!r.ok) throw new Error(await parseError(r));
+  const data = await r.json();
+  return data.items || [];
+}
+
 export async function requestAuthoringPrompt(projectId: number, caseIds: number[]): Promise<AuthoringPrompt> {
   const r = await fetch(`${BASE}/authoring/prompt`, {
     method: 'POST',

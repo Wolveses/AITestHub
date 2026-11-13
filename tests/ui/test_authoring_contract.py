@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """本地 Agent 编写的契约校验与入库状态机测试。"""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -17,8 +17,12 @@ from insight_aitest.modules.ui.backend.automation.env import base_url
 
 
 def test_login_page(page):
+    print("[步骤] 打开登录页")
     page.goto(base_url() + "/login")
-    expect(page.get_by_role("button", name="登录")).to_be_visible()
+    print("[操作] 检查登录按钮可见")
+    button = page.get_by_role("button", name="登录")
+    expect(button).to_be_visible()
+    print("[断言] 登录按钮可见，预期可见")
 '''
 
 GOOD_ASSET = '''# -*- coding: utf-8 -*-
@@ -80,6 +84,48 @@ def test_lint_accepts_minimal_case():
 def test_lint_allows_future_annotations():
     files = {"case.py": "from __future__ import annotations\n" + GOOD_CASE}
     assert contract.lint_files(files, 1) == []
+
+
+def test_lint_requires_execution_logs():
+    """本地 Agent 常漏 print：无日志直接拒绝，日志过少/缺前缀给出明确错误码。"""
+    no_log = '''from playwright.sync_api import expect
+from insight_aitest.modules.ui.backend.automation.env import base_url
+
+def test_x(page):
+    page.goto(base_url() + "/login")
+    expect(page.get_by_role("button", name="登录")).to_be_visible()
+'''
+    codes = [v["code"] for v in contract.lint_files({"case.py": no_log}, 1)]
+    assert "LOG_MISSING" in codes
+
+    one_log = '''from playwright.sync_api import expect
+from insight_aitest.modules.ui.backend.automation.env import base_url
+
+def test_x(page):
+    print("打开登录页")
+    page.goto(base_url() + "/login")
+    expect(page.get_by_role("button", name="登录")).to_be_visible()
+'''
+    codes = [v["code"] for v in contract.lint_files({"case.py": one_log}, 1)]
+    assert "LOG_TOO_FEW" in codes
+    assert "LOG_FORMAT_PREFIX" in codes
+
+
+def test_agent_first_contact_marks_generating(db, case):
+    """Agent 首次调用 contract.get 后，用例进入「生成中」，且重复调用幂等。"""
+    svc.mark_generating(db, case)
+    assert db.get_authoring_state(case.id).stage == "generating"
+    svc.mark_generating(db, case)
+    assert db.get_authoring_state(case.id).stage == "generating"
+
+
+def test_waiting_agent_counted_before_validate(db, case):
+    """点了「本地 Agent 编写」但还没 validate 时，应能在进行中列表看到（stage=waiting）。"""
+    db.add_authoring_event(case.id, 1, "prompt_ready", "已生成本地编写文案")
+    rows = db.list_prompt_ready_cases(1, since=datetime.now() - timedelta(hours=6))
+    assert [c.id for c, _ in rows] == [case.id]
+    # 超出窗口则不返回
+    assert db.list_prompt_ready_cases(1, since=datetime.now() + timedelta(minutes=1)) == []
 
 
 def test_case_can_reuse_existing_asset(monkeypatch, tmp_path, db, case):

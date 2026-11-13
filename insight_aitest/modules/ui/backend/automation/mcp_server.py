@@ -77,6 +77,7 @@ def _build_server() -> MCPServer:
         db, case, err = _case_or_none(case_id)
         if err:
             return err
+        svc.mark_generating(db, case)
         env = resolve_current_env(db, int(case.project_id))
         payload = contract.contract_payload(case, env)
         payload["ok"] = True

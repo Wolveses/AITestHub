@@ -5,10 +5,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from insight_aitest.modules.ui.backend.automation.models import (
     AuthoringEvent,
+    AuthoringStage,
     AuthoringState,
     CaseStatus,
     GenerationStatus,
@@ -892,6 +893,91 @@ class UIAutomationDatabase:
             for row in rows:
                 s.expunge(row)
             return rows
+
+    def list_active_authoring(
+        self, project_id: int, limit: int = 200
+    ) -> list[tuple[AuthoringState, UiCase]]:
+        """进行中的编写状态（已入库的用例状态会被清空，自然不在结果里）。"""
+        with session_scope(self.db_path) as s:
+            rows = list(
+                s.execute(
+                    select(AuthoringState, UiCase)
+                    .join(UiCase, UiCase.id == AuthoringState.case_id)
+                    .where(
+                        UiCase.project_id == project_id,
+                        AuthoringState.stage.in_(
+                            [
+                                AuthoringStage.GENERATING,
+                                AuthoringStage.VALIDATED,
+                                AuthoringStage.DRY_RUN_OK,
+                            ]
+                        ),
+                    )
+                    .order_by(AuthoringState.updated_at.desc())
+                    .limit(limit)
+                ).all()
+            )
+            for state, case in rows:
+                s.expunge(state)
+                s.expunge(case)
+            return rows
+
+    def list_prompt_ready_cases(
+        self, project_id: int, since: datetime, limit: int = 200
+    ) -> list[tuple[UiCase, AuthoringEvent]]:
+        """已生成编写文案、但还没进入校验/试跑状态的用例（等待本地 Agent）。"""
+        with session_scope(self.db_path) as s:
+            latest = (
+                select(
+                    AuthoringEvent.case_id.label("case_id"),
+                    func.max(AuthoringEvent.id).label("event_id"),
+                )
+                .where(
+                    AuthoringEvent.project_id == project_id,
+                    AuthoringEvent.kind == "prompt_ready",
+                    AuthoringEvent.created_at >= since,
+                )
+                .group_by(AuthoringEvent.case_id)
+                .subquery()
+            )
+            has_state = (
+                select(AuthoringState.case_id)
+                .where(AuthoringState.case_id == AuthoringEvent.case_id)
+                .exists()
+            )
+            rows = list(
+                s.execute(
+                    select(UiCase, AuthoringEvent)
+                    .join(UiCase, UiCase.id == AuthoringEvent.case_id)
+                    .join(latest, latest.c.event_id == AuthoringEvent.id)
+                    .where(
+                        UiCase.project_id == project_id,
+                        ~has_state,
+                        or_(
+                            UiCase.authoring_at.is_(None),
+                            UiCase.authoring_at < AuthoringEvent.created_at,
+                        ),
+                    )
+                    .order_by(AuthoringEvent.created_at.desc())
+                    .limit(limit)
+                ).all()
+            )
+            for case, event in rows:
+                s.expunge(case)
+                s.expunge(event)
+            return rows
+
+    def latest_authoring_event(self, case_id: int) -> AuthoringEvent | None:
+        with session_scope(self.db_path) as s:
+            row = s.scalars(
+                select(AuthoringEvent)
+                .where(AuthoringEvent.case_id == case_id)
+                .order_by(AuthoringEvent.id.desc())
+                .limit(1)
+            ).first()
+            if row is not None:
+                s.expunge(row)
+            return row
 
     def latest_authoring_event_id(self, case_id: int) -> int:
         with session_scope(self.db_path) as s:

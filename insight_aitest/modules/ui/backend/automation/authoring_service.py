@@ -216,6 +216,30 @@ def release_lease(db, case) -> None:
 # ===== 校验 =====
 
 
+def mark_generating(db, case) -> None:
+    """Agent 首次拉取契约即视为开始生成；已有校验结果时不回退。"""
+    try:
+        state = db.get_authoring_state(int(case.id))
+        if state is not None and state.stage in (
+            AuthoringStage.GENERATING,
+            AuthoringStage.VALIDATED,
+            AuthoringStage.DRY_RUN_OK,
+        ):
+            return
+        db.upsert_authoring_state(
+            int(case.id),
+            project_id=int(case.project_id),
+            source_hash="",
+            stage=AuthoringStage.GENERATING,
+            validated_at=None,
+            dry_run_at=None,
+            last_error="",
+        )
+        record_event(db, case, "generating", "本地 Agent 已接入，开始生成脚本")
+    except Exception as exc:  # 状态写入失败不能阻断 Agent 拉取契约
+        logger.warning("写入生成中状态失败：%s", exc)
+
+
 def validate(db, case, files) -> dict:
     normalized, problems = contract.normalize_files(files)
     if problems:

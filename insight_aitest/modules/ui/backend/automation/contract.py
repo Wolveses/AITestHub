@@ -32,6 +32,7 @@ CASE_FILE = "case.py"
 ASSET_DIRS = ("pages", "common")
 MAX_FILES = 20
 MAX_FILE_BYTES = 512 * 1024
+MIN_LOGS_PER_TEST = 3
 
 # 仓库根目录：L2 子进程要 import 脚手架插件与平台 env 契约
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -67,6 +68,9 @@ ERROR_FIX = {
     "MANAGE_DOUBLE": "base_url() 已是当前端入口，不要再拼 /manage",
     "FORBIDDEN_CALL": "改用 Playwright/public API，不要读写任意文件或动态执行代码",
     "FIXED_SLEEP": "删除 wait_for_timeout/sleep，改用 expect 轮询或 common 里的 wait_*",
+    "LOG_MISSING": "测试函数内必须用 print 输出执行日志：步骤/操作/输入/断言各一条起",
+    "LOG_TOO_FEW": "每个测试函数至少 3 条 print：一条 [步骤]、一条关键操作、一条 [断言]",
+    "LOG_FORMAT_PREFIX": "日志要用平台约定的前缀：[步骤]/[操作]/[输入]/[选择]/[勾选]/[断言]/[数据]/[结果]",
     "BAD_PATH": "只允许 case.py、pages/<name>.py、common/<name>.py（单层、.py 结尾）",
     "FILE_TOO_LARGE": "单文件不超过 512KB，拆分为资产文件",
     "TOO_MANY_FILES": "一次最多提交 20 个文件",
@@ -203,6 +207,66 @@ def _lint_case(case_source: str) -> list[dict]:
     return out
 
 
+def _literal_text(node: ast.AST | None) -> str:
+    """取出 print 首个参数的静态文本（含 f-string 的固定片段）。"""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value
+            for part in node.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+    return ""
+
+
+def _lint_logs(tree: ast.AST, name: str) -> list[dict]:
+    """执行日志规范：每个测试函数至少 3 条 print，且带 [步骤] 与 [断言]。"""
+    out: list[dict] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not fn.name.startswith("test_"):
+            continue
+        prints: list[tuple[int, str]] = []
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "print"
+            ):
+                prints.append((node.lineno, _literal_text(node.args[0] if node.args else None)))
+        if not prints:
+            out.append(
+                violation("LOG_MISSING", f"{fn.name} 没有任何 print 执行日志", name, fn.lineno)
+            )
+            continue
+        if len(prints) < MIN_LOGS_PER_TEST:
+            out.append(
+                violation(
+                    "LOG_TOO_FEW",
+                    f"{fn.name} 只有 {len(prints)} 条日志，至少 {MIN_LOGS_PER_TEST} 条（步骤/操作/断言）",
+                    name,
+                    fn.lineno,
+                )
+            )
+        text = "".join(chunk for _, chunk in prints)
+        if "[步骤]" not in text:
+            out.append(
+                violation("LOG_FORMAT_PREFIX", f"{fn.name} 缺少 [步骤] 日志", name, fn.lineno)
+            )
+        if "[断言]" not in text and "[校验]" not in text:
+            out.append(
+                violation(
+                    "LOG_FORMAT_PREFIX",
+                    f"{fn.name} 缺少 [断言]/[校验] 日志（断言前打印实际值与预期值）",
+                    name,
+                    fn.lineno,
+                )
+            )
+    return out
+
+
 def _lint_ast(source: str, name: str) -> list[dict]:
     try:
         tree = ast.parse(source)
@@ -255,11 +319,12 @@ def lint_files(files: dict[str, str], project_id: int) -> list[dict]:
         problems.append(violation("BAD_PATH", "缺少 case.py"))
     else:
         problems.extend(_lint_case(case_source))
+        try:
+            problems.extend(_lint_logs(ast.parse(case_source), CASE_FILE))
+        except SyntaxError:
+            pass
     for name, source in files.items():
-        if name == CASE_FILE:
-            problems.extend(_lint_ast(source, name))
-        else:
-            problems.extend(_lint_ast(source, name))
+        problems.extend(_lint_ast(source, name))
     problems.extend(_missing_assets(files, project_id, case_source))
     return problems
 
@@ -383,6 +448,12 @@ def contract_rules() -> dict:
             "asset_import_style": "from pages.users_page import UsersPage / from common.ui import dialog_of",
         },
         "flow": ["example.get", "script.validate", "script.dry_run", "script.submit"],
+        "logs": {
+            "min_per_test": MIN_LOGS_PER_TEST,
+            "prefixes": ["[步骤]", "[操作]", "[输入]", "[选择]", "[勾选]", "[断言]", "[数据]", "[结果]"],
+            "required": "每个 def test_xxx 至少 3 条 print，且包含 [步骤] 与 [断言]/[校验]",
+            "sample": "print(f\"[步骤] 打开用户列表 {base_url()}\")",
+        },
         "error_codes": ERROR_FIX,
     }
 
@@ -457,6 +528,7 @@ HARD_RULES = [
     "只允许 case.py、pages/<name>.py、common/<name>.py；import 必须命中白名单",
     "禁止 manage_browser_sync()/manageBrowser 等双开浏览器调用，page 由平台注入",
     "引用的 pages/common 资产必须同时出现在 files 里，否则首跑必失败",
+    "每个测试函数至少 3 条 print 日志：一条 [步骤]、一条关键操作、一条 [断言]；日志直接进入执行记录",
 ]
 
 # 平台已验证的通用坑（项目实测 lesson 优先于这里；二者冲突以实际快照为准）

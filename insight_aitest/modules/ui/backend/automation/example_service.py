@@ -120,6 +120,7 @@ def _template(site: str) -> str:
         '    expect(page.get_by_role("button", name="新增", exact=True)).to_be_visible()\n'
         '    print("[步骤] 执行操作并断言结果")\n'
         '    expect(page.locator(".ui-form-error-tip")).to_have_count(0)\n'
+        '    print("[断言] 表单错误数为 0，预期 0")\n'
         '    print("[结果] 通过")'
     )
 

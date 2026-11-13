@@ -68,6 +68,7 @@ class AuthoringStage:
     """本地 Agent 编写脚本的校验状态机。"""
 
     NONE = ""
+    GENERATING = "generating"  # 本地 Agent 已接入，正在生成/校验脚本
     VALIDATED = "validated"  # L1/L2 通过，30 分钟内可 dry_run/submit
     DRY_RUN_OK = "dry_run_ok"  # 本地试跑通过，24 小时内可 submit
 

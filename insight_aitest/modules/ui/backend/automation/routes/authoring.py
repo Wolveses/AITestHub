@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -49,7 +49,9 @@ def build_prompt(case_ids: list[int], token: str, mcp_url: str) -> str:
    - case.py 必须包含 def test_xxx(page):，使用同步风格；
    - 站点地址统一用 base_url()（from insight_aitest.modules.ui.backend.automation.env import base_url）；
    - 可新增或复用 pages/*.py、common/*.py；同名资产已存在时优先复用；
-   - 断言用 expect(...)，禁止固定 sleep、禁止写死域名/Token、禁止 async/await。
+   - 断言用 expect(...)，禁止固定 sleep、禁止写死域名/Token、禁止 async/await；
+   - 每个 test 函数至少 3 条 print 执行日志，必须以 [步骤] 开头，断言前打印 [断言] 实际值与预期值；
+     常用前缀：[步骤]/[操作]/[输入]/[选择]/[勾选]/[断言]/[数据]/[结果]。
 7. 调用 script.validate(case_id, files)，必须 ok=true；失败按 violations[].code + fix 修正后重试。
 8. 调用 script.dry_run(case_id, files, source_hash)，必须 ok=true；失败根据 log_tail 修正后重新 validate + dry_run。
 9. 调用 script.submit(case_id, files, source_hash, expect_case_rev, expect_script_version)，ok=true 即入库成功。
@@ -168,6 +170,74 @@ def authoring_status(case_ids: str = Query("")):
             }
         )
     return {"ok": True, "items": out}
+
+
+@router.get("/active")
+def authoring_active(
+    project_id: int = Query(...), limit: int = Query(50, ge=1, le=200)
+):
+    """当前项目进行中的编写任务（已入库、未发起的都不返回）。"""
+    db = get_automation_db()
+    now = datetime.now()
+    out = []
+    for state, case in db.list_active_authoring(project_id, limit=200):
+        stamp = state.updated_at
+        if state.stage == svc.AuthoringStage.VALIDATED:
+            stamp = state.validated_at or stamp
+            if now - stamp > svc.VALIDATED_TTL:
+                continue
+        elif state.stage == svc.AuthoringStage.DRY_RUN_OK:
+            stamp = state.dry_run_at or stamp
+            if now - stamp > svc.DRY_RUN_TTL:
+                continue
+        elif state.stage == svc.AuthoringStage.GENERATING:
+            if now - stamp > timedelta(hours=6):
+                continue
+        event = db.latest_authoring_event(case.id)
+        out.append(
+            {
+                "case_id": case.id,
+                "title": case.title,
+                "status": case.status,
+                "stage": state.stage,
+                "script_version": int(case.script_version or 0),
+                "source_hash": (state.source_hash or "")[:12],
+                "last_error": state.last_error or "",
+                "updated_at": stamp.isoformat() if stamp else None,
+                "busy": bool(state.lease_until and state.lease_until > now),
+                "latest_event": (
+                    {"message": event.message, "created_at": event.created_at.isoformat()}
+                    if event is not None
+                    else None
+                ),
+            }
+        )
+        if len(out) >= limit:
+            break
+
+    # 已生成文案、但 Agent 还没开始校验的用例（等待阶段）
+    seen = {item["case_id"] for item in out}
+    waiting_since = now - timedelta(hours=6)
+    for case, event in db.list_prompt_ready_cases(project_id, since=waiting_since, limit=limit):
+        if case.id in seen:
+            continue
+        out.append(
+            {
+                "case_id": case.id,
+                "title": case.title,
+                "status": case.status,
+                "stage": "waiting",
+                "script_version": int(case.script_version or 0),
+                "source_hash": "",
+                "last_error": "",
+                "updated_at": event.created_at.isoformat(),
+                "busy": False,
+                "latest_event": {"message": event.message, "created_at": event.created_at.isoformat()},
+            }
+        )
+        if len(out) >= limit:
+            break
+    return {"ok": True, "count": len(out), "items": out}
 
 
 @router.get("/stream")
