@@ -45,12 +45,23 @@ _SS_LOCK = threading.Lock()
 _SS: dict[str, tuple[str, datetime, bool]] = {}
 
 
+def _next_tool(code: str) -> str | None:
+    """失败码 → 建议下一步工具（错误封套的 required_next）。"""
+    if code in contract.FAIL_REQUIRED_NEXT:
+        return contract.FAIL_REQUIRED_NEXT[code]
+    if code in contract.FATAL_CODES or code in ("ENV_INVALID", "BUSY"):
+        return None
+    return "ui.script.validate" if code in contract.ERROR_FIX else None
+
+
 def fail(code: str, message: str, **extra) -> dict:
     data = {
         "ok": False,
         "code": code,
         "message": message,
         "fix": contract.ERROR_FIX.get(code, ""),
+        "retryable": code not in contract.FATAL_CODES,
+        "required_next": _next_tool(code),
     }
     data.update(extra)
     return data
@@ -99,6 +110,57 @@ def case_payload(case) -> dict:
         "source": getattr(case, "source", CaseSource.AI),
         "updated_at": case.updated_at.isoformat() if case.updated_at else None,
     }
+
+
+def _run_artifacts(run: dict, limit: int = 4000) -> tuple[str, list[str]]:
+    """读执行产物目录：返回 (stdout.log 尾部, 截图文件名)；目录被清理时返回空。"""
+    rel = run.get("artifacts_rel_path") or ""
+    if not rel:
+        return "", []
+    try:
+        out_dir = paths.resolve_rel(rel)
+        if not out_dir.is_dir():
+            return "", []
+        log_tail = ""
+        log_file = out_dir / "stdout.log"
+        if log_file.is_file():
+            log_tail = log_file.read_text(encoding="utf-8", errors="replace")[-limit:]
+        return log_tail, sorted(p.name for p in out_dir.glob("*.png"))
+    except OSError:
+        return "", []
+
+
+def latest_run_summary(db, case, run_id: int | None = None, history: int = 5) -> dict:
+    """最近一次脚本执行 + 历史摘要（供本地 Agent 定位失败原因）。"""
+    runs = db.list_script_runs(int(case.id), limit=max(1, int(history)))
+    run = None
+    if run_id:
+        candidate = db.get_script_run(int(run_id))
+        if candidate and int(candidate.get("case_id") or 0) == int(case.id):
+            run = candidate
+    if run is None and runs:
+        run = runs[0]
+    if run is None:
+        return {"ok": True, "run": None, "recent": [], "message": "该用例尚无脚本执行记录"}
+
+    detail = dict(run)
+    log_tail, screenshots = _run_artifacts(run)
+    detail["log_tail"] = log_tail
+    detail["screenshots"] = screenshots
+    detail["failure_point"] = run.get("error") or ""
+    detail["passed"] = (run.get("status") or "") == "passed"
+    recent = [
+        {
+            "run_id": r.get("id"),
+            "status": r.get("status"),
+            "started_at": r.get("started_at"),
+            "duration_ms": r.get("duration_ms"),
+            "script_version": r.get("script_version"),
+            "error": (r.get("error") or "")[:300],
+        }
+        for r in runs
+    ]
+    return {"ok": True, "run": detail, "recent": recent}
 
 
 def env_payload(db, case) -> dict:
@@ -270,7 +332,7 @@ def validate(db, case, files) -> dict:
             "stage": AuthoringStage.VALIDATED,
             "source_hash": result["source_hash"],
             "files": result["files"],
-            "next": "script.dry_run",
+            "next": "ui.script.dry_run",
         }
 
     db.upsert_authoring_state(
@@ -306,7 +368,7 @@ def _check_dry_run_ready(db, case, files_hash: str) -> dict | None:
     ):
         return fail(
             "VALIDATION_REQUIRED",
-            "请先对当前 files 调用 script.validate（结果 30 分钟内有效）",
+            "请先对当前 files 调用 ui.script.validate（结果 30 分钟内有效）",
         )
     return None
 
@@ -420,7 +482,7 @@ def dry_run(db, case, files, expected_hash: str) -> dict:
         "duration_ms": result.get("duration_ms"),
         "screenshots": result.get("screenshots") or [],
         "log_tail": log_tail[-1500:],
-        "next": "script.submit",
+        "next": "ui.script.submit",
     }
 
 
@@ -540,7 +602,7 @@ def submit(
     if expect_case_rev and expect_case_rev != current_rev:
         return fail(
             "STALE_CASE",
-            f"用例已被修改（case_rev={current_rev}），请重新 case.get 后生成脚本",
+            f"用例已被修改（case_rev={current_rev}），请重新 ui.case.get 后生成脚本",
             case_rev=current_rev,
         )
 
@@ -564,7 +626,7 @@ def submit(
     ):
         return fail(
             "VALIDATION_REQUIRED",
-            "当前 files 尚未通过 script.dry_run（24 小时内有效），请先试跑",
+            "当前 files 尚未通过 ui.script.dry_run（24 小时内有效），请先试跑",
         )
 
     if case.status in (CaseStatus.GENERATING, CaseStatus.FIXING, CaseStatus.RUNNING):

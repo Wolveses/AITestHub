@@ -405,3 +405,86 @@ def test_submit_records_solution_after_failure(monkeypatch, tmp_path, db, case):
 
     titles = {entry.title for entry in db.list_lessons(1)}
     assert any("修复通过" in title for title in titles)
+
+
+# ===== MCP 工具元信息 / 返回契约 =====
+
+EXPECTED_TOOLS = [
+    "ui.contract.get",
+    "ui.env.get",
+    "ui.case.get",
+    "ui.example.get",
+    "ui.script.validate",
+    "ui.script.dry_run",
+    "ui.script.submit",
+    "ui.run.latest",
+]
+
+
+def _tools() -> dict:
+    import asyncio
+
+    from insight_aitest.modules.ui.backend.automation.mcp_server import get_mcp_server
+
+    return {tool.name: tool for tool in asyncio.run(get_mcp_server().list_tools())}
+
+
+def test_tool_metadata_follows_conventions():
+    tools = _tools()
+    assert list(tools) == EXPECTED_TOOLS
+    for name, tool in tools.items():
+        assert tool.title, name
+        assert tool.description, name
+        # 流程只放 instructions / workflow，工具描述不写步骤
+        assert "【第" not in tool.description, name
+        assert "下一步" not in tool.description, name
+        assert tool.output_schema, name
+        for prop, spec in (tool.input_schema.get("properties") or {}).items():
+            assert spec.get("description"), f"{name}.{prop} 缺少参数描述"
+
+    assert tools["ui.case.get"].annotations.read_only_hint is True
+    assert tools["ui.script.submit"].annotations.destructive_hint is True
+    assert tools["ui.script.dry_run"].annotations.open_world_hint is True
+    assert tools["ui.example.get"].annotations.open_world_hint is False
+
+
+def test_prompts_and_resources_registered():
+    import asyncio
+
+    from insight_aitest.modules.ui.backend.automation.mcp_server import get_mcp_server
+
+    server = get_mcp_server()
+    assert [p.name for p in asyncio.run(server.list_prompts())] == ["ui.create", "ui.fix"]
+    assert [str(r.uri) for r in asyncio.run(server.list_resources())] == [
+        "insight://rules",
+        "insight://template",
+    ]
+
+
+def test_contract_payload_carries_workflow(case):
+    payload = contract.contract_payload(case, None)
+    workflow = payload["workflow"]
+    assert workflow["id"] == "ui.create@1"
+    assert workflow["steps"][0]["tool"] == "ui.contract.get"
+    assert workflow["max_retry_same_error"] == 3
+    assert "flow" not in payload["rules"]
+
+
+def test_fail_envelope_guides_next_tool():
+    err = svc.fail("STALE_CASE", "用例已变更")
+    assert err["ok"] is False
+    assert err["retryable"] is True
+    assert err["required_next"] == "ui.contract.get"
+
+    fatal = svc.fail("PERMISSION_DENIED", "无权限")
+    assert fatal["retryable"] is False
+    assert fatal["required_next"] is None
+
+
+def test_error_result_marks_is_error():
+    from insight_aitest.modules.ui.backend.automation.mcp_server import _error
+
+    result = _error(svc.fail("BUSY", "该用例正被其他本地 Agent 操作"))
+    assert result.is_error is True
+    assert result.structured_content["code"] == "BUSY"
+    assert result.structured_content["retryable"] is True

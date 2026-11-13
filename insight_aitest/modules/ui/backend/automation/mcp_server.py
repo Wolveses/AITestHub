@@ -2,18 +2,24 @@
 """平台 MCP 服务：把「契约 / 环境 / 用例 / 校验 / 试跑 / 入库」暴露给本地 Agent。
 
 挂载点：``/mcp``（Bearer Token 鉴权，Token 由平台前端生成文案时创建）。
-工具清单（与设计 v1.1 一致）：
-- ``contract.get`` / ``env.get`` / ``case.get`` / ``example.get``
-- ``script.validate`` / ``script.dry_run`` / ``script.submit``
+工具清单：
+- ``ui.contract.get`` / ``ui.env.get`` / ``ui.case.get`` / ``ui.example.get`` / ``ui.run.latest``
+- ``ui.script.validate`` / ``ui.script.dry_run`` / ``ui.script.submit``
+附：prompts ``ui.create`` / ``ui.fix``，resources ``insight://rules`` / ``insight://template``。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from contextvars import ContextVar
+from typing import Annotated
 
 from logzero import logger
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp_types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import JSONResponse
 
 from insight_aitest.modules.ui.backend.automation import authoring_service as svc
@@ -35,7 +41,8 @@ def _db():
 def _project_id() -> int:
     pid = _current_project.get()
     if not pid:
-        raise ValueError("PERMISSION_DENIED：未认证，请在 MCP 请求头携带 Authorization: Bearer <token>")
+        # ToolError 的 message 会原样到达客户端；ValueError 会被 SDK 脱敏成通用文案
+        raise ToolError("PERMISSION_DENIED：未认证，请在 MCP 请求头携带 Authorization: Bearer <token>")
     return pid
 
 
@@ -53,30 +60,188 @@ def _case_or_none(case_id: int):
     return db, case, None
 
 
+# ---- 返回契约：声明稳定字段，extra=allow 保留动态字段（不裁剪 structuredContent）----
+
+class ToolPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    ok: bool = True
+
+
+class ContractPayload(ToolPayload):
+    contract_version: str = ""
+    case: dict = Field(default_factory=dict)
+    script: dict = Field(default_factory=dict)
+    env: dict | None = None
+    assets: list = Field(default_factory=list)
+    rules: dict = Field(default_factory=dict)
+    workflow: dict = Field(default_factory=dict)
+
+
+class EnvPayload(ToolPayload):
+    env_id: int = 0
+    name: str = ""
+    base_url: str = ""
+    entry_url: str = ""
+    site: str = ""
+    auth: dict = Field(default_factory=dict)
+    auth_ready: bool = False
+    message: str = ""
+
+
+class CasePayload(ToolPayload):
+    case_id: int = 0
+    title: str = ""
+    site: str = ""
+    case_rev: str = ""
+    script: dict = Field(default_factory=dict)
+
+
+class ExamplePayload(ToolPayload):
+    hard_rules: list = Field(default_factory=list)
+    known_traps: list = Field(default_factory=list)
+    lessons: list = Field(default_factory=list)
+    known_routes: list = Field(default_factory=list)
+    examples: list = Field(default_factory=list)
+    assets: list = Field(default_factory=list)
+    template: str = ""
+    note: str = ""
+
+
+class ValidatePayload(ToolPayload):
+    stage: str = ""
+    source_hash: str = ""
+    violations: list = Field(default_factory=list)
+    next: str = ""
+
+
+class DryRunPayload(ToolPayload):
+    stage: str = ""
+    source_hash: str = ""
+    duration_ms: int | None = None
+    screenshots: list[str] = Field(default_factory=list)
+    log_tail: str = ""
+    next: str = ""
+
+
+class SubmitPayload(ToolPayload):
+    case_id: int = 0
+    script_version: int = 0
+    source_hash: str = ""
+    script_path: str = ""
+    message: str = ""
+
+
+class RunLatestPayload(ToolPayload):
+    run: dict | None = None
+    recent: list = Field(default_factory=list)
+    message: str = ""
+
+
+_READ = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
+_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
+_ENV = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True)
+_DRY_RUN = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True)
+_SUBMIT = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False)
+
+CaseId = Annotated[int, Field(description="平台用例 ID；必须是当前 Token 所属项目内的用例", ge=1)]
+Files = Annotated[list[dict], Field(description="完整文件集合 [{path, content}]；path 仅允许 case.py、pages/<name>.py、common/<name>.py")]
+SourceHash = Annotated[str, Field(description="ui.script.validate 返回的 source_hash；30 分钟内有效，且必须与本次 files 内容一致")]
+
+INSTRUCTIONS = """Insight-AITest：UI 自动化脚本「本地编写 + 平台校验入库」服务。
+- 认证：请求头 Authorization: Bearer <token>，Token 绑定项目；不要写入脚本、不要提交仓库。
+- 流程：不预设固定顺序，只以 ui.contract.get 返回的 workflow 为准。
+- 规则优先级：本次 ui.contract.get 的 rules > ui.example.get 的 lessons/known_traps > 通用经验；与实测页面冲突时以实测为准。
+- 失败处理：isError=true 时读 code/fix/required_next 再决定是否重试；同一错误码连续 3 次不推进就停止并说明原因。
+- 终止条件：PERMISSION_DENIED / CASE_NOT_FOUND / ENV_NOT_CONFIGURED / ENV_NOT_ALLOWED 立即停止。
+- 只操作当前 Token 项目内的用例，不要修改其他用例或平台资产。"""
+
+
+def _error(payload: dict) -> CallToolResult:
+    """业务失败：isError=true + 结构化错误体（此路径不受 outputSchema 约束）。"""
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, default=str))],
+        structured_content=payload,
+        is_error=True,
+    )
+
+
+def _mcp_url() -> str:
+    base = _current_base.get()
+    return f"{base}/mcp" if base else "http://127.0.0.1:8001/mcp"
+
+
+def _fix_prompt_text(case_id: int, token: str) -> str:
+    db = _db()
+    case = svc.resolve_case(db, case_id, _project_id())
+    if case is None:
+        raise ToolError(f"CASE_NOT_FOUND：用例 {case_id} 不存在或不属于当前 Token 的项目")
+    info = svc.case_payload(case)
+    run = svc.latest_run_summary(db, case, history=3)
+    latest = run.get("run") or {}
+    script = str((info.get("script") or {}).get("content") or "")[:12000]
+    log_tail = str(latest.get("log_tail") or "")[-4000:]
+    failure = latest.get("failure_point") or "（暂无执行记录或未记录失败原因）"
+    return f"""你是资深 Playwright UI 自动化测试工程师。请通过 Insight-AITest 平台 MCP 服务，修复用例 {case_id} 的现有脚本并重新入库。
+
+【MCP 接入】
+- 服务地址：{_mcp_url()}（Streamable HTTP）
+- 请求头：Authorization: Bearer {token or "<从平台生成的 Bearer Token>"}
+- 可用工具：ui.run.latest / ui.contract.get / ui.case.get / ui.example.get / ui.script.validate / ui.script.dry_run / ui.script.submit
+- Token 只在本会话使用；不要写入脚本、不要提交到仓库。
+
+【用例】
+- 标题：{info.get("title") or ""}
+- case_rev：{info.get("case_rev") or ""}（入库时原样传回）
+- 脚本版本：{(info.get("script") or {}).get("version")}
+
+【最近一次执行】
+- 状态：{latest.get("status") or "无记录"}
+- 失败原因：{failure}
+- 日志尾部：
+{log_tail or "（无）"}
+
+【修复要求】
+1. 先调用 ui.run.latest(case_id={case_id}) 复核失败现场；再调用 ui.contract.get 与 ui.case.get 获取最新规则与用例快照。
+2. 以现有脚本为基线做最小修改，不要重写整个用例、不要改动与失败无关的步骤。
+3. 不允许为了通过而删除断言、放宽断言或注释掉步骤；确属用例本身问题时在最终回报中说明。
+4. 保持日志规范：每个 test 函数至少 3 条 print，[步骤] 开头，断言前打印 [断言] 实际值与预期值。
+5. 修改后依次调用 ui.script.validate → ui.script.dry_run → ui.script.submit，全部 ok 才算完成。
+6. 同一错误码连续 3 次仍无法推进时停止并回报。
+
+【现有脚本】
+```python
+{script}
+```
+
+【最终回报】
+1. 根因 2. 改动点（文件+行为）3. 校验/试跑结果 4. 脚本版本 5. 未解决项与建议
+"""
+
+
 def _build_server() -> MCPServer:
     server = MCPServer(
         name="insight-aitest",
-        title="Insight-AITest UI 自动化脚本契约",
-        description=(
-            "UI 自动化脚本「本地编写 + 平台校验入库」服务。"
-            "务必按 contract.get → env.get → case.get → example.get → script.validate → "
-            "script.dry_run → script.submit 的顺序调用。"
-        ),
-        version="1.0.0",
+        title="Insight-AITest UI 自动化",
+        description="UI 自动化脚本「本地编写 + 平台校验入库」服务",
+        instructions=INSTRUCTIONS,
+        version="1.1.0",
     )
 
     @server.tool(
-        name="contract.get",
+        name="ui.contract.get",
+        title="读取编写契约",
         description=(
-            "【第一步】获取用例的编写契约：用例快照（含 case_rev）、现有脚本版本、当前环境摘要、"
-            "项目已有 pages/common 资产清单，以及文件规则/import 白名单/错误码。"
-            "开始写脚本前必须先调用，按 rules 编写。"
+            "读取用例编写契约：用例快照与 case_rev、现有脚本版本与源码、当前环境摘要、"
+            "项目 pages/common 资产清单、文件与 import 规则、硬编码/日志约束、错误码表，"
+            "以及本次应遵循的 workflow。契约是脚本编写的唯一事实来源。"
+            "副作用：把用例标记为「生成中」，用于平台进度展示，不影响已有校验结果。"
         ),
+        annotations=_WRITE,
     )
-    def contract_get(case_id: int) -> dict:
+    def contract_get(case_id: CaseId) -> ContractPayload:
         db, case, err = _case_or_none(case_id)
         if err:
-            return err
+            return _error(err)
         svc.mark_generating(db, case)
         env = resolve_current_env(db, int(case.project_id))
         payload = contract.contract_payload(case, env)
@@ -84,17 +249,20 @@ def _build_server() -> MCPServer:
         return payload
 
     @server.tool(
-        name="env.get",
+        name="ui.env.get",
+        title="读取环境与登录态",
         description=(
-            "【第二步】获取当前应用环境的详情与认证信息：base_url、entry_url、auth.mode、"
-            "header 名称/值，以及一次性 storageState 下载地址（5 分钟有效、只能下载一次）。"
-            "探索阶段用它给 Playwright MCP 注入登录态；脚本里不要写死 token。"
+            "读取用例所属环境的接入信息：base_url、entry_url、auth.mode、header 名/值，"
+            "以及一次性 storageState 下载地址（5 分钟内有效、单张票据只能下载一次）。"
+            "用于浏览器探索阶段注入登录态；凭证不要写入脚本或仓库。"
+            "副作用：每次调用重新准备登录态并签发新票据，可能触发真实登录。"
         ),
+        annotations=_ENV,
     )
-    async def env_get(case_id: int) -> dict:
+    async def env_get(case_id: CaseId) -> EnvPayload:
         db, case, err = _case_or_none(case_id)
         if err:
-            return err
+            return _error(err)
         payload = await asyncio.to_thread(svc.env_payload, db, case)
         base = _current_base.get()
         auth = payload.get("auth") or {}
@@ -104,36 +272,40 @@ def _build_server() -> MCPServer:
         return payload
 
     @server.tool(
-        name="case.get",
+        name="ui.case.get",
+        title="读取用例详情",
         description=(
-            "【第三步】获取用例详情（标题/前置/步骤/预期/端/参数），以及 case_rev 与 script.version —— "
-            "提交时分别作为 expect_case_rev / expect_script_version 原样传回。"
+            "读取用例详情：标题、前置、步骤、预期、端、参数定义，以及 case_rev 与 script.version。"
+            "后两者在入库时作为 expect_case_rev / expect_script_version 原样回传。"
         ),
+        annotations=_READ,
     )
-    def case_get(case_id: int) -> dict:
+    def case_get(case_id: CaseId) -> CasePayload:
         _, case, err = _case_or_none(case_id)
         if err:
-            return err
+            return _error(err)
         payload = svc.case_payload(case)
         payload["ok"] = True
         return payload
 
     @server.tool(
-        name="example.get",
+        name="ui.example.get",
+        title="读取项目经验范例",
         description=(
-            "【第四步】获取项目内可照抄的经验（只读，可多次调用）：硬规则 8 条、平台已验证的 UI 坑、"
-            "本项目错题库（失败+解决方案）、同目录已验证脚本的动作片段、已知 hash 路由、"
-            "pages/common 的类与方法签名、最小可运行骨架。"
-            "在 case.get 之后、开始浏览器探索之前调用，优先复用其中路由与定位写法，再补充探索差异。"
-            "输出已脱敏；无历史脚本时 examples 为空但 template 仍可用。"
+            "读取本项目可复用的经验包：硬规则、平台已验证的 UI 坑、项目错题库（失败+解决方案）、"
+            "同目录已验证脚本片段、已知 hash 路由、pages/common 的类与方法签名、最小可运行骨架。"
+            "输出已脱敏；无历史脚本时 examples 为空但 template 仍可用。只读，可多次调用。"
         ),
+        annotations=_READ,
     )
     def example_get(
-        case_id: int, max_examples: int = 3, include_assets: bool = True
-    ) -> dict:
+        case_id: CaseId,
+        max_examples: Annotated[int, Field(description="返回的脚本片段条数上限", ge=1, le=10)] = 3,
+        include_assets: Annotated[bool, Field(description="是否包含 pages/common 的签名索引")] = True,
+    ) -> ExamplePayload:
         db, case, err = _case_or_none(case_id)
         if err:
-            return err
+            return _error(err)
         payload = example_service.build_example_payload(
             case, db, max_examples=max_examples, include_assets=include_assets
         )
@@ -141,64 +313,74 @@ def _build_server() -> MCPServer:
         return payload
 
     @server.tool(
-        name="script.validate",
+        name="ui.script.validate",
+        title="校验脚本文件",
         description=(
-            "【校验】提交完整文件集合做 L1（AST/白名单/硬编码/token）+ L2（pytest --collect-only）校验。"
-            "files 为 [{path, content}]，path 只允许 case.py、pages/<name>.py、common/<name>.py。"
-            "通过后返回 source_hash（30 分钟内可用于 dry_run/submit）；失败返回 violations[].code 与 fix。"
+            "对一个用例的文件集合执行 L1 静态校验（AST、import 白名单、硬编码、凭证、执行日志）"
+            "与 L2 pytest --collect-only。成功返回 source_hash（30 分钟内有效，供试跑与入库引用）；"
+            "失败返回 isError=true 与 violations[]（每条含 code 与 fix）。"
+            "文件路径仅允许 case.py、pages/<name>.py、common/<name>.py，最多 20 个、单个不超过 512KB。"
         ),
+        annotations=_WRITE,
     )
-    async def script_validate(case_id: int, files: list[dict]) -> dict:
+    async def script_validate(case_id: CaseId, files: Files) -> ValidatePayload:
         db, case, err = _case_or_none(case_id)
         if err:
-            return err
-        return await asyncio.to_thread(svc.validate, db, case, files)
+            return _error(err)
+        result = await asyncio.to_thread(svc.validate, db, case, files)
+        return result if result.get("ok") else _error(result)
 
     @server.tool(
-        name="script.dry_run",
+        name="ui.script.dry_run",
+        title="平台试跑脚本",
         description=(
-            "【试跑】在平台 staging 目录用当前环境真实执行一次脚本（不污染正式资产、不写执行记录）。"
-            "前置条件：对同一 files 调用过 script.validate 且 source_hash 一致（30 分钟内）。"
-            "同一用例 60 秒内只允许一次。通过后 24 小时内可 submit。"
+            "在平台 staging 目录用当前环境真实执行一次脚本，不写入正式资产、不计入执行记录。"
+            "硬前置：同一 files 已通过 ui.script.validate 且 source_hash 未过期；"
+            "同一用例 60 秒内只允许一次，单次上限 240 秒。会占用该用例 15 分钟独占租约。"
+            "返回退出码、耗时、步骤日志尾部与截图；通过后 24 小时内可入库。"
         ),
+        annotations=_DRY_RUN,
     )
-    async def script_dry_run(case_id: int, files: list[dict], source_hash: str) -> dict:
+    async def script_dry_run(case_id: CaseId, files: Files, source_hash: SourceHash) -> DryRunPayload:
         db, case, err = _case_or_none(case_id)
         if err:
-            return err
+            return _error(err)
         owner = _owner()
         if not svc.acquire_lease(db, case, owner):
-            return svc.fail("BUSY", "该用例正被其他本地 Agent 操作，请稍后重试")
+            return _error(svc.fail("BUSY", "该用例正被其他本地 Agent 操作，请稍后重试"))
         try:
-            return await asyncio.to_thread(svc.dry_run, db, case, files, source_hash)
+            result = await asyncio.to_thread(svc.dry_run, db, case, files, source_hash)
+            return result if result.get("ok") else _error(result)
         finally:
             svc.release_lease(db, case)
 
     @server.tool(
-        name="script.submit",
+        name="ui.script.submit",
+        title="提交脚本入库",
         description=(
-            "【入库】把已通过 dry_run 的脚本写入平台：归档旧版本、版本号 +1、更新用例状态为已实现。"
-            "三守卫：files 的 source_hash、expect_case_rev（case.get 返回）、expect_script_version 必须与平台一致；"
-            "pages/common 覆盖需 force_assets=true（覆盖前自动备份）。成功后用户可在平台直接执行。"
+            "把已通过试跑的脚本写入平台：归档旧版本、版本号 +1、用例状态置为「已实现」。"
+            "硬前置：source_hash、expect_case_rev、expect_script_version 必须与平台一致；"
+            "覆盖 pages/common 需 force_assets=true（覆盖前自动备份）。写入不可回滚。"
         ),
+        annotations=_SUBMIT,
     )
     async def script_submit(
-        case_id: int,
-        files: list[dict],
-        source_hash: str,
-        expect_case_rev: str,
-        expect_script_version: int,
-        params_schema: list | None = None,
-        force_assets: bool = False,
-    ) -> dict:
+        case_id: CaseId,
+        files: Files,
+        source_hash: SourceHash,
+        expect_case_rev: Annotated[str, Field(description="ui.case.get 返回的 case_rev，原样回传用于乐观锁")],
+        expect_script_version: Annotated[int, Field(description="ui.case.get 返回的 script.version，整数")],
+        params_schema: Annotated[list | None, Field(description="可选用例参数定义；不传表示不修改")] = None,
+        force_assets: Annotated[bool, Field(description="是否允许覆盖已存在的 pages/common 资产")] = False,
+    ) -> SubmitPayload:
         db, case, err = _case_or_none(case_id)
         if err:
-            return err
+            return _error(err)
         owner = _owner()
         if not svc.acquire_lease(db, case, owner):
-            return svc.fail("BUSY", "该用例正被其他本地 Agent 操作，请稍后重试")
+            return _error(svc.fail("BUSY", "该用例正被其他本地 Agent 操作，请稍后重试"))
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 svc.submit,
                 db,
                 case,
@@ -209,8 +391,77 @@ def _build_server() -> MCPServer:
                 params_schema,
                 force_assets,
             )
+            return result if result.get("ok") else _error(result)
         finally:
             svc.release_lease(db, case)
+
+    @server.tool(
+        name="ui.run.latest",
+        title="读取最近执行结果",
+        description=(
+            "返回用例最近一次脚本执行（可用 run_id 指定）的状态、耗时、失败阶段、失败原因、"
+            "日志尾部、截图文件名、trace 路径，以及最近 N 次执行摘要。"
+            "无执行记录时返回 ok=true 且 run=null。只读。"
+        ),
+        annotations=_READ,
+    )
+    def run_latest(
+        case_id: CaseId,
+        run_id: Annotated[int | None, Field(description="指定历史执行 ID；不传取最近一次", ge=1)] = None,
+        history: Annotated[int, Field(description="返回的历史执行条数", ge=1, le=20)] = 5,
+    ) -> RunLatestPayload:
+        db, case, err = _case_or_none(case_id)
+        if err:
+            return _error(err)
+        return svc.latest_run_summary(db, case, run_id=run_id, history=history)
+
+    # ---- MCP prompts：把编写/修复文案交给客户端原生渲染，替代手工粘贴 ----
+
+    @server.prompt(
+        name="ui.create",
+        title="本地 Agent 编写脚本",
+        description="生成可直接交给本地 Agent 的编写指令；case_ids 为逗号分隔的用例 ID，token 为平台「本地 Agent 编写」生成的 Bearer Token。",
+    )
+    def ui_create_prompt(case_ids: str, token: str = "") -> list[dict]:
+        from insight_aitest.modules.ui.backend.automation.routes.authoring import build_prompt
+
+        ids = [int(x) for x in str(case_ids).replace(" ", "").split(",") if x.isdigit()]
+        if not ids:
+            raise ToolError("case_ids 至少包含一个数字用例 ID")
+        text = build_prompt(ids, token or "<从平台生成的 Bearer Token>", _mcp_url())
+        return [{"role": "user", "content": text}]
+
+    @server.prompt(
+        name="ui.fix",
+        title="本地 Agent 修复脚本",
+        description="基于现有脚本与最近一次执行失败生成修复指令；case_id 为用例 ID，token 为平台 Bearer Token。",
+    )
+    def ui_fix_prompt(case_id: str, token: str = "") -> list[dict]:
+        if not str(case_id).isdigit():
+            raise ToolError("case_id 必须是数字")
+        return [{"role": "user", "content": _fix_prompt_text(int(case_id), token)}]
+
+    # ---- MCP resources：静态规则与骨架，客户端可按 URI 直接读取 ----
+
+    @server.resource(
+        "insight://rules",
+        name="编写规则",
+        title="编写硬规则与错误码",
+        description="L1/L2 校验规则、import 白名单、日志格式要求、错误码与修复建议。",
+        mime_type="application/json",
+    )
+    def rules_resource() -> str:
+        return json.dumps(contract.contract_rules(), ensure_ascii=False)
+
+    @server.resource(
+        "insight://template",
+        name="最小骨架",
+        title="最小可运行脚本骨架",
+        description="包含 [步骤]/[断言] 日志的最小可运行 Playwright 脚本骨架。",
+        mime_type="text/x-python",
+    )
+    def template_resource() -> str:
+        return example_service.template()
 
     return server
 

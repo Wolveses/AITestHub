@@ -7,7 +7,7 @@
 校验分级：
 - L1：AST 解析 + 白名单 import + 危险调用 + 硬编码主机 + 源码内 token（毫秒级）；
 - L2：``pytest --collect-only``，提前暴露 import 失败 / fixture 缺失（秒级）；
-- L3：``script.dry_run`` 在 staging 目录真实执行（分钟级，由 authoring_service 负责）。
+- L3：``ui.script.dry_run`` 在 staging 目录真实执行（分钟级，由 authoring_service 负责）。
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ BANNED_CALLS = {"open", "eval", "exec", "compile", "__import__", "getattr", "set
 
 # 错误码 → 修复建议（原文回给本地 Agent，便于它自己闭环）
 ERROR_FIX = {
-    "SYNTAX": "修正语法错误后重新调用 script.validate",
+    "SYNTAX": "修正语法错误后重新调用 ui.script.validate",
     "NO_TEST_FUNC": "case.py 至少定义一个 def test_xxx(page): 测试函数",
     "ASYNC_NOT_ALLOWED": "使用 playwright 同步 API，删除 async/await",
     "FORBIDDEN_VISION": "删除 ai_assert/midscene 等视觉断言，改用 expect 断言",
@@ -79,10 +79,10 @@ ERROR_FIX = {
     "FIXTURE_MISS": "只使用平台提供的 page/params fixture，不要自定义 fixture",
     "HARDCODE_HOST": "站点地址统一用 base_url()，不要硬编码主机名/IP",
     "TOKEN_IN_SOURCE": "脚本内不要写死 token/Authorization，运行时平台自动注入登录态",
-    "HASH_MISMATCH": "提交的 files 与 source_hash 不一致；请用 script.validate 返回的最新 source_hash",
-    "VALIDATION_REQUIRED": "先调用 script.validate（必要时再 script.dry_run），再提交",
-    "STALE_CASE": "用例内容已被修改，请重新调用 case.get 获取最新 case_rev 后重新生成",
-    "SCRIPT_CONFLICT": "平台脚本版本已变化，请重新调用 case.get 获取最新 script_version",
+    "HASH_MISMATCH": "提交的 files 与 source_hash 不一致；请用 ui.script.validate 返回的最新 source_hash",
+    "VALIDATION_REQUIRED": "先调用 ui.script.validate（必要时再 ui.script.dry_run），再提交",
+    "STALE_CASE": "用例内容已被修改，请重新调用 ui.case.get 获取最新 case_rev 后重新生成",
+    "SCRIPT_CONFLICT": "平台脚本版本已变化，请重新调用 ui.case.get 获取最新 script_version",
     "ASSET_CONFLICT": "资产文件内容与平台不一致；确认覆盖后传 force_assets=true，或复用现有资产",
     "BUSY": "同一用例同时只允许一个本地 Agent 操作，请稍后重试",
     "CASE_NOT_FOUND": "检查 case_id 是否属于当前项目",
@@ -93,6 +93,39 @@ ERROR_FIX = {
     "TIMEOUT": "试跑超时，检查等待策略（expect 轮询）并缩短流程",
     "SELECTOR_NOT_FOUND": "定位器未命中，回到浏览器确认真实 accessible name / role",
     "SCRIPT_ERROR": "查看 log_tail 与失败截图，修正断言/定位后重新 dry_run",
+}
+
+# 失败码 → 建议的下一步工具（MCP 错误封套里的 required_next）
+FAIL_REQUIRED_NEXT = {
+    "HASH_MISMATCH": "ui.script.validate",
+    "VALIDATION_REQUIRED": "ui.script.validate",
+    "STALE_CASE": "ui.contract.get",
+    "SCRIPT_CONFLICT": "ui.case.get",
+    "ASSET_CONFLICT": "ui.script.submit",
+    "BUSY": None,
+    "PERMISSION_DENIED": None,
+    "ENV_NOT_CONFIGURED": None,
+    "ENV_NOT_ALLOWED": None,
+}
+
+# 不可重试：人工介入才能推进
+FATAL_CODES = {"PERMISSION_DENIED", "ENV_NOT_CONFIGURED", "ENV_NOT_ALLOWED", "CASE_NOT_FOUND"}
+
+# 编写流程（contract.get 返回给 Agent；工具描述里不写步骤，避免与新增业务串味）
+WORKFLOW_CREATE = {
+    "id": "ui.create@1",
+    "steps": [
+        {"tool": "ui.contract.get", "required": True, "gives": ["rules", "case.case_rev", "script.version"]},
+        {"tool": "ui.example.get", "required": False, "after": "ui.contract.get"},
+        {"tool": "ui.env.get", "required": False, "when": "需要浏览器探索或登录态"},
+        {"tool": "ui.case.get", "required": True},
+        {"tool": "ui.script.validate", "required": True, "on_fail": "按 violations[].fix 修正后重试本步"},
+        {"tool": "ui.script.dry_run", "required": True, "on_fail": "按 log_tail 修正后回到 ui.script.validate"},
+        {"tool": "ui.script.submit", "required": True},
+    ],
+    "resume": {"on_stale": "ui.contract.get", "on_conflict": "ui.script.validate"},
+    "stop_on": sorted(FATAL_CODES),
+    "max_retry_same_error": 3,
 }
 
 _IMPORT_FROM_ASSET = re.compile(r"^(?:from\s+(pages|common)\.([A-Za-z0-9_]+)\s+import|import\s+(pages|common)\.([A-Za-z0-9_]+))", re.M)
@@ -447,7 +480,6 @@ def contract_rules() -> dict:
             "allowed_roots": sorted(ALLOWED_IMPORTS) + [ALLOWED_ENV_PREFIX],
             "asset_import_style": "from pages.users_page import UsersPage / from common.ui import dialog_of",
         },
-        "flow": ["example.get", "script.validate", "script.dry_run", "script.submit"],
         "logs": {
             "min_per_test": MIN_LOGS_PER_TEST,
             "prefixes": ["[步骤]", "[操作]", "[输入]", "[选择]", "[勾选]", "[断言]", "[数据]", "[结果]"],
@@ -501,6 +533,7 @@ def contract_payload(case, env) -> dict:
         "env": _env_summary(env, case) if env is not None else None,
         "assets": asset_catalog(project_id),
         "rules": contract_rules(),
+        "workflow": WORKFLOW_CREATE,
     }
     return payload
 

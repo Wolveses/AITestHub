@@ -153,6 +153,11 @@ def _shrink(payload: dict) -> bool:
     return trimmed
 
 
+def template(site: str = "backend") -> str:
+    """对外暴露最小可运行骨架（供 MCP resources 使用）。"""
+    return _template(site)
+
+
 def build_example_payload(
     case, db, max_examples: int = MAX_EXAMPLES, include_assets: bool = True
 ) -> dict:
