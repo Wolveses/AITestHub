@@ -121,8 +121,9 @@ def test_x(page):
     assert "LOG_FORMAT_PREFIX" in codes
 
 
-def test_agent_first_contact_marks_generating(db, case):
+def test_agent_first_contact_marks_generating(monkeypatch, tmp_path, db, case):
     """Agent 首次调用 contract.get 后，用例进入「生成中」，且重复调用幂等。"""
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path / "ws")
     svc.mark_generating(db, case)
     assert db.get_authoring_state(case.id).stage == "generating"
     svc.mark_generating(db, case)
@@ -467,7 +468,12 @@ def test_prompts_and_resources_registered():
     from insight_aitest.modules.ui.backend.automation.mcp_server import get_mcp_server
 
     server = get_mcp_server()
-    assert [p.name for p in asyncio.run(server.list_prompts())] == ["ui.auto", "ui.create", "ui.fix"]
+    assert [p.name for p in asyncio.run(server.list_prompts())] == [
+        "ui.auto",
+        "ui.create",
+        "ui.fix",
+        "ui.regenerate",
+    ]
     assert [str(r.uri) for r in asyncio.run(server.list_resources())] == [
         "insight://rules",
         "insight://template",
@@ -516,11 +522,15 @@ def test_triage_create_when_no_script(case):
     assert "无可用脚本" in reason
 
 
-def test_triage_skip_cases(case):
+def test_triage_skip_and_regenerate_cases(case):
     _implemented(case)
-    assert svc.case_action(case, None) == ("skip", "无执行记录，视为通过")
-    assert svc.case_action(case, {"status": "passed"}) == ("skip", "最近执行通过")
+    # 已实现且无执行记录 / 最近执行通过 → 走 regenerate（不再 skip）
+    assert svc.case_action(case, None)[0] == "regenerate"
+    assert svc.case_action(case, {"status": "passed"})[0] == "regenerate"
+    # 执行中 / 活跃态才 skip
     assert svc.case_action(case, {"status": "running"})[0] == "skip"
+    case.status = CaseStatus.RUNNING
+    assert svc.case_action(case, {"status": "passed"})[0] == "skip"
 
 
 def test_triage_fix_when_last_run_failed(case):
@@ -539,19 +549,32 @@ def test_triage_summary_counts(db, case):
         project_id=1, kb_document_id=103, title="待修复", precondition="",
         steps=["a"], expected="b", site="frontend",
     )
+    running_id = db.create_case(
+        project_id=1, kb_document_id=104, title="执行中", precondition="",
+        steps=["a"], expected="b", site="frontend",
+    )
     passed_case = _implemented(db.get_case(passed_id))
     failed_case = _implemented(db.get_case(failed_id))
+    running_case = _implemented(db.get_case(running_id))
     case = db.get_case(case.id)  # 未实现 → create
 
-    runs = _FakeRunsDb({passed_id: {"status": "passed"}, failed_id: {"status": "failed", "error": "boom"}})
-    result = svc.triage_cases(runs, [case, passed_case, failed_case])
-    assert result["summary"] == {"create": 1, "fix": 1, "skip": 1}
+    runs = _FakeRunsDb(
+        {
+            passed_id: {"status": "passed"},
+            failed_id: {"status": "failed", "error": "boom"},
+            running_id: {"status": "running"},
+        }
+    )
+    result = svc.triage_cases(runs, [case, passed_case, failed_case, running_case])
+    assert result["summary"] == {"create": 1, "fix": 1, "regenerate": 1, "skip": 1}
     by_id = {item["case_id"]: item for item in result["items"]}
     assert by_id[int(case.id)]["action"] == "create"
-    assert by_id[passed_id]["action"] == "skip"
+    assert by_id[passed_id]["action"] == "regenerate"
+    assert by_id[passed_id]["next_tool"] == "ui.contract.get"
     assert by_id[failed_id]["action"] == "fix"
     assert by_id[failed_id]["next_tool"] == "ui.run.latest"
-    assert by_id[passed_id]["next_tool"] is None
+    assert by_id[running_id]["action"] == "skip"
+    assert by_id[running_id]["next_tool"] is None
 
 
 def test_fail_envelope_guides_next_tool():
@@ -818,7 +841,7 @@ def test_case_triage_reports_missing_and_next_tool(monkeypatch, db, mcp_srv):
         )
         for index in range(25)
     ]
-    for cid in ids[23:]:
+    for cid in ids[22:]:
         db.update_case(
             cid,
             status=CaseStatus.IMPLEMENTED,
@@ -828,19 +851,24 @@ def test_case_triage_reports_missing_and_next_tool(monkeypatch, db, mcp_srv):
     monkeypatch.setattr(
         db,
         "latest_script_runs",
-        lambda _ids: {ids[23]: {"status": "failed", "error": "SELECTOR_NOT_FOUND: 登录按钮"}},
+        lambda _ids: {
+            ids[22]: {"status": "running"},
+            ids[23]: {"status": "failed", "error": "SELECTOR_NOT_FOUND: 登录按钮"},
+            ids[24]: {"status": "passed"},
+        },
     )
 
     result = _call(mcp_srv.get_mcp_server(), "ui.case.triage", {"case_ids": ids + [999999]})
     assert result.is_error is False
     data = result.structured_content
     assert data["missing_case_ids"] == [999999]
-    assert data["summary"] == {"create": 23, "fix": 1, "skip": 1}
+    assert data["summary"] == {"create": 22, "fix": 1, "regenerate": 1, "skip": 1}
 
     text = result.content[0].text
     assert "→ ui.contract.get" in text
     assert "→ ui.run.latest" in text
-    assert f"- {ids[24]} skip（" in text
+    assert f"- {ids[22]} skip（" in text
+    assert f"- {ids[24]} regenerate → ui.contract.get（" in text
     assert "None" not in text
     item_lines = [
         line for line in text.splitlines() if line.startswith("- ") and "missing_case_ids:" not in line
@@ -868,7 +896,11 @@ def test_case_triage_dedup(db, mcp_srv):
 
 
 def test_workflow_contract_consistency():
-    for workflow in (contract.WORKFLOW_CREATE, contract.WORKFLOW_FIX):
+    for workflow in (
+        contract.WORKFLOW_CREATE,
+        contract.WORKFLOW_FIX,
+        contract.WORKFLOW_REGENERATE,
+    ):
         assert workflow["compatible"] == "additive"
         assert set(workflow["stop_on"]) == contract.SESSION_FATAL_CODES
         assert set(workflow["skip_case_on"]) == contract.CASE_FATAL_CODES
@@ -877,6 +909,15 @@ def test_workflow_contract_consistency():
         assert "ui.contract.get" in workflow["resume"]["on_stale"]
     assert "CASE_NOT_FOUND" not in contract.WORKFLOW_CREATE["stop_on"]
     assert len(contract.WORKFLOW_FIX["constraints"]) == 3
+
+    regenerate = contract.WORKFLOW_REGENERATE
+    assert regenerate["id"] == "ui.regenerate@1"
+    assert regenerate["steps"][0]["tool"] == "ui.contract.get"
+    case_get = next(step for step in regenerate["steps"] if step["tool"] == "ui.case.get")
+    assert case_get["required"] is True
+    required_tools = {step["tool"] for step in regenerate["steps"] if step.get("required")}
+    assert "ui.run.latest" not in required_tools
+    assert len(regenerate["constraints"]) == 5
 
 
 def test_tool_output_schemas_declare_stable_fields():
@@ -934,7 +975,7 @@ def test_rest_mode_validation_no_orphan_token(monkeypatch):
 
 def test_rest_auto_all_skip_no_token(monkeypatch, db, case):
     db.update_case(
-        case.id, status=CaseStatus.IMPLEMENTED, script_rel_path="scripts/1/case.py", script_version=1
+        case.id, status=CaseStatus.RUNNING, script_rel_path="scripts/1/case.py", script_version=1
     )
     routes = _rest_routes(monkeypatch, db)
 
@@ -948,6 +989,7 @@ def test_rest_auto_all_skip_no_token(monkeypatch, db, case):
     assert result["prompt"] is None
     assert result["token"] is None
     assert result["action_required"] == 0
+    assert result["summary"]["skip"] == 1
 
 
 def test_rest_create_and_fix_prompt(monkeypatch, db, case):
@@ -991,3 +1033,346 @@ def test_client_base_forwarded_and_origin():
 
     origin = _FakeRequest(headers={"origin": "http://192.168.1.20:3000"})
     assert _client_base(origin) == "http://192.168.1.20:8001"
+
+
+# ===== regenerate：分诊 / workflow / 会话记录（ui_generations）=====
+
+
+def test_triage_regenerate_mode(case):
+    _implemented(case)
+    assert svc.case_action(case, {"status": "passed"}, mode="regenerate")[0] == "regenerate"
+    assert svc.case_action(case, {"status": "failed", "error": "x"}, mode="regenerate")[0] == "regenerate"
+    assert svc.case_action(case, None, mode="regenerate")[0] == "regenerate"
+    assert svc.case_action(case, {"status": "running"}, mode="regenerate")[0] == "skip"
+
+    blank = SimpleNamespace(
+        id=99, project_id=1, status=CaseStatus.NOT_IMPLEMENTED, script_rel_path="", script_version=0
+    )
+    assert svc.case_action(blank, None, mode="regenerate")[0] == "create"
+
+    # 活跃态在 auto 下也硬跳过（修正「GENERATING+无脚本 → create」的抢写风险）
+    active = SimpleNamespace(
+        id=100, project_id=1, status=CaseStatus.GENERATING, script_rel_path="", script_version=0
+    )
+    assert svc.case_action(active, None)[0] == "skip"
+
+
+def test_triage_cases_regenerate_summary_and_mode_echo(case):
+    _implemented(case)
+    result = svc.triage_cases(_FakeRunsDb({int(case.id): {"status": "passed"}}), [case], mode="regenerate")
+    assert result["summary"] == {"create": 0, "fix": 0, "regenerate": 1, "skip": 0}
+    assert result["items"][0]["mode"] == "regenerate"
+    assert result["items"][0]["next_tool"] == "ui.contract.get"
+
+
+def test_case_intent_regenerate_and_scripted_skip(db, case):
+    implemented = _implemented(db.get_case(case.id))
+    # 有脚本且无失败记录：auto 也返回 regenerate（不再假装从零创建）
+    assert svc.case_intent(_FakeRunsDb({}), implemented) == "regenerate"
+    assert svc.case_intent(_FakeRunsDb({}), implemented, mode="regenerate") == "regenerate"
+    # 最近失败 → fix
+    failed = _FakeRunsDb({int(implemented.id): {"status": "failed", "error": "boom"}})
+    assert svc.case_intent(failed, implemented) == "fix"
+    # 无脚本 → create
+    assert svc.case_intent(_FakeRunsDb({}), case) == "create"
+
+
+def test_contract_payload_regenerate_workflow(case):
+    payload = contract.contract_payload(case, None, intent="regenerate")
+    assert payload["intent"] == "regenerate"
+    workflow = payload["workflow"]
+    assert workflow["id"] == "ui.regenerate@1"
+    required = {step["tool"] for step in workflow["steps"] if step.get("required")}
+    assert {"ui.contract.get", "ui.case.get", "ui.script.validate", "ui.script.dry_run", "ui.script.submit"} <= required
+    assert "ui.run.latest" not in required
+    assert len(workflow["constraints"]) == 5
+
+
+def _implemented_scripted(db, case, version: int = 1):
+    db.update_case(
+        case.id,
+        status=CaseStatus.IMPLEMENTED,
+        script_rel_path="scripts/1/case.py",
+        script_version=version,
+    )
+    return db.get_case(case.id)
+
+
+def test_local_agent_generation_session_lifecycle(monkeypatch, tmp_path, db, case):
+    from types import SimpleNamespace as NS
+
+    from insight_aitest.modules.ui.backend.automation import runner
+
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path / "ws")
+    monkeypatch.setattr(contract, "collect_only", lambda *a, **k: None)
+    scripted = _implemented_scripted(db, case)
+
+    gen_id = svc.mark_generating(db, scripted, mode="regenerate")
+    assert gen_id
+    gen = db.get_generation(gen_id)
+    assert gen.kind == "regenerate"
+    assert gen.attempt == 1
+    assert gen.model == "local_agent"
+    assert gen.status == "running"
+    assert gen.log_rel_path
+    assert gen.started_at is not None
+    assert db.count_generations(int(case.id)) == 1
+
+    files = _files()
+    assert svc.validate(db, scripted, files)["ok"]
+    gen = db.get_generation(gen_id)
+    assert gen.status == "running"
+    assert gen.error_message is None
+    assert gen.tool_calls >= 2
+
+    monkeypatch.setattr(
+        svc,
+        "resolve_current_env",
+        lambda *a, **k: NS(id=1, name="测试环境", base_url="http://127.0.0.1", allow_local_agent=1),
+    )
+    monkeypatch.setattr(
+        runner,
+        "run_script",
+        lambda *a, **k: {"status": "failed", "error_message": "SELECTOR_NOT_FOUND: 登录按钮", "duration_ms": 12},
+    )
+    svc._dry_run_last.pop(int(case.id), None)
+    failed = svc.dry_run(db, scripted, files, contract.source_hash(contract.normalize_files(files)[0]))
+    assert failed["ok"] is False
+    gen = db.get_generation(gen_id)
+    assert gen.status == "running"
+    assert gen.fix_rounds == 1
+    assert "SELECTOR_NOT_FOUND" in (gen.error_message or "")
+
+    # 直接推进到 DRY_RUN_OK，验证 submit 成功后会话收尾
+    digest = contract.source_hash(contract.normalize_files(files)[0])
+    db.upsert_authoring_state(
+        int(case.id), source_hash=digest, stage=AuthoringStage.DRY_RUN_OK, dry_run_at=datetime.now()
+    )
+    submitted = svc.submit(
+        db, db.get_case(case.id), files, digest, contract.case_rev(scripted), 1
+    )
+    assert submitted["ok"], submitted
+    gen = db.get_generation(gen_id)
+    assert gen.status == "success"
+    assert gen.finished_at is not None
+    assert gen.error_category is None and gen.error_message is None
+    assert db.get_authoring_state(int(case.id)).generation_id is None
+    # 下一次接入重新建行
+    nxt = svc.mark_generating(db, db.get_case(case.id))
+    assert nxt and nxt != gen_id
+
+
+def test_local_agent_generation_reuses_single_row(monkeypatch, tmp_path, db, case):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path / "ws")
+    first = svc.mark_generating(db, case)
+    second = svc.mark_generating(db, case)
+    assert first == second
+    assert db.count_generations(int(case.id)) == 1
+
+
+def test_local_agent_generation_stale_sweep(monkeypatch, tmp_path, db, case):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path / "ws")
+    gen_id = svc.mark_generating(db, case)
+    monkeypatch.setattr(svc, "GENERATION_TTL", timedelta(seconds=-1))
+    assert svc.sweep_stale_generation(db, case) is True
+    gen = db.get_generation(gen_id)
+    assert gen.status == "failed"
+    assert "超时" in (gen.error_message or "")
+    assert db.get_authoring_state(int(case.id)).generation_id is None
+
+
+def test_local_agent_generation_log_readable():
+    from insight_aitest.modules.ui.backend.automation.routes.cases import _format_generation_log
+
+    events = [
+        {"type": "session", "kind": "regenerate", "mode": "regenerate"},
+        {"type": "agent", "tool": "ui.case.get", "ok": True},
+        {"type": "validate", "status": "failed", "message": "LOG_TOO_FEW"},
+        {"type": "validate", "status": "passed", "message": "静态校验通过"},
+        {"type": "dry_run", "status": "failed", "duration_ms": 18, "message": "SELECTOR_NOT_FOUND"},
+        {"type": "submit", "status": "success", "script_version": 4},
+        {"type": "session_end", "status": "success", "message": "脚本已入库 v4"},
+    ]
+    text = "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\nnot-json-line"
+    out = _format_generation_log(text, 200_000)
+    assert "not-json-line" in out
+    assert "[会话] 本地 Agent 开始编写 · kind=regenerate mode=regenerate" in out
+    assert "[调用] ui.case.get" in out
+    assert "[校验] 失败：LOG_TOO_FEW" in out
+    assert "[校验] 通过：静态校验通过" in out
+    assert "[试跑] 失败（18ms）：SELECTOR_NOT_FOUND" in out
+    assert "[入库] 脚本已入库 v4" in out
+    assert "[会话结束] success：脚本已入库 v4" in out
+
+
+def test_local_agent_generation_screenshot_copied(monkeypatch, tmp_path, db, case):
+    from types import SimpleNamespace as NS
+
+    from insight_aitest.modules.ui.backend.automation import runner
+
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path / "ws")
+    monkeypatch.setattr(contract, "collect_only", lambda *a, **k: None)
+    monkeypatch.setattr(
+        svc,
+        "resolve_current_env",
+        lambda *a, **k: NS(id=1, name="测试环境", base_url="http://127.0.0.1", allow_local_agent=1),
+    )
+
+    def _fake_run(*_a, **kwargs):
+        run_dir = kwargs.get("run_dir")
+        if run_dir is not None:
+            (run_dir / "final.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        return {"status": "passed", "duration_ms": 5, "screenshots": ["final.png"]}
+
+    monkeypatch.setattr(runner, "run_script", _fake_run)
+    gen_id = svc.mark_generating(db, case)
+    files = _files()
+    assert svc.validate(db, case, files)["ok"]
+    svc._dry_run_last.pop(int(case.id), None)
+    result = svc.dry_run(db, case, files, contract.source_hash(contract.normalize_files(files)[0]))
+    assert result["ok"], result
+    assert paths.generation_shot(int(case.id), int(gen_id)).is_file()
+
+
+def test_rest_regenerate_mode_prompt(monkeypatch, db, case):
+    """重新生成与新建/修复共用同一套文案；已实现通过用例在 auto 下也分诊为 regenerate。"""
+    routes = _rest_routes(monkeypatch, db)
+    scripted = _implemented_scripted(db, case)
+    row = SimpleNamespace(id=9, expires_at=None)
+    monkeypatch.setattr(routes.mcp_tokens, "create_token", lambda *a, **k: ("ins_tok", row))
+
+    auto_result = asyncio.run(
+        routes.create_prompt(
+            _FakeRequest(), {"project_id": 1, "case_ids": [int(scripted.id)], "mode": "auto"}
+        )
+    )
+    assert auto_result["mode"] == "auto"
+    assert auto_result["action_required"] == 1
+    assert auto_result["summary"]["regenerate"] == 1
+    assert "ui.case.triage" in auto_result["prompt"]
+    assert "ui.contract.get" in auto_result["prompt"]
+
+    regen_result = asyncio.run(
+        routes.create_prompt(
+            _FakeRequest(), {"project_id": 1, "case_ids": [int(scripted.id)], "mode": "regenerate"}
+        )
+    )
+    assert regen_result["mode"] == "regenerate"
+    assert regen_result["action_required"] == 1
+    assert regen_result["summary"]["regenerate"] == 1
+    assert regen_result["prompt"] == auto_result["prompt"]
+    assert (
+        prompt_builder.render_regenerate_prompt([int(scripted.id)], "ins_tok", "http://x/mcp")
+        == prompt_builder.render_auto_prompt([int(scripted.id)], "ins_tok", "http://x/mcp")
+    )
+
+
+def test_rest_triage_mode_validation(monkeypatch, db, case):
+    from fastapi import HTTPException
+
+    routes = _rest_routes(monkeypatch, db)
+    with pytest.raises(HTTPException) as exc:
+        routes.triage(project_id=1, case_ids=str(case.id), mode="regen")
+    assert exc.value.status_code == 400
+
+    ok = routes.triage(project_id=1, case_ids=str(case.id), mode="regenerate")
+    assert ok["summary"]["regenerate"] == 0  # 用例没有脚本 → create
+    assert ok["items"][0]["mode"] == "regenerate"
+
+
+# ===== REST /cases：来源字段与 regenerate 分诊 =====
+
+
+def test_case_out_exposes_authoring_source(db, case):
+    """CaseDetailDrawer 的「本地 Agent 入库」徽标依赖 _case_out 返回 source。"""
+    from insight_aitest.modules.ui.backend.automation.models import CaseSource
+    from insight_aitest.modules.ui.backend.automation.routes import cases as case_routes
+
+    authored_at = datetime(2026, 11, 14, 10, 30, 0)
+    db.update_case(
+        case.id,
+        source=CaseSource.LOCAL_AGENT,
+        authoring_by="local_agent",
+        authoring_at=authored_at,
+    )
+    out = case_routes._case_out(db.get_case(case.id), db)
+    assert out["source"] == "local_agent"
+    assert out["authoring_by"] == "local_agent"
+    assert out["authoring_at"] == authored_at.isoformat()
+
+    # 未入库过的用例保持默认值，前端不会误显示徽标
+    fresh_id = db.create_case(
+        project_id=1,
+        kb_document_id=102,
+        title="新用例",
+        precondition="",
+        steps=[],
+        expected="",
+        site="frontend",
+    )
+    fresh = case_routes._case_out(db.get_case(fresh_id), db)
+    assert fresh["source"] == "ai"
+    assert fresh["authoring_by"] == ""
+    assert fresh["authoring_at"] is None
+
+
+def test_regenerate_without_script_returns_400(monkeypatch, db, case):
+    from fastapi import HTTPException
+
+    from insight_aitest.modules.ui.backend.automation.routes import cases as case_routes
+
+    def _unexpected(*_a, **_k):
+        raise AssertionError("无脚本时不应启动重新生成任务")
+
+    monkeypatch.setattr(case_routes, "start_job", _unexpected)
+    with pytest.raises(HTTPException) as exc:
+        case_routes.regenerate(int(case.id), db)
+    assert exc.value.status_code == 400
+    assert "该用例还没有脚本，无法重新生成，请先生成脚本" in str(exc.value.detail)
+
+
+def test_generate_upgrades_to_regenerate_when_script_exists(monkeypatch, db, case):
+    """AC-18：旧客户端仍打 /generate，已有脚本时按 regenerate 记账并如实回显。"""
+    from insight_aitest.modules.ui.backend.automation.routes import cases as case_routes
+
+    scripted = _implemented_scripted(db, case)
+    started: list[str] = []
+
+    monkeypatch.setattr(case_routes.concurrency, "acquire", lambda _pid: True)
+    monkeypatch.setattr(case_routes.concurrency, "release", lambda _pid: None)
+    monkeypatch.setattr(case_routes.concurrency, "set_progress", lambda *_a, **_k: None)
+    monkeypatch.setattr(case_routes, "start_job", lambda _cid, kind: started.append(kind))
+
+    result = case_routes.generate(int(scripted.id), db)
+    assert result["kind"] == "regenerate"
+    assert started == ["regenerate"]
+
+    # 无脚本时 /generate 仍是 generate，不做转换
+    plain = db.create_case(
+        project_id=1,
+        kb_document_id=103,
+        title="无脚本用例",
+        precondition="",
+        steps=[],
+        expected="",
+        site="frontend",
+    )
+    result = case_routes.generate(int(plain), db)
+    assert result["kind"] == "generate"
+    assert started == ["regenerate", "generate"]
+
+
+def test_cancel_closes_local_generation(monkeypatch, tmp_path, db, case):
+    from insight_aitest.modules.ui.backend.automation.routes import cases as case_routes
+
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path / "ws")
+    monkeypatch.setattr(case_routes, "cancel_job", lambda _case_id: False)
+    gen_id = svc.mark_generating(db, case)
+
+    result = case_routes.cancel_generate(int(case.id), db)
+    assert result["accepted"] is True
+    assert result.get("local_abandoned") is True
+    gen = db.get_generation(gen_id)
+    assert gen.status == "failed"
+    assert "用户已终止" in (gen.error_message or "")
+    assert db.get_authoring_state(int(case.id)).generation_id is None
