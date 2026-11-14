@@ -108,6 +108,12 @@ class LLMConfig:
     langfuse_secret_key: str = ""
     langfuse_host: str = "http://localhost:3000"
 
+    # ===== 非 Agent 平台 LLM 自动化辅助能力开关 =====
+    # 控制范围：UI 自动化 LLM 脚本生成/修复/重新生成、UI 视觉执行（Midscene）、
+    # API 资产 AI 整理（手动 & 导入自动触发）、AI 参与 API 用例生成、性能方案 AI 挑选接口。
+    # 不影响「测试 Agent」与 UI「本地 Agent」编码/执行能力。
+    ai_assist_enabled: bool = True
+
     @property
     def api_key_set(self) -> bool:
         return bool(self.llm_api_key)
@@ -166,6 +172,7 @@ _ENV_KEYS = {
     "langfuse_public_key": "LANGFUSE_PUBLIC_KEY",
     "langfuse_secret_key": "LANGFUSE_SECRET_KEY",
     "langfuse_host": "LANGFUSE_HOST",
+    "ai_assist_enabled": "INSIGHT_EYE_AI_ASSIST_ENABLED",
 }
 
 # 需要转 int 的字段
@@ -187,7 +194,13 @@ _INT_FIELDS = {
 _FLOAT_FIELDS = {"min_score", "semantic_breakpoint"}
 
 # 需要转 bool 的字段（"1"/"true"/"yes"/"on" → True，其余 False）
-_BOOL_FIELDS = {"rerank_enabled", "ocr_enabled", "vector_enabled", "langfuse_enabled"}
+_BOOL_FIELDS = {
+    "rerank_enabled",
+    "ocr_enabled",
+    "vector_enabled",
+    "langfuse_enabled",
+    "ai_assist_enabled",
+}
 
 
 def get_active_provider(cfg: LLMConfig) -> dict | None:
@@ -237,6 +250,8 @@ def load_config(config_file: str | None = None) -> LLMConfig:
     # 配置文件
     path = config_file or cfg.config_file
     path = os.path.expanduser(path)
+    if config_file:
+        cfg.config_file = path
     # 兼容旧文件名：llm_config.json 不存在时回退读 ai_config.json（上提前的文件名）
     if not config_file and not os.path.exists(path):
         legacy = os.path.join(os.path.dirname(path), "ai_config.json")

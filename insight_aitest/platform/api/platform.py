@@ -50,6 +50,13 @@ def build_platform_router() -> APIRouter:
     def health() -> dict[str, str]:
         return {"status": "healthy", "version": __version__}
 
+    @router.get("/capabilities")
+    def capabilities() -> dict[str, bool]:
+        """返回非敏感平台能力开关（供 UI / API / Performance 等模块读取）。"""
+        from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+        return {"ai_assist_enabled": is_ai_assist_enabled()}
+
     @router.get("/dashboard/summary")
     def dashboard_summary() -> dict[str, Any]:
         """跨模块聚合仪表盘：API/UI 执行结果 + 用例统计 + 性能会话。

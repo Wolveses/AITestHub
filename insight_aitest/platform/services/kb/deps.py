@@ -24,6 +24,11 @@ def get_llm_config() -> LLMConfig:
     return _llm_config
 
 
+def is_ai_assist_enabled() -> bool:
+    """检查非 Agent 平台 LLM 自动化辅助能力是否开启（实时读取当前配置）。"""
+    return bool(getattr(get_llm_config(), "ai_assist_enabled", True))
+
+
 def set_config_file(path: str | None) -> None:
     global _config_file
     _config_file = path

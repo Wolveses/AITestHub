@@ -98,6 +98,8 @@ class ConfigOut(BaseModel):
     langfuse_public_key: str = ""
     langfuse_secret_key_set: bool = False
     langfuse_host: str = "http://localhost:3000"
+    # 非 Agent 平台 LLM 自动化辅助能力开关
+    ai_assist_enabled: bool = True
     # 多 Provider
     providers: list[ProviderOut] = []
     active_provider_id: str = ""
@@ -133,6 +135,7 @@ class ConfigUpdate(BaseModel):
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
     langfuse_host: str | None = None
+    ai_assist_enabled: bool | None = None
 
 
 class LangfuseTestRequest(BaseModel):
@@ -206,6 +209,7 @@ def _to_config_out(cfg: AIConfig) -> ConfigOut:
         langfuse_public_key=getattr(cfg, "langfuse_public_key", "") or "",
         langfuse_secret_key_set=bool(getattr(cfg, "langfuse_secret_key", "")),
         langfuse_host=getattr(cfg, "langfuse_host", "http://localhost:3000") or "http://localhost:3000",
+        ai_assist_enabled=bool(getattr(cfg, "ai_assist_enabled", True)),
         providers=[_provider_to_out(p) for p in (cfg.providers or [])],
         active_provider_id=cfg.active_provider_id or "",
     )
@@ -256,6 +260,7 @@ def update_config(body: ConfigUpdate, cfg: AIConfig = Depends(get_config)) -> Co
         "langfuse_enabled",
         "langfuse_public_key",
         "langfuse_host",
+        "ai_assist_enabled",
     ):
         val = getattr(body, field)
         if val is not None:
