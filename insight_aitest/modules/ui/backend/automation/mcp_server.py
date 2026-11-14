@@ -6,7 +6,7 @@
 - ``ui.contract.get`` / ``ui.env.get`` / ``ui.case.get`` / ``ui.case.triage`` / ``ui.example.get``
   / ``ui.run.latest``
 - ``ui.script.validate`` / ``ui.script.dry_run`` / ``ui.script.submit``
-附：prompts ``ui.auto`` / ``ui.create`` / ``ui.fix``，
+附：prompts ``ui.auto`` / ``ui.create`` / ``ui.fix`` / ``ui.regenerate``，
 resources ``insight://rules`` / ``insight://template`` / ``insight://instructions``。
 """
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextvars import ContextVar
-from typing import Annotated
+from typing import Annotated, Literal
 
 from logzero import logger
 from mcp.server.mcpserver import MCPServer
@@ -192,13 +192,17 @@ INSTRUCTIONS = """Insight-AITest：UI 自动化脚本「本地编写 + 平台校
 - 浏览器前置：需要页面探索时使用本机 Playwright MCP + Chromium；未安装先自行启用（npx @playwright/mcp@latest、npx playwright install chromium）；站点地址与登录态从 ui.env.get 获取。
 - 分诊优先：批量任务先 ui.case.triage；返回 skip 的用例优先级最高，不调用 ui.contract.get 或任何写工具。单次 triage 最多 50 个 ID，超出分批。
 - 串行与流程：逐例串行，上一例 submit 完成或放弃后再开始下一例；单例失败不阻塞其他用例。以 ui.contract.get 返回的 intent 与 workflow 为准；ui.run.latest 返回 run=null 时按 ui.contract.get 的 intent 处理。
-- 标准路径：create = ui.contract.get → (ui.example.get?) → (ui.env.get?) → ui.script.validate → ui.script.dry_run → ui.script.submit；fix = ui.run.latest → ui.contract.get → ui.script.validate → ui.script.dry_run → ui.script.submit。ui.case.get 仅用于刷新快照或取脚本全文，case_rev 与 script.version 以 ui.contract.get 为准。
+- 标准路径：create = ui.contract.get → (ui.example.get?) → (ui.env.get?) → ui.script.validate → ui.script.dry_run → ui.script.submit；fix = ui.run.latest → ui.contract.get → ui.script.validate → ui.script.dry_run → ui.script.submit；regenerate = ui.contract.get → ui.case.get(include_script_content=true) → (ui.example.get?) → ui.script.validate → ui.script.dry_run → ui.script.submit。ui.case.get 仅用于刷新快照或取脚本全文，case_rev 与 script.version 以 ui.contract.get 为准。
+- 模式区分：create = 无脚本从零编写；fix = 以现有脚本为基线、从 ui.run.latest 的失败点做最小修复；regenerate = 已实现且最近执行通过（或无失败记录）的用例按最新平台规范整体重写。
+- 重新生成路径：ui.case.triage 返回 action=regenerate → ui.contract.get 返回 intent=regenerate 与 ui.regenerate@1 → ui.case.get(include_script_content=true) 读取现有脚本理解原业务逻辑 → (ui.example.get?) → ui.script.validate → ui.script.dry_run → ui.script.submit。
+- 重新生成约束：必须保持原用例的业务意图、关键步骤、断言强度与参数结构；不得减少覆盖点或放宽断言；允许重构资产与定位策略，不要做「最小补丁」；无脚本用例按 create 处理。
+- 生成记录：本地 Agent 的 generate/fix/regenerate 都会写入用例「生成记录」（工具调用次数、过程日志、终态截图、失败原因）；无需额外调用工具上报。
 - 规则优先级：ui.contract.get.rules > ui.example.get.lessons/known_traps > 通用经验；与页面实测冲突时以实测为准。
 - 修复约束：以现有脚本为基线最小修改，不改无关步骤，禁止为通过而删除或放宽断言。
 - 失败处理：isError=true 时先读 code / fix / required_next；同一错误码连续 3 次无进展就放弃该用例。收到 DRY_RUN_REQUIRED 时先 ui.script.dry_run，不要反复 validate。
 - 终止作用域：PERMISSION_DENIED / ENV_NOT_CONFIGURED / ENV_NOT_ALLOWED 立即停止整个批次；CASE_NOT_FOUND 跳过当前用例继续；ENV_INVALID 停止当前用例并回报，等待环境恢复。
 - 兜底：客户端未注入本说明时先读 insight://instructions；未展示 structuredContent 时读 insight://rules 与 insight://template，workflow 步骤以 ui.contract.get 的文本摘要为准，现有脚本用 ui.case.get(include_script_content=true)。
-- 回报：全部完成后逐用例汇报「结论（create/fix/skip）、改动点与脚本版本、validate/dry_run 结果、未解决项」。"""
+- 回报：全部完成后逐用例汇报「结论（create/fix/regenerate/skip）、改动点与脚本版本、validate/dry_run 结果、未解决项」。"""
 
 
 def _error(payload: dict) -> CallToolResult:
@@ -233,7 +237,7 @@ def _build_server() -> MCPServer:
         title="Insight-AITest UI 自动化",
         description="UI 自动化脚本「本地编写 + 平台校验入库」服务",
         instructions=INSTRUCTIONS,
-        version="1.3.0",
+        version="1.4.0",
     )
 
     @server.tool(
@@ -256,16 +260,25 @@ def _build_server() -> MCPServer:
             bool,
             Field(description="是否返回 pages/common 资产源码全文；默认 false 仅返回 path、sha256 与大小"),
         ] = False,
+        mode: Annotated[
+            Literal["auto", "regenerate"],
+            Field(
+                description=(
+                    "auto=无脚本→create、失败→fix、已实现且通过/无失败→regenerate；"
+                    "regenerate=已实现用例强制返回 ui.regenerate workflow（忽略最近失败）"
+                )
+            ),
+        ] = "auto",
     ) -> ContractPayload:
         db, case, err = _case_or_none(case_id)
         if err:
             return _error(err)
-        svc.mark_generating(db, case)
+        svc.mark_generating(db, case, mode=mode)
         env = resolve_current_env(db, int(case.project_id))
         payload = contract.contract_payload(
             case,
             env,
-            intent=svc.case_intent(db, case),
+            intent=svc.case_intent(db, case, mode=mode),
             include_assets_content=include_assets_content,
         )
         payload["ok"] = True
@@ -308,8 +321,10 @@ def _build_server() -> MCPServer:
             return _error(err)
         payload = await asyncio.to_thread(svc.env_payload, db, case)
         if not payload.get("ok"):
+            svc.note_tool(db, case, "ui.env.get", ok=False)
             # P0-1：环境未配置/未授权必须 isError=true，不能被 Agent 当成成功
             return _error(payload)
+        svc.note_tool(db, case, "ui.env.get")
         auth = payload.get("auth") or {}
         rel = auth.get("storage_state_url") or ""
         base = _current_base.get()
@@ -334,10 +349,11 @@ def _build_server() -> MCPServer:
             Field(description="是否返回现有脚本全文；默认 false，仅返回版本/路径/哈希元数据"),
         ] = False,
     ) -> CasePayload:
-        _, case, err = _case_or_none(case_id)
+        db, case, err = _case_or_none(case_id)
         if err:
             return _error(err)
         payload = svc.case_payload(case, include_script_content=include_script_content)
+        svc.note_tool(db, case, "ui.case.get")
         payload["ok"] = True
         return payload
 
@@ -346,7 +362,7 @@ def _build_server() -> MCPServer:
         title="用例分诊",
         description=(
             "批量判定每个用例本轮该做什么：create（无脚本）、fix（最近执行失败）、"
-            "skip（最近执行通过、执行中或无执行记录）。"
+            "regenerate（已实现且最近执行通过/无失败记录，或 mode=regenerate）、skip（正在生成/修复/执行中的活跃态）。"
             "返回每个用例的状态、case_rev、脚本版本、最近一次执行摘要，以及 action 与 next_tool；"
             "不属于当前项目或不存在、重复的 ID 会被去重并记入 missing_case_ids。"
             "只读，不写任何状态；skip 的用例不要调用其他工具或改动脚本。"
@@ -362,6 +378,15 @@ def _build_server() -> MCPServer:
                 max_length=50,
             ),
         ],
+        mode: Annotated[
+            Literal["auto", "regenerate"],
+            Field(
+                description=(
+                    "auto=按现状返回 create/fix/regenerate/skip（已实现且通过/无失败走 regenerate）；"
+                    "regenerate=已实现且未在执行中的用例一律返回 regenerate（忽略最近失败）"
+                )
+            ),
+        ] = "auto",
     ) -> TriagePayload:
         project_id = _project_id()
         db = _db()
@@ -379,7 +404,7 @@ def _build_server() -> MCPServer:
                 resolved.append(case)
         if not resolved:
             return _error(svc.fail("CASE_NOT_FOUND", "用例均不存在或不属于当前 Token 的项目"))
-        result = svc.triage_cases(db, resolved)
+        result = svc.triage_cases(db, resolved, mode=mode)
         result["ok"] = True
         result["missing_case_ids"] = missing
         summary = result.get("summary") or {}
@@ -418,6 +443,7 @@ def _build_server() -> MCPServer:
         payload = example_service.build_example_payload(
             case, db, max_examples=max_examples, include_assets=include_assets
         )
+        svc.note_tool(db, case, "ui.example.get")
         payload["ok"] = True
         lines = [
             f"【项目经验】hard_rules={len(payload.get('hard_rules') or [])} "
@@ -494,6 +520,8 @@ def _build_server() -> MCPServer:
             "覆盖 pages/common 需 force_assets=true（覆盖前自动备份）。写入不可回滚。"
             "默认路径为版本化新增并归档旧版；仅当 force_assets=true 时才替换已有项目资产。"
             "试跑未通过时返回 DRY_RUN_REQUIRED，应先 ui.script.dry_run。"
+            "提交成功后本次本地编写会话（generate/fix/regenerate）会写入用例「生成记录」，"
+            "含工具调用次数、过程日志与终态截图。"
         ),
         annotations=_SUBMIT,
     )
@@ -547,6 +575,7 @@ def _build_server() -> MCPServer:
         if err:
             return _error(err)
         payload = svc.latest_run_summary(db, case, run_id=run_id, history=history)
+        svc.note_tool(db, case, "ui.run.latest")
         payload["ok"] = True
         run = payload.get("run") or {}
         if not run:
@@ -567,17 +596,24 @@ def _build_server() -> MCPServer:
     @server.prompt(
         name="ui.auto",
         title="本地 Agent 自动分诊并处理",
-        description="先分诊再按 create/fix 处理；case_ids 为逗号分隔的用例 ID，token 可省略（客户端已认证时）。",
+        description="先分诊再按 create/fix/regenerate 处理；case_ids 为逗号分隔的用例 ID，token 可省略（客户端已认证时）。",
     )
     def ui_auto_prompt(
         case_ids: Annotated[str, Field(description="逗号分隔的用例 ID；至少一个数字 ID")],
         token: Annotated[str, Field(description="平台 Bearer Token；客户端已认证时可省略")] = "",
+        mode: Annotated[
+            Literal["auto", "regenerate"],
+            Field(description="auto=按分诊新建/修复；regenerate=按最新规范整体重写已实现用例"),
+        ] = "auto",
     ) -> list[dict]:
         ids = prompt_builder.parse_case_ids(case_ids)
         if not ids:
             raise ToolError("case_ids 至少包含一个数字用例 ID")
         return [
-            {"role": "user", "content": prompt_builder.render_auto_prompt(ids, token, _mcp_url())}
+            {
+                "role": "user",
+                "content": prompt_builder.render_auto_prompt(ids, token, _mcp_url(), mode=mode),
+            }
         ]
 
     @server.prompt(
@@ -612,6 +648,30 @@ def _build_server() -> MCPServer:
             raise ToolError(f"CASE_NOT_FOUND：用例 {case_id} 不存在或不属于当前 Token 的项目")
         return [
             {"role": "user", "content": prompt_builder.render_fix_prompt([int(case_id)], token, _mcp_url())}
+        ]
+
+    @server.prompt(
+        name="ui.regenerate",
+        title="本地 Agent 按最新规范重新生成脚本",
+        description="已实现用例按最新平台规范整体重写并重新入库；case_id 为用例 ID，token 可省略。",
+    )
+    def ui_regenerate_prompt(
+        case_id: Annotated[str, Field(description="用例 ID，必须是当前 Token 项目内、已有脚本的用例")],
+        token: Annotated[str, Field(description="平台 Bearer Token；客户端已认证时可省略")] = "",
+    ) -> list[dict]:
+        if not str(case_id).isdigit():
+            raise ToolError("case_id 必须是数字")
+        db = _db()
+        case = svc.resolve_case(db, int(case_id), _project_id())
+        if case is None:
+            raise ToolError(f"CASE_NOT_FOUND：用例 {case_id} 不存在或不属于当前 Token 的项目")
+        if not (case.script_rel_path and int(case.script_version or 0) > 0):
+            raise ToolError("REGENERATE_REQUIRES_SCRIPT：该用例还没有脚本，请使用 ui.create")
+        return [
+            {
+                "role": "user",
+                "content": prompt_builder.render_regenerate_prompt([int(case_id)], token, _mcp_url()),
+            }
         ]
 
     # ---- MCP resources：静态规则与骨架，客户端可按 URI 直接读取 ----

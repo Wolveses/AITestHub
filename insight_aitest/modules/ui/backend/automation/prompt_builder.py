@@ -43,7 +43,11 @@ def _id_lines(case_ids: Iterable[int]) -> list[str]:
     return lines
 
 
-def render_auto_prompt(case_ids: Iterable[int], token: str = "", mcp_url: str = "") -> str:
+def render_auto_prompt(
+    case_ids: Iterable[int], token: str = "", mcp_url: str = "", mode: str = "auto"
+) -> str:
+    """新建、修复、重新生成共用同一套本地 Agent 文案（由 ui.case.triage 自动分诊）。"""
+    del mode  # 统一文案：ui.case.triage 已把通过/无失败的已实现用例自动分诊为 regenerate
     ids = list(case_ids)
     lines = [
         "使用 Insight-AITest MCP 处理下列 UI 自动化用例：先 ui.case.triage；"
@@ -64,6 +68,11 @@ def render_create_prompt(case_ids: Iterable[int], token: str = "", mcp_url: str 
     lines += _access_lines(mcp_url=mcp_url, token=token)
     lines += _id_lines(ids)
     return "\n".join(lines)
+
+
+def render_regenerate_prompt(case_ids: Iterable[int], token: str = "", mcp_url: str = "") -> str:
+    """重新生成与新建/修复共用同一套文案（保留函数名兼容旧调用点）。"""
+    return render_auto_prompt(case_ids, token=token, mcp_url=mcp_url)
 
 
 def render_fix_prompt(case_ids: Iterable[int], token: str = "", mcp_url: str = "") -> str:

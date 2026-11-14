@@ -12,6 +12,7 @@ MCP 工具与 REST 接口共用本模块，保证两条入口行为完全一致�
 
 from __future__ import annotations
 
+import json
 import secrets
 import shutil
 import threading
@@ -28,6 +29,9 @@ from insight_aitest.modules.ui.backend.automation.models import (
     AuthoringStage,
     CaseSource,
     CaseStatus,
+    ErrorCategory,
+    GenerationKind,
+    GenerationStatus,
 )
 
 LEASE_MINUTES = 15
@@ -35,6 +39,11 @@ VALIDATED_TTL = timedelta(minutes=30)
 DRY_RUN_TTL = timedelta(hours=24)
 DRY_RUN_COOLDOWN_SEC = 60
 DRY_RUN_TIMEOUT_SEC = 240
+
+# 本地 Agent 编写会话（一次 contract.get → submit/超时/终止 = 一条 ui_generations）
+LOCAL_AGENT_MODEL = "local_agent"
+GENERATION_TTL = timedelta(hours=6)
+_ACTIVE_CASE_STATUSES = (CaseStatus.GENERATING, CaseStatus.FIXING, CaseStatus.RUNNING)
 
 _LEASE_LOCK = threading.Lock()
 _dry_run_last: dict[int, float] = {}
@@ -119,43 +128,79 @@ def case_payload(case, include_script_content: bool = True) -> dict:
     }
 
 
-# ===== 分诊（统一入口：create / fix / skip）=====
+# ===== 分诊（统一入口：create / fix / regenerate / skip）=====
 
 TRIAGE_CREATE = "create"
 TRIAGE_FIX = "fix"
+TRIAGE_REGENERATE = "regenerate"
 TRIAGE_SKIP = "skip"
+TRIAGE_MODES = ("auto", "regenerate")
 
-_NEXT_TOOL_BY_ACTION = {TRIAGE_CREATE: "ui.contract.get", TRIAGE_FIX: "ui.run.latest", TRIAGE_SKIP: None}
+_NEXT_TOOL_BY_ACTION = {
+    TRIAGE_CREATE: "ui.contract.get",
+    TRIAGE_FIX: "ui.run.latest",
+    TRIAGE_REGENERATE: "ui.contract.get",
+    TRIAGE_SKIP: None,
+}
 
 
-def case_action(case, last_run: dict | None) -> tuple[str, str]:
+def _has_script(case) -> bool:
+    return bool(getattr(case, "script_rel_path", "")) and int(
+        getattr(case, "script_version", 0) or 0
+    ) > 0
+
+
+def case_action(case, last_run: dict | None, mode: str = "auto") -> tuple[str, str]:
     """判定用例本轮该做什么，以及原因。
 
-    规则：无脚本 → create；最近执行通过/执行中/无记录 → skip；最近执行失败 → fix。
+    auto：无脚本 → create；最近执行失败 → fix；已实现且最近通过/无失败记录 → regenerate；
+    活跃态（generating/fixing/running）→ skip，避免与平台任务抢写。
+    regenerate：有脚本且未执行中 → regenerate（即使最近失败也整体重写），无脚本 → create。
     """
-    has_script = bool(getattr(case, "script_rel_path", "")) and int(getattr(case, "script_version", 0) or 0) > 0
+    mode = mode if mode in TRIAGE_MODES else "auto"
+    has_script = _has_script(case)
+
+    # 1) 活跃态永远不碰（regenerate 也不例外）
+    if case.status in _ACTIVE_CASE_STATUSES:
+        return TRIAGE_SKIP, "用例正在生成/执行中，勿重复触发"
+
+    # 2) 显式重新生成模式
+    if mode == TRIAGE_REGENERATE:
+        if not has_script:
+            return TRIAGE_CREATE, "无可用脚本，按新建处理"
+        if str((last_run or {}).get("status") or "") == "running":
+            return TRIAGE_SKIP, "执行中，勿重复触发"
+        return TRIAGE_REGENERATE, "已实现，按最新平台规范重新生成"
+
+    # 3) auto：无脚本 → create；失败 → fix；已实现且通过/无失败记录 → regenerate
     if case.status != CaseStatus.IMPLEMENTED or not has_script:
         return TRIAGE_CREATE, "无可用脚本"
     if last_run is None:
-        return TRIAGE_SKIP, "无执行记录，视为通过"
+        return TRIAGE_REGENERATE, "已实现（无执行记录），按最新平台规范重新生成"
     status = str(last_run.get("status") or "")
-    if status == "passed":
-        return TRIAGE_SKIP, "最近执行通过"
     if status == "running":
         return TRIAGE_SKIP, "执行中，勿重复触发"
+    if status == "passed":
+        return TRIAGE_REGENERATE, "已实现且最近执行通过，按最新平台规范重新生成"
     error = str(last_run.get("error") or "").strip()
     reason = f"最近执行失败（{error[:80]}）" if error else f"最近执行失败（{status or 'unknown'}）"
     return TRIAGE_FIX, reason
 
 
-def triage_cases(db, cases) -> dict:
+def triage_cases(db, cases, mode: str = "auto") -> dict:
     """批量分诊：返回逐用例 action 与汇总计数。只读，不写任何状态。"""
+    mode = mode if mode in TRIAGE_MODES else "auto"
     runs = db.latest_script_runs([int(c.id) for c in cases])
     items: list[dict] = []
-    summary = {TRIAGE_CREATE: 0, TRIAGE_FIX: 0, TRIAGE_SKIP: 0}
+    summary = {
+        TRIAGE_CREATE: 0,
+        TRIAGE_FIX: 0,
+        TRIAGE_REGENERATE: 0,
+        TRIAGE_SKIP: 0,
+    }
     for case in cases:
         run = runs.get(int(case.id))
-        action, reason = case_action(case, run)
+        action, reason = case_action(case, run, mode)
         summary[action] += 1
         last_run = None
         if run is not None:
@@ -179,16 +224,267 @@ def triage_cases(db, cases) -> dict:
                 "action": action,
                 "reason": reason,
                 "next_tool": _NEXT_TOOL_BY_ACTION[action],
+                "mode": mode,
             }
         )
     return {"items": items, "summary": summary}
 
 
-def case_intent(db, case) -> str:
-    """contract.get 用：按当前状态决定返回新建还是修复流程（skip 仍给新建流程）。"""
+def case_intent(db, case, mode: str = "auto") -> str:
+    """contract.get 用：按当前状态与请求模式决定返回哪种 workflow。
+
+    - mode=regenerate 且有脚本 → regenerate；
+    - auto + 最近失败 → fix；
+    - 有脚本（通过/无记录）→ regenerate（不再假装从零创建）；
+    - 无脚本 → create。
+    """
+    has_script = _has_script(case)
+    if mode == "regenerate" and has_script:
+        return "regenerate"
     run = db.latest_script_runs([int(case.id)]).get(int(case.id))
-    action, _ = case_action(case, run)
-    return "fix" if action == TRIAGE_FIX else "create"
+    action, _ = case_action(case, run, "auto")
+    if action == TRIAGE_FIX:
+        return "fix"
+    if has_script:
+        return "regenerate"
+    return "create"
+
+
+# ===== 本地 Agent 编写会话 → ui_generations =====
+
+_GEN_GUARD = threading.Lock()
+_GEN_LOCKS: dict[int, threading.Lock] = {}
+
+_ENV_CODES = {"ENV_NOT_CONFIGURED", "ENV_NOT_ALLOWED", "ENV_INVALID", "PERMISSION_DENIED"}
+_CASE_CODES = {"CASE_NOT_FOUND", "REGENERATE_REQUIRES_SCRIPT"}
+
+
+def _gen_lock(case_id: int) -> threading.Lock:
+    with _GEN_GUARD:
+        return _GEN_LOCKS.setdefault(int(case_id), threading.Lock())
+
+
+def _category_for(code: str | None) -> str | None:
+    if not code:
+        return None
+    if code in _ENV_CODES:
+        return ErrorCategory.ENV
+    if code in _CASE_CODES:
+        return ErrorCategory.CASE
+    return ErrorCategory.SCRIPT
+
+
+def _bound_generation_id(db, case) -> int | None:
+    try:
+        state = db.get_authoring_state(int(case.id))
+    except Exception:  # noqa: BLE001 - 记账失败不能影响主流程
+        return None
+    if state is None or not state.generation_id:
+        return None
+    return int(state.generation_id)
+
+
+def _append_generation_log(db, case, event: dict) -> None:
+    """追加一条本地会话日志（写失败只告警，不影响校验/试跑/入库）。"""
+    state = db.get_authoring_state(int(case.id))
+    if state is None or not state.generation_id:
+        return
+    gen_id = int(state.generation_id)
+    payload = {**event, "ts": datetime.now().isoformat()}
+    try:
+        path = paths.generation_log(int(case.id), gen_id)  # 此处才 mkdir
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.warning("写入本地 Agent 生成日志失败：%s", exc)
+
+
+def _kind_for_session(case, run, mode: str) -> str:
+    if mode == "regenerate" and _has_script(case):
+        return GenerationKind.REGENERATE
+    if not _has_script(case):
+        return GenerationKind.GENERATE
+    action, _ = case_action(case, run, "auto")
+    if action == TRIAGE_FIX:
+        return GenerationKind.FIX
+    return GenerationKind.REGENERATE
+
+
+def _settle(db, case, gen, *, ok: bool, code: str | None = None, message: str = "", category: str | None = None) -> None:
+    """收尾生成记录（只对 running 行生效，幂等）。"""
+    if gen is None or gen.status != GenerationStatus.RUNNING:
+        return
+    if ok:
+        db.finish_generation(
+            int(gen.id), status=GenerationStatus.SUCCESS,
+            error_category=None, error_message=None,
+        )
+    else:
+        db.finish_generation(
+            int(gen.id), status=GenerationStatus.FAILED,
+            error_category=(category or _category_for(code)),
+            error_message=(message or "")[:4000],
+        )
+    _append_generation_log(
+        db,
+        case,
+        {
+            "type": "session_end",
+            "status": "success" if ok else "failed",
+            "message": message or ("脚本已入库" if ok else ""),
+        },
+    )
+
+
+def ensure_generation(db, case, mode: str = "auto") -> int | None:
+    """首次接入创建生成记录；同一会话内复用同一行。"""
+    mode = mode if mode in TRIAGE_MODES else "auto"
+    with _gen_lock(int(case.id)):
+        state = db.get_authoring_state(int(case.id))
+        gen = db.get_generation(int(state.generation_id)) if state and state.generation_id else None
+        if gen is not None and gen.status == GenerationStatus.RUNNING:
+            last = state.updated_at or gen.started_at
+            stale = bool(last and datetime.now() - last > GENERATION_TTL)
+            switch = mode == "regenerate" and gen.kind != GenerationKind.REGENERATE
+            if not stale and not switch:
+                if mode == "regenerate" and not state.authoring_mode:
+                    db.upsert_authoring_state(int(case.id), authoring_mode="regenerate")
+                return int(gen.id)
+            _settle(
+                db, case, gen, ok=False, category=None,
+                message=("本地 Agent 会话超时未完成" if stale else "会话模式切换：重新开始"),
+            )
+        run = db.latest_script_runs([int(case.id)]).get(int(case.id))
+        kind = _kind_for_session(case, run, mode)
+        gen_id = db.create_generation(
+            ui_case_id=int(case.id),
+            kind=kind,
+            attempt=db.count_generations(int(case.id)) + 1,
+            status=GenerationStatus.RUNNING,
+            model=LOCAL_AGENT_MODEL,
+        )
+        db.update_generation(
+            gen_id,
+            log_rel_path=paths.to_rel(paths.generation_log_path(int(case.id), int(gen_id))),
+        )
+        db.upsert_authoring_state(
+            int(case.id),
+            project_id=int(case.project_id),
+            generation_id=int(gen_id),
+            authoring_mode=("regenerate" if mode == "regenerate" else ""),
+            stage=AuthoringStage.GENERATING,
+            source_hash="",
+            validated_at=None,
+            dry_run_at=None,
+            last_error="",
+        )
+        _append_generation_log(
+            db, case,
+            {"type": "session", "kind": kind, "mode": mode, "message": "本地 Agent 开始编写"},
+        )
+        return int(gen_id)
+
+
+def note_tool(db, case, tool: str, ok: bool = True) -> None:
+    """累计一次 MCP 工具调用；无活跃会话时静默跳过。"""
+    gen_id = _bound_generation_id(db, case)
+    if not gen_id:
+        return
+    try:
+        with _gen_lock(int(case.id)):
+            db.bump_generation(gen_id, tool_calls=1)
+            db.upsert_authoring_state(int(case.id))  # touch updated_at
+            _append_generation_log(db, case, {"type": "agent", "tool": tool, "ok": ok})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("记录本地 Agent 工具调用失败：%s", exc)
+
+
+def _touch_error(db, case, code: str, message: str, *, fix_round: bool = False) -> None:
+    """记录一次失败（保持 running，供后续重试）；无会话时静默跳过。"""
+    gen_id = _bound_generation_id(db, case)
+    if not gen_id:
+        return
+    try:
+        with _gen_lock(int(case.id)):
+            deltas = {"tool_calls": 1}
+            if fix_round:
+                deltas["fix_rounds"] = 1
+            db.bump_generation(gen_id, **deltas)
+            db.update_generation(
+                gen_id,
+                error_category=_category_for(code),
+                error_message=(message or "")[:4000],
+            )
+            _append_generation_log(db, case, {"type": "error", "code": code, "message": message})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("记录本地 Agent 失败信息失败：%s", exc)
+
+
+def record_generation_failure(db, case, code: str, message: str) -> None:
+    """对外封装：记录可恢复失败（不提前收尾）。"""
+    _touch_error(db, case, code, message)
+
+
+def record_generation_success(db, case, message: str) -> None:
+    """对外封装：清空失败原因并把本次工具调用计入。"""
+    gen_id = _bound_generation_id(db, case)
+    if not gen_id:
+        return
+    db.bump_generation(gen_id, tool_calls=1)
+    db.update_generation(gen_id, error_category=None, error_message=None)
+    _append_generation_log(db, case, {"type": "submit", "status": "success", "message": message})
+
+
+def settle_generation(db, case, ok: bool, *, code: str | None = None, message: str = "", category: str | None = None) -> None:
+    """收尾当前绑定会话并清空绑定（幂等）。"""
+    gen_id = _bound_generation_id(db, case)
+    if not gen_id:
+        return
+    with _gen_lock(int(case.id)):
+        gen = db.get_generation(gen_id)
+        _settle(db, case, gen, ok=ok, code=code, message=message, category=category)
+        db.upsert_authoring_state(int(case.id), generation_id=None, authoring_mode="")
+
+
+def sweep_stale_generation(db, case) -> bool:
+    """惰性收敛超过 TTL 仍 running 的本地会话，返回是否发生收敛。"""
+    gen_id = _bound_generation_id(db, case)
+    if not gen_id:
+        return False
+    gen = db.get_generation(gen_id)
+    if gen is None or gen.status != GenerationStatus.RUNNING:
+        return False
+    state = db.get_authoring_state(int(case.id))
+    last = (state.updated_at if state is not None else None) or gen.started_at
+    if last is not None and datetime.now() - last <= GENERATION_TTL:
+        return False
+    with _gen_lock(int(case.id)):
+        gen = db.get_generation(gen_id)
+        if gen is None or gen.status != GenerationStatus.RUNNING:
+            return False
+        _settle(
+            db, case, gen, ok=False, category=None,
+            message="本地 Agent 会话超时未完成（>6 小时无进展）",
+        )
+        db.upsert_authoring_state(
+            int(case.id), generation_id=None, authoring_mode="", stage=AuthoringStage.NONE
+        )
+    return True
+
+
+def abandon_local_generation(db, case, message: str) -> bool:
+    """用户终止：关闭本地会话（保留 stage，防止继续 submit）。"""
+    gen_id = _bound_generation_id(db, case)
+    if not gen_id:
+        return False
+    with _gen_lock(int(case.id)):
+        gen = db.get_generation(gen_id)
+        if gen is None or gen.status != GenerationStatus.RUNNING:
+            db.upsert_authoring_state(int(case.id), generation_id=None, authoring_mode="")
+            return False
+        _settle(db, case, gen, ok=False, category=None, message=message or "用户已终止")
+        db.upsert_authoring_state(int(case.id), generation_id=None, authoring_mode="")
+    return True
 
 
 def _run_artifacts(run: dict, limit: int = 4000) -> tuple[str, list[str]]:
@@ -357,16 +653,27 @@ def release_lease(db, case) -> None:
 # ===== 校验 =====
 
 
-def mark_generating(db, case) -> None:
-    """Agent 首次拉取契约即视为开始生成；已有校验结果时不回退。"""
+def mark_generating(db, case, mode: str = "auto") -> int | None:
+    """Agent 首次拉取契约即视为开始生成；已有校验结果时不回退。
+
+    注意：必须在 ensure_generation 之前读取旧 stage，否则 ensure_generation 会把
+    stage 置为 GENERATING，导致首次接入事件被误判为「已接入」而漏写。
+    """
     try:
-        state = db.get_authoring_state(int(case.id))
-        if state is not None and state.stage in (
-            AuthoringStage.GENERATING,
-            AuthoringStage.VALIDATED,
-            AuthoringStage.DRY_RUN_OK,
-        ):
-            return
+        prev_state = db.get_authoring_state(int(case.id))
+        had_active_stage = bool(
+            prev_state is not None
+            and prev_state.stage
+            in (
+                AuthoringStage.GENERATING,
+                AuthoringStage.VALIDATED,
+                AuthoringStage.DRY_RUN_OK,
+            )
+        )
+        gen_id = ensure_generation(db, case, mode)
+        if had_active_stage:
+            note_tool(db, case, "ui.contract.get")
+            return gen_id
         db.upsert_authoring_state(
             int(case.id),
             project_id=int(case.project_id),
@@ -376,16 +683,29 @@ def mark_generating(db, case) -> None:
             dry_run_at=None,
             last_error="",
         )
-        record_event(db, case, "generating", "本地 Agent 已接入，开始生成脚本")
+        record_event(
+            db, case, "generating", "本地 Agent 已接入，开始生成脚本",
+            {"mode": mode, "generation_id": gen_id},
+        )
+        note_tool(db, case, "ui.contract.get")
+        return gen_id
     except Exception as exc:  # 状态写入失败不能阻断 Agent 拉取契约
         logger.warning("写入生成中状态失败：%s", exc)
+        return None
 
 
 def validate(db, case, files) -> dict:
+    gen_id = _bound_generation_id(db, case)
     normalized, problems = contract.normalize_files(files)
     if problems:
         first = problems[0]
         record_event(db, case, "validate_failed", first["message"], {"violations": problems})
+        _touch_error(db, case, first["code"], first["message"])
+        _append_generation_log(
+            db, case,
+            {"type": "validate", "status": "failed", "message": first["message"],
+             "violations": problems},
+        )
         return fail(first["code"], first["message"], violations=problems)
 
     result = contract.validate_source(normalized, int(case.project_id))
@@ -406,6 +726,14 @@ def validate(db, case, files) -> dict:
             f"静态校验通过（{result['file_count']} 个文件）",
             {"source_hash": result["source_hash"]},
         )
+        if gen_id:
+            db.bump_generation(gen_id, tool_calls=1)
+            db.update_generation(gen_id, error_category=None, error_message=None)
+        _append_generation_log(
+            db, case,
+            {"type": "validate", "status": "passed", "source_hash": result["source_hash"],
+             "message": f"静态校验通过（{result['file_count']} 个文件）"},
+        )
         return {
             "ok": True,
             "stage": AuthoringStage.VALIDATED,
@@ -414,23 +742,32 @@ def validate(db, case, files) -> dict:
             "next": "ui.script.dry_run",
         }
 
+    first_violation = result["violations"][0] if result["violations"] else {}
     db.upsert_authoring_state(
         int(case.id),
         project_id=int(case.project_id),
         source_hash=result["source_hash"],
         stage=AuthoringStage.NONE,
-        last_error=result["violations"][0]["message"] if result["violations"] else "",
+        last_error=first_violation.get("message", ""),
     )
     record_event(
         db,
         case,
         "validate_failed",
-        result["violations"][0]["message"] if result["violations"] else "校验失败",
+        first_violation.get("message") or "校验失败",
         {"violations": result["violations"]},
     )
+    if first_violation:
+        _touch_error(db, case, first_violation.get("code", ""), first_violation.get("message", ""))
+    _append_generation_log(
+        db, case,
+        {"type": "validate", "status": "failed", "source_hash": result["source_hash"],
+         "message": first_violation.get("message") or "校验失败",
+         "violations": result["violations"]},
+    )
     return fail(
-        result["violations"][0]["code"],
-        result["violations"][0]["message"],
+        first_violation.get("code", ""),
+        first_violation.get("message", ""),
         violations=result["violations"],
         stage=result["stage"],
     )
@@ -452,8 +789,39 @@ def _check_dry_run_ready(db, case, files_hash: str) -> dict | None:
     return None
 
 
+def _copy_final_shot(src: Path, case, gen_id: int | None) -> None:
+    """把首跑终态截图复制到生成记录旁；失败只告警，不阻断入库。"""
+    if not gen_id or not src.is_file():
+        return
+    try:
+        target = paths.generation_shot(int(case.id), int(gen_id))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
+    except OSError:
+        logger.warning("保存本地 Agent 终态截图失败")
+
+
+def _copy_final_shot_fallback(case, gen_id: int | None) -> None:
+    """submit 兜底：从 staging 里最近的 run/final.png 复制一次（dry_run 后可能被清理）。"""
+    if not gen_id:
+        return
+    target = paths.generation_shot(int(case.id), int(gen_id))
+    if target.is_file():
+        return
+    base = paths.staging_root(int(case.project_id), int(case.id)) / "agent"
+    try:
+        candidates = sorted(
+            base.glob("*/run/final.png"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+    except OSError:
+        return
+    if candidates:
+        _copy_final_shot(candidates[0], case, gen_id)
+
+
 def dry_run(db, case, files, expected_hash: str) -> dict:
     """在 staging 目录真实执行一次（不写 ui_runs、不污染正式资产）。"""
+    gen_id = _bound_generation_id(db, case)
     normalized, problems = contract.normalize_files(files)
     if problems:
         return fail(problems[0]["code"], problems[0]["message"], violations=problems)
@@ -537,6 +905,12 @@ def dry_run(db, case, files, expected_hash: str) -> dict:
             result.get("error_message") or "试跑失败",
             {"code": code, "source_hash": actual_hash},
         )
+        _touch_error(db, case, code, message, fix_round=True)
+        _append_generation_log(
+            db, case,
+            {"type": "dry_run", "status": "failed", "source_hash": actual_hash,
+             "duration_ms": result.get("duration_ms"), "message": message},
+        )
         return fail(
             code,
             result.get("error_message") or "试跑失败",
@@ -554,6 +928,16 @@ def dry_run(db, case, files, expected_hash: str) -> dict:
         last_error="",
     )
     record_event(db, case, "dry_run_passed", "试跑通过", {"source_hash": actual_hash})
+    if gen_id:
+        db.bump_generation(gen_id, tool_calls=1)
+        db.update_generation(gen_id, error_category=None, error_message=None)
+    _append_generation_log(
+        db, case,
+        {"type": "dry_run", "status": "passed", "source_hash": actual_hash,
+         "duration_ms": result.get("duration_ms"),
+         "screenshots": result.get("screenshots") or [], "message": "试跑通过"},
+    )
+    _copy_final_shot(run_dir / "final.png", case, gen_id)
     return {
         "ok": True,
         "stage": AuthoringStage.DRY_RUN_OK,
@@ -650,6 +1034,25 @@ def _write_assets(project_id: int, files: dict[str, str], force: bool) -> tuple[
     return written, None
 
 
+def _submit_failure(db, case, gen_id: int | None, result: dict) -> dict:
+    """submit 失败记账：fatal 收尾本会话，可恢复失败保持 running。"""
+    if result.get("ok") or not gen_id:
+        return result
+    state = db.get_authoring_state(int(case.id))
+    if state is None or int(state.generation_id or 0) != int(gen_id):
+        return result
+    code = str(result.get("code") or "")
+    message = str(result.get("message") or "")
+    if code in contract.FATAL_CODES:
+        with _gen_lock(int(case.id)):
+            gen = db.get_generation(int(gen_id))
+            _settle(db, case, gen, ok=False, code=code, message=message)
+            db.upsert_authoring_state(int(case.id), generation_id=None, authoring_mode="")
+    else:
+        _touch_error(db, case, code, message)
+    return result
+
+
 def submit(
     db,
     case,
@@ -660,38 +1063,54 @@ def submit(
     params_schema=None,
     force_assets: bool = False,
 ) -> dict:
+    gen_id = _bound_generation_id(db, case)
     normalized, problems = contract.normalize_files(files)
     if problems:
-        return fail(problems[0]["code"], problems[0]["message"], violations=problems)
+        return _submit_failure(
+            db, case, gen_id,
+            fail(problems[0]["code"], problems[0]["message"], violations=problems),
+        )
 
     actual_hash = contract.source_hash(normalized)
     if expected_hash and expected_hash != actual_hash:
-        return fail(
-            "HASH_MISMATCH",
-            f"source_hash 与 files 不一致：提交 {expected_hash[:12]}，实际 {actual_hash[:12]}",
+        return _submit_failure(
+            db, case, gen_id,
+            fail(
+                "HASH_MISMATCH",
+                f"source_hash 与 files 不一致：提交 {expected_hash[:12]}，实际 {actual_hash[:12]}",
+            ),
         )
 
     lint = contract.validate_source(normalized, int(case.project_id), run_l2=False)
     if not lint["ok"]:
         first = lint["violations"][0]
-        return fail(first["code"], first["message"], violations=lint["violations"])
+        return _submit_failure(
+            db, case, gen_id,
+            fail(first["code"], first["message"], violations=lint["violations"]),
+        )
 
     # 守卫 1：用例内容是否已被修改
     current_rev = contract.case_rev(case)
     if expect_case_rev and expect_case_rev != current_rev:
-        return fail(
-            "STALE_CASE",
-            f"用例已被修改（case_rev={current_rev}），请重新调用 ui.contract.get 获取最新 case_rev 后重新生成",
-            case_rev=current_rev,
+        return _submit_failure(
+            db, case, gen_id,
+            fail(
+                "STALE_CASE",
+                f"用例已被修改（case_rev={current_rev}），请重新调用 ui.contract.get 获取最新 case_rev 后重新生成",
+                case_rev=current_rev,
+            ),
         )
 
     # 守卫 2：平台脚本版本是否已变化
     current_version = int(case.script_version or 0)
     if int(expect_script_version) != current_version:
-        return fail(
-            "SCRIPT_CONFLICT",
-            f"平台脚本版本为 v{current_version}，与提交的 v{expect_script_version} 不一致",
-            script_version=current_version,
+        return _submit_failure(
+            db, case, gen_id,
+            fail(
+                "SCRIPT_CONFLICT",
+                f"平台脚本版本为 v{current_version}，与提交的 v{expect_script_version} 不一致",
+                script_version=current_version,
+            ),
         )
 
     # 守卫 3：试跑状态（状态机 + TTL）
@@ -704,13 +1123,18 @@ def submit(
         or state.dry_run_at is None
         or datetime.now() - state.dry_run_at > DRY_RUN_TTL
     ):
-        return fail(
-            "DRY_RUN_REQUIRED",
-            "当前 files 尚未通过 ui.script.dry_run（24 小时内有效），请先试跑",
+        return _submit_failure(
+            db, case, gen_id,
+            fail(
+                "DRY_RUN_REQUIRED",
+                "当前 files 尚未通过 ui.script.dry_run（24 小时内有效），请先试跑",
+            ),
         )
 
     if case.status in (CaseStatus.GENERATING, CaseStatus.FIXING, CaseStatus.RUNNING):
-        return fail("BUSY", "用例正在生成/执行中，请稍后再提交")
+        return _submit_failure(
+            db, case, gen_id, fail("BUSY", "用例正在生成/执行中，请稍后再提交")
+        )
 
     project_id = int(case.project_id)
     written, asset_error = _write_assets(project_id, normalized, force_assets)
@@ -718,7 +1142,7 @@ def submit(
         if force_assets:
             # 已经覆盖了部分文件但后续失败：如实回报已写入的资产，便于人工核对
             asset_error["assets_written"] = written
-        return asset_error
+        return _submit_failure(db, case, gen_id, asset_error)
 
     # 写脚本：旧版本先归档，再原子覆盖
     target = paths.case_script(project_id, int(case.id))
@@ -748,6 +1172,16 @@ def submit(
         fields["params_updated_at"] = datetime.now()
     db.update_case(int(case.id), **fields)
     _learn_from_submit(db, case, new_version)
+    if gen_id:
+        gen = db.get_generation(gen_id)
+        db.bump_generation(gen_id, tool_calls=1)
+        _append_generation_log(
+            db, case,
+            {"type": "submit", "status": "success", "script_version": new_version,
+             "source_hash": actual_hash},
+        )
+        _settle(db, case, gen, ok=True, message=f"脚本已入库 v{new_version}")
+        _copy_final_shot_fallback(case, gen_id)
     db.upsert_authoring_state(
         int(case.id),
         project_id=project_id,
@@ -758,6 +1192,8 @@ def submit(
         last_error="",
         lease_owner="",
         lease_until=None,
+        generation_id=None,
+        authoring_mode="",
     )
     record_event(
         db,

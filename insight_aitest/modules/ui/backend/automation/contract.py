@@ -26,7 +26,7 @@ from pathlib import Path
 from insight_aitest.modules.ui.backend.automation import paths
 from insight_aitest.modules.ui.backend.automation.env_service import site_url
 
-CONTRACT_VERSION = "1.1"
+CONTRACT_VERSION = "1.2"
 
 # 硬规则一句话摘要：contract.get 的文本摘要与会话指令共用，避免客户端无 structuredContent 时丢规则
 RULES_DIGEST = (
@@ -123,6 +123,7 @@ FAIL_REQUIRED_NEXT = {
     "SCRIPT_CONFLICT": "ui.contract.get",
     "DRY_RUN_REQUIRED": "ui.script.dry_run",
     "ASSET_CONFLICT": "ui.script.submit",
+    "REGENERATE_REQUIRES_SCRIPT": "ui.contract.get",
     "BUSY": None,
     "PERMISSION_DENIED": None,
     "ENV_NOT_CONFIGURED": None,
@@ -217,6 +218,63 @@ WORKFLOW_FIX = {
     "stop_on": sorted(SESSION_FATAL_CODES),
     "skip_case_on": sorted(CASE_FATAL_CODES),
     "max_retry_same_error": 3,
+}
+
+# 重新生成流程：已有脚本按最新平台规范整体重写（不是最小补丁）
+WORKFLOW_REGENERATE = {
+    "id": "ui.regenerate@1",
+    "compatible": "additive",
+    "steps": [
+        {
+            "tool": "ui.contract.get",
+            "required": True,
+            "gives": ["rules", "case.case_rev", "script.version", "script.content", "workflow"],
+        },
+        {
+            "tool": "ui.case.get",
+            "required": True,
+            "gives": ["case.steps", "case.expected", "case.params", "case.params_schema", "script.content"],
+            "note": "传 include_script_content=true 读取当前脚本全文；与用例步骤/预期/参数结合，先还原原业务逻辑",
+        },
+        {
+            "tool": "ui.example.get",
+            "required": False,
+            "when": "需要按最新规范取骨架、范例、已知坑与项目资产签名",
+        },
+        {
+            "tool": "ui.env.get",
+            "required": False,
+            "when": "需要浏览器探索或登录态",
+        },
+        {"tool": "ui.script.validate", "required": True, "on_fail": "按 violations[].fix 修正后重试本步"},
+        {"tool": "ui.script.dry_run", "required": True, "on_fail": "按 log_tail 修正后回到 ui.script.validate"},
+        {"tool": "ui.script.submit", "required": True},
+    ],
+    "resume": {
+        "on_stale": (
+            "从 ui.contract.get(mode=\"regenerate\") 重新开始 workflow（重新读取最新脚本后经 "
+            "ui.script.validate → ui.script.dry_run → ui.script.submit）"
+        ),
+        "on_conflict": (
+            "ui.contract.get(mode=\"regenerate\") → ui.script.validate → ui.script.dry_run → ui.script.submit"
+        ),
+    },
+    "constraints": [
+        "先读现有脚本与用例快照，理解原有业务步骤、断言与参数，再按最新平台规范整体重写",
+        "保持原用例的业务意图、关键步骤、断言强度与参数结构；不得减少覆盖点或放宽断言",
+        "允许重构（拆分/合并 pages/common、替换定位策略、调整等待方式）；这不是最小改动修复",
+        "不以 ui.run.latest 的失败为起点做局部补丁；最近执行结果仅作参考，不作为流程必选项",
+        "删除或重命名被其他用例引用的 pages/common 资产前，先确认无其他引用",
+    ],
+    "stop_on": sorted(SESSION_FATAL_CODES),
+    "skip_case_on": sorted(CASE_FATAL_CODES),
+    "max_retry_same_error": 3,
+}
+
+WORKFLOWS = {
+    "create": WORKFLOW_CREATE,
+    "fix": WORKFLOW_FIX,
+    "regenerate": WORKFLOW_REGENERATE,
 }
 
 _IMPORT_FROM_ASSET = re.compile(r"^(?:from\s+(pages|common)\.([A-Za-z0-9_]+)\s+import|import\s+(pages|common)\.([A-Za-z0-9_]+))", re.M)
@@ -620,9 +678,10 @@ def contract_payload(
 ) -> dict:
     """单用例的完整契约快照（contract.get 的返回体）。
 
-    intent=fix 时返回以现有脚本为基线的修复流程，否则返回新建流程。
-    资产默认只给元数据、规则默认不含错误码表，避免每用例重复传输大段内容。
+    intent ∈ create/fix/regenerate，分别返回新建 / 最小修复 / 按新规范整体重写流程；
+    未知 intent 归一化为 create。资产默认只给元数据、规则默认不含错误码表。
     """
+    intent = intent if intent in WORKFLOWS else "create"
     project_id = int(case.project_id)
     script = {
         "path": getattr(case, "script_rel_path", "") or "",
@@ -655,8 +714,8 @@ def contract_payload(
             include_error_codes=include_error_codes,
             include_hard_rules=False,
         ),
-        "intent": "fix" if intent == "fix" else "create",
-        "workflow": WORKFLOW_FIX if intent == "fix" else WORKFLOW_CREATE,
+        "intent": intent,
+        "workflow": WORKFLOWS[intent],
     }
     return payload
 
