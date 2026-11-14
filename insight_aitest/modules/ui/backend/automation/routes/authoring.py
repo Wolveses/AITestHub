@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from insight_aitest.modules.ui.backend.automation import authoring_service as svc
-from insight_aitest.modules.ui.backend.automation import mcp_tokens
+from insight_aitest.modules.ui.backend.automation import mcp_tokens, prompt_builder
 from insight_aitest.modules.ui.backend.automation.current_env import project_name
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 
@@ -41,96 +41,16 @@ def _client_base(request: Request) -> str:
     return base
 
 
-def build_prompt(case_ids: list[int], token: str, mcp_url: str) -> str:
-    listing = "\n".join(f"- case_id={cid}" for cid in case_ids)
-    first = case_ids[0] if case_ids else 0
-    return f"""你是资深 Playwright UI 自动化测试工程师。请通过 Insight-AITest 平台 MCP 服务，在本机为下列用例编写可运行脚本并提交入库。
-
-【MCP 接入】
-- 服务地址：{mcp_url}（Streamable HTTP）
-- 请求头：Authorization: Bearer {token}
-- 可用工具：ui.contract.get / ui.env.get / ui.case.get / ui.example.get / ui.run.latest / ui.script.validate / ui.script.dry_run / ui.script.submit
-- Token 30 天内有效，只在本会话使用；不要写入脚本、不要提交到仓库。
-
-【前置检查】
-1. 确认本机已启用 Playwright MCP；若未安装，请自行安装并启用（如 `npx @playwright/mcp@latest`）。
-2. 确认已安装浏览器（如 `npx playwright install chromium`）。
-
-【处理顺序（严格串行，禁止并行）】
-以下为默认流程；若 ui.contract.get 返回的 workflow 与本节不一致，以 workflow 为准。
-对每个 case_id 依次执行：
-1. 调用 ui.contract.get(case_id={first})，按返回的 rules 编写（文件路径、import 白名单、禁用项都在里面）。
-2. 调用 ui.env.get(case_id={first}) 获取 base_url / entry_url / 认证：
-   - auth.storage_state_url 非空时下载 JSON，作为 Playwright MCP 的 storageState 使用；链接 5 分钟内只能下载一次；
-   - auth.mode=header 时使用 auth.header_name / auth.header_value；
-   - 脚本内不要写死 token，运行期平台会自动注入登录态。
-3. 调用 ui.case.get(case_id={first})，记下 case_rev 与 script.version（提交时原样传回）。
-4. 调用 ui.example.get(case_id={first}) 获取项目既有经验：hard_rules、known_traps、lessons（踩过的坑）、
-   同目录动作片段、known_routes、pages/common 签名与最小骨架。先复用其中路由/定位/等待写法，
-   再打开浏览器只补差异；lessons 与本次实测冲突时以实测为准。
-5. 用 Playwright MCP 打开 entry_url，按用例步骤真实探索，确认真实定位器（优先 get_by_role + accessible name）。
-6. 编写文件集合：
-   - case.py 必须包含 def test_xxx(page):，使用同步风格；
-   - 站点地址统一用 base_url()（from insight_aitest.modules.ui.backend.automation.env import base_url）；
-   - 可新增或复用 pages/*.py、common/*.py；同名资产已存在时优先复用；
-   - 断言用 expect(...)，禁止固定 sleep、禁止写死域名/Token、禁止 async/await；
-   - 每个 test 函数至少 3 条 print 执行日志，必须以 [步骤] 开头，断言前打印 [断言] 实际值与预期值；
-     常用前缀：[步骤]/[操作]/[输入]/[选择]/[勾选]/[断言]/[数据]/[结果]。
-7. 调用 ui.script.validate(case_id, files)，必须 ok=true；失败按 violations[].code + fix 修正后重试。
-8. 调用 ui.script.dry_run(case_id, files, source_hash)，必须 ok=true；失败根据 log_tail 修正后重新 validate + dry_run。
-9. 调用 ui.script.submit(case_id, files, source_hash, expect_case_rev, expect_script_version)，ok=true 即入库成功。
-
-【失败与重试】
-- 工具返回 isError=true 时，先读 code / fix / required_next，再决定是否重试；
-- 同一错误码连续 3 次仍无法推进：停止并回报，不要继续硬试；
-- 遇到 ENV_NOT_CONFIGURED / ENV_NOT_ALLOWED / PERMISSION_DENIED / CASE_NOT_FOUND：立即停止并回报；
-- 不要调用不存在的工具，不要改动其他用例。
-
-【最终回报（六段式）】
-1. 用例：case_id + 标题
-2. 结论：已入库 / 未完成（原因）
-3. 脚本版本：vN
-4. 校验结果：validate 通过轮次与最终 source_hash
-5. 试跑结果：耗时、是否通过、关键日志
-6. 未解决项与建议
-
-【用例列表】
-{listing}
-"""
+def build_prompt(case_ids: list[int], token: str, mcp_url: str, mode: str = "create") -> str:
+    """兼容旧调用点：按 mode 委托 prompt_builder（文案只在 prompt_builder 维护）。"""
+    if mode == "fix":
+        return prompt_builder.render_fix_prompt(case_ids, token, mcp_url)
+    return prompt_builder.render_create_prompt(case_ids, token, mcp_url)
 
 
 def build_auto_prompt(cases: list, token: str, mcp_url: str) -> str:
-    """统一入口文案：不写死动作，交由 Agent 调 ui.case.triage 判定 create / fix / skip。"""
-    ids = [int(c.id) for c in cases]
-    listing = "\n".join(f"{int(c.id)} {c.title or ''}".rstrip() for c in cases)
-    return f"""你是资深 Playwright UI 自动化测试工程师。请通过 Insight-AITest 平台 MCP 服务处理下列用例。
-
-【MCP 接入】
-- 服务地址：{mcp_url}（Streamable HTTP）
-- 请求头：Authorization: Bearer {token}
-- Token 30 天内有效，只在本会话使用；不要写入脚本、不要提交到仓库。
-- 本机需已启用 Playwright MCP 与 Chromium，用于页面探索。
-
-【本轮用例（{len(ids)} 个）】
-{listing}
-
-【要求】
-1. 先调用 ui.case.triage(case_ids=[{",".join(str(i) for i in ids)}])，未拿到结果前不要开始处理任何用例。
-2. 逐例串行处理：上一个用例 ui.script.submit 完成后，再开始下一个；不要并行调用工具。
-3. 按 triage 返回的 action 进入对应流程：
-   - create：调用 ui.contract.get 获得 ui.create@1 流程，按其 steps 执行；
-   - fix：先调用 ui.run.latest 复核失败，再调用 ui.contract.get 获得 ui.fix@1 流程，以现有脚本为基线最小修改；
-   - skip：不要调用其他工具、不要改动脚本。
-   若 contract.get 返回的 intent 与 triage 不一致（例如执行状态已变化），以 contract.get 为准。
-4. 单用例失败不阻塞其他用例；同一错误码连续 3 次无进展就放弃该用例并继续下一个。
-5. 不要改动与失败无关的步骤；不要为了通过而删除或放宽断言。
-
-【最终回报】
-1. 处理总览（create / fix / skip 各几个）
-2. 每个已处理用例：根因、改动点（文件+行为）、validate / dry_run 结果、入库后的脚本版本
-3. 跳过的用例与原因
-4. 未解决项与建议
-"""
+    """兼容旧调用点：内部委托 prompt_builder。"""
+    return prompt_builder.render_auto_prompt([int(c.id) for c in cases], token, mcp_url)
 
 
 @router.post("/prompt")
@@ -143,6 +63,12 @@ async def create_prompt(request: Request, body: dict):
         raise HTTPException(400, "缺少 project_id")
     if not case_ids:
         raise HTTPException(400, "请至少勾选一个用例")
+    if mode not in ("auto", "create", "fix"):
+        raise HTTPException(400, "不支持的 mode，仅支持 auto / create / fix")
+
+    # 去重（保序），避免重复 triage / 重复事件；校验必须在建 Token 之前，避免孤儿 Token
+    seen: set[int] = set()
+    case_ids = [cid for cid in case_ids if not (cid in seen or seen.add(cid))]
 
     db = get_automation_db()
     valid_ids: list[int] = []
@@ -180,7 +106,10 @@ async def create_prompt(request: Request, body: dict):
         return result
 
     token, row = mcp_tokens.create_token(project_id, name=f"本地 Agent {datetime.now():%m-%d %H:%M}")
-    prompt = build_auto_prompt(cases, token, mcp_url) if mode == "auto" else build_prompt(valid_ids, token, mcp_url)
+    if mode == "auto":
+        prompt = build_auto_prompt(cases, token, mcp_url)
+    else:
+        prompt = build_prompt(valid_ids, token, mcp_url, mode=mode)
     for case in cases:
         svc.record_event(db, case, "prompt_ready", "已生成本地编写文案", {"token_id": row.id, "mode": mode})
     result.update(
