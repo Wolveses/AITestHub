@@ -290,8 +290,10 @@ def _compose_from_assets(body: FlowCaseIn, db: AssetDatabase) -> dict:
         raise HTTPException(400, "所选接口不属于同一项目，无法组合为同一用例")
     project_id = body.project_id if body.project_id is not None else next(iter(project_ids), None)
 
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
     llm = None
-    if body.ai_order:
+    if body.ai_order and is_ai_assist_enabled():
         try:
             from insight_aitest.modules.ai.backend.deps import get_llm
 
@@ -383,6 +385,13 @@ def delete_asset(asset_id: int, db: AssetDatabase = Depends(get_asset_db)) -> di
 @router.post("/{asset_id}/enhance")
 def enhance_asset(asset_id: int, db: AssetDatabase = Depends(get_asset_db)) -> dict:
     """按需调用一次大模型产出整理建议（不写库，前端确认后走 PATCH 应用）。"""
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if not is_ai_assist_enabled():
+        raise HTTPException(
+            403,
+            "系统设置已关闭「LLM 自动化辅助能力」，暂不可使用 AI 整理",
+        )
     asset = db.get(asset_id)
     if asset is None:
         raise HTTPException(404, "接口资产不存在")
@@ -621,8 +630,10 @@ def import_har_endpoint(
         raise HTTPException(500, f"导入接口库失败: {exc}") from exc
 
     # 复用 capture.py 的后台异步整理机制
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
     fingerprints = [item.fingerprint for item in body.items]
-    if body.auto_enhance and fingerprints:
+    if body.auto_enhance and fingerprints and is_ai_assist_enabled():
         import threading
         from insight_aitest.modules.ui.backend.automation.capture import _auto_enhance_assets
 
