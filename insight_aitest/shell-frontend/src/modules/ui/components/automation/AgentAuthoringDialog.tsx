@@ -8,6 +8,7 @@ import {
   fetchAuthoringTokens,
   requestAuthoringPrompt,
   revokeAuthoringToken,
+  type AuthoringMode,
   type AuthoringPrompt,
   type AuthoringStatusItem,
   type AuthoringToken,
@@ -29,6 +30,13 @@ function stageOf(item: AuthoringStatusItem, submitted: boolean): string {
   if (item.last_error) return 'failed';
   return '';
 }
+
+const ACTION_META: Record<string, { labelKey: string; fallback: string; color: string }> = {
+  create: { labelKey: 'ui.auto.triageCreate', fallback: '新建', color: 'var(--accent)' },
+  fix: { labelKey: 'ui.auto.triageFix', fallback: '修复', color: '#f97316' },
+  regenerate: { labelKey: 'ui.auto.triageRegenerate', fallback: '重新生成', color: 'var(--accent)' },
+  skip: { labelKey: 'ui.auto.triageSkip', fallback: '跳过', color: 'var(--text-muted)' },
+};
 
 function fallbackCopyText(text: string, container?: HTMLElement | null): boolean {
   const host = container ?? document.body;
@@ -78,13 +86,16 @@ export function AgentAuthoringDialog({
   onClose,
   projectId,
   caseIds,
+  initialMode = 'auto',
 }: {
   open: boolean;
   onClose: () => void;
   projectId: number | null;
   caseIds: number[];
+  initialMode?: 'auto' | 'regenerate';
 }) {
   const { t } = useTranslation();
+  const [mode, setMode] = useState<AuthoringMode>(initialMode);
   const [prompt, setPrompt] = useState<AuthoringPrompt | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -112,7 +123,12 @@ export function AgentAuthoringDialog({
     }
   }, [projectId]);
 
-  // 打开时生成文案（每次打开都生成新 Token，旧 Token 不会被覆盖）
+  // 弹窗关闭后不会卸载：每次打开按入口传入的模式重置，避免残留上次的「重新生成」
+  useEffect(() => {
+    if (open) setMode(initialMode ?? 'auto');
+  }, [open, initialMode]);
+
+  // 打开/切换模式时生成文案（每次生成新 Token，旧 Token 不会被覆盖）
   useEffect(() => {
     if (!open) return;
     const seq = ++seqRef.current;
@@ -124,7 +140,7 @@ export function AgentAuthoringDialog({
       try {
         if (projectId === null) throw new Error(t('ui.auto.selectProjectFirst', '请先选择项目'));
         if (caseIds.length === 0) throw new Error(t('ui.auto.selectCasesFirst', '请先勾选用例'));
-        const data = await requestAuthoringPrompt(projectId, caseIds);
+        const data = await requestAuthoringPrompt(projectId, caseIds, mode);
         if (seq !== seqRef.current) return;
         setPrompt(data);
         void refreshStatus();
@@ -135,7 +151,7 @@ export function AgentAuthoringDialog({
         if (seq === seqRef.current) setLoading(false);
       }
     })();
-  }, [open, projectId, caseIds, refreshStatus, refreshTokens, t]);
+  }, [open, projectId, caseIds, mode, refreshStatus, refreshTokens, t]);
 
   // 进度轮询（3 秒；SSE 为增强通道，轮询保证可用）
   useEffect(() => {
@@ -172,8 +188,8 @@ export function AgentAuthoringDialog({
       title={t('ui.auto.agentAuthoringTitle', '交给本地 Agent')}
     >
       <div ref={dialogBodyRef} style={{ padding: '4px 20px 18px', maxHeight: '76vh', overflowY: 'auto' }}>
-        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.7 }}>
-          {t('ui.auto.agentAuthoringDesc', '把下面的文案粘贴到你的本地 Agent 执行')}
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10, lineHeight: 1.7 }}>
+          {t('ui.auto.agentAuthoringDesc', '把下面的文案粘贴到你的本地 Agent 执行（新建、修复、重新生成共用同一套文案）')}
         </div>
 
         {loading && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('ui.auto.generatingPrompt', '正在生成文案…')}</div>}
@@ -181,6 +197,14 @@ export function AgentAuthoringDialog({
 
         {prompt && (
           <>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+              {t('ui.auto.triageSummaryLine', '新建 {{create}} · 修复 {{fix}} · 重新生成 {{regenerate}} · 跳过 {{skip}}', {
+                create: prompt.summary.create,
+                fix: prompt.summary.fix,
+                regenerate: prompt.summary.regenerate,
+                skip: prompt.summary.skip,
+              })}
+            </div>
             {prompt.prompt === null ? (
               <div
                 style={{
@@ -192,7 +216,9 @@ export function AgentAuthoringDialog({
                   background: 'var(--bg-base)',
                 }}
               >
-                {t('ui.auto.nothingToDo', '选中用例均已通过或正在执行，无需交给本地 Agent 处理。')}
+                <div>
+                  {t('ui.auto.nothingToDo', '选中用例均正在生成或执行中，暂无需处理。')}
+                </div>
               </div>
             ) : (
               <>
@@ -245,6 +271,9 @@ export function AgentAuthoringDialog({
               const meta = STAGE_META[stage] || STAGE_META[''];
               const last = item?.recent_events?.[item.recent_events.length - 1];
               const action = prompt?.cases.find((c) => c.case_id === cid)?.action;
+              const actionMeta = action ? ACTION_META[action] : undefined;
+              const actionLabel = actionMeta ? t(actionMeta.labelKey, actionMeta.fallback) : meta.label;
+              const actionColor = actionMeta ? actionMeta.color : meta.color;
               return (
                 <div
                   key={cid}
@@ -266,8 +295,8 @@ export function AgentAuthoringDialog({
                   <span style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={last?.message || item?.last_error || ''}>
                     {last?.message || item?.last_error || ''}
                   </span>
-                  <span style={{ color: action === 'skip' ? 'var(--text-muted)' : meta.color, fontWeight: 600, whiteSpace: 'nowrap' }}>
-                    {action === 'skip' ? t('ui.auto.triageSkip', '跳过') : meta.label}
+                  <span style={{ color: actionColor, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                    {actionLabel}
                   </span>
                 </div>
               );

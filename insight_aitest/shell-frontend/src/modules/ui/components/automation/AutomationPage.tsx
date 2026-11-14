@@ -56,7 +56,9 @@ export function AutomationPage() {
 
   const selectedIds = useMemo(() => Array.from(selected), [selected]);
   const allSelected = cases.length > 0 && cases.every((c) => selected.has(c.id));
-  const nothingToDo = !!triageSummary && triageSummary.create + triageSummary.fix === 0;
+  const nothingToDo =
+    !!triageSummary &&
+    triageSummary.create + triageSummary.fix + (triageSummary.regenerate || 0) === 0;
 
   const toggleSelect = (id: number) => {
     setSelected((prev) => {
@@ -278,19 +280,24 @@ export function AutomationPage() {
 
         <Btn
           onClick={() => setAgentOpen(true)}
-          disabled={projectId === null || selected.size === 0 || nothingToDo}
+          disabled={projectId === null || selected.size === 0}
           title={
             selected.size === 0
               ? t('ui.auto.selectCasesFirst', '请先勾选用例')
               : nothingToDo
-                ? t('ui.auto.nothingToDo', '选中用例均已通过或正在执行，无需处理')
+                ? t('ui.auto.nothingToDoHint', '选中用例均正在生成或执行中，暂无需处理')
                 : triageSummary
-                  ? t('ui.auto.triageHint', '编写 {{create}} · 修复 {{fix}} · 跳过 {{skip}}', {
-                      create: triageSummary.create,
-                      fix: triageSummary.fix,
-                      skip: triageSummary.skip,
-                    })
-                  : t('ui.auto.agentAuthoringHint', '生成文案并粘贴到本地 Agent，由它分诊后编写或修复')
+                  ? t(
+                      'ui.auto.triageHint',
+                      '编写 {{create}} · 修复 {{fix}} · 重新生成 {{regenerate}} · 跳过 {{skip}}',
+                      {
+                        create: triageSummary.create,
+                        fix: triageSummary.fix,
+                        regenerate: triageSummary.regenerate || 0,
+                        skip: triageSummary.skip,
+                      },
+                    )
+                  : t('ui.auto.agentAuthoringHint', '生成文案并粘贴到本地 Agent，由它分诊后编写、修复或重新生成')
           }
         >
           <Bot size={14} /> {t('ui.auto.agentAuthoring', '本地 Agent 生成/修复')}

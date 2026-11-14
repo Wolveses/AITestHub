@@ -13,7 +13,7 @@ type ScriptPreview = { content: string; version: number; pages: { name: string; 
 
 export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; onClose: () => void }) {
   const { t } = useTranslation();
-  const { getCase, getScript, listRuns, listGenerations, updateCase, generate, fix, cancelGenerate, run } = useAutomationStore();
+  const { getCase, getScript, listRuns, listGenerations, updateCase, generate, regenerate, fix, cancelGenerate, run } = useAutomationStore();
   const [detail, setDetail] = useState<AutomationCase | null>(null);
   const [script, setScript] = useState<ScriptPreview>({ content: '', version: 0, pages: [] });
   const [runs, setRuns] = useState<ScriptRun[]>([]);
@@ -204,62 +204,121 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
           boxShadow: '-8px 0 32px rgba(0,0,0,.35)',
         }}
       >
-        <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{detail.title}</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span>{detail.category_path || t('ui.auto.uncategorized', '未分类')}</span>
-              {detail.source_case_id ? <span>· 用例 #{detail.source_case_id}</span> : null}
-              <span
-                onClick={handleSiteClick}
-                title={
-                  detail.has_script || detail.status === 'implemented'
-                    ? t('ui.auto.siteLocked', '用例已生成脚本，端不可再切换')
-                    : t('ui.auto.switchSiteHint', '点击切换前台/后台')
-                }
+        <div
+          style={{
+            padding: '12px 16px',
+            borderBottom: '1px solid var(--border)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          {/* 第一行：标题、目录、ID、端与状态信息 + 关闭按钮 */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span
+                  title={detail.title}
+                  style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.4, wordBreak: 'break-word' }}
+                >
+                  {detail.title}
+                </span>
+                <StatusBadge status={detail.status} label={statusLabel(detail.status)} />
+                {detail.source === 'local_agent' && (
+                  <span
+                    title={t('ui.auto.sourceLocalAgentHint', '该脚本由本地 Agent 编写并提交入库')}
+                    style={{
+                      fontSize: 11,
+                      padding: '1px 6px',
+                      borderRadius: 9,
+                      border: '1px solid var(--border)',
+                      color: 'var(--accent)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {t('ui.auto.sourceLocalAgent', '本地 Agent 入库')}
+                  </span>
+                )}
+              </div>
+              <div
                 style={{
-                  padding: '1px 6px',
-                  borderRadius: 9,
-                  border: '1px solid var(--border)',
-                  color: detail.site === 'backend' ? 'var(--accent)' : 'var(--text-secondary)',
-                  cursor: active || detail.has_script || detail.status === 'implemented' ? 'not-allowed' : 'pointer',
-                  opacity: active || detail.has_script || detail.status === 'implemented' ? 0.5 : 1,
+                  fontSize: 11,
+                  color: 'var(--text-muted)',
+                  marginTop: 4,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  flexWrap: 'wrap',
                 }}
               >
-                {siteLabel(detail.site)}
-              </span>
+                <span>{detail.category_path || t('ui.auto.uncategorized', '未分类')}</span>
+                <span>·</span>
+                <span style={{ fontFamily: 'monospace' }}>ID #{detail.id}</span>
+                {detail.source_case_id ? (
+                  <>
+                    <span>·</span>
+                    <span>{t('ui.auto.sourceCaseId', '源用例 #{{id}}', { id: detail.source_case_id })}</span>
+                  </>
+                ) : null}
+                <span
+                  onClick={handleSiteClick}
+                  title={
+                    detail.has_script || detail.status === 'implemented'
+                      ? t('ui.auto.siteLocked', '用例已生成脚本，端不可再切换')
+                      : t('ui.auto.switchSiteHint', '点击切换前台/后台')
+                  }
+                  style={{
+                    padding: '1px 6px',
+                    borderRadius: 9,
+                    border: '1px solid var(--border)',
+                    color: detail.site === 'backend' ? 'var(--accent)' : 'var(--text-secondary)',
+                    cursor: active || detail.has_script || detail.status === 'implemented' ? 'not-allowed' : 'pointer',
+                    opacity: active || detail.has_script || detail.status === 'implemented' ? 0.5 : 1,
+                  }}
+                >
+                  {siteLabel(detail.site)}
+                </span>
+              </div>
             </div>
+            <Btn size="sm" variant="ghost" onClick={onClose} title={t('ui.auto.close', '关闭')}>
+              <X size={15} />
+            </Btn>
           </div>
-          <StatusBadge status={detail.status} label={statusLabel(detail.status)} />
-          <Btn
-            size="sm"
-            variant="primary"
-            disabled={active || submitting}
-            title={t('ui.auto.regenerateHint', '重新探索页面并生成脚本（会消耗模型额度）')}
-            onClick={() => act((id) => generate(id), t('ui.auto.generateQueued', '已提交生成任务'))}
-          >
-            <Sparkles size={12} /> {detail.has_script ? t('ui.auto.regenerate', '重新生成') : t('ui.auto.generateScript', '生成脚本')}
-          </Btn>
-          <Btn size="sm" disabled={active || submitting || detail.status !== 'implemented'} onClick={() => act(run, t('ui.auto.runQueued', '已提交执行任务'))}>
-            <Play size={12} /> {t('ui.auto.runScript', '执行')}
-          </Btn>
-          <Btn size="sm" disabled={active || submitting || detail.status !== 'implemented'} onClick={() => act(fix, t('ui.auto.fixQueued', '已提交修复任务'))}>
-            <Wrench size={12} /> {t('ui.auto.autoFix', '自动修复')}
-          </Btn>
-          {generating && (
+
+          {/* 第二行：工具栏操作按钮 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <Btn
               size="sm"
-              variant="ghost"
-              disabled={submitting}
-              title={t('ui.auto.cancelGenerateHint', '停止当前生成/修复任务（已产生的临时资产会被丢弃）')}
-              onClick={() => act(cancelGenerate, t('ui.auto.cancelGenerateQueued', '已请求终止，正在停止任务'))}
+              variant="primary"
+              disabled={active || submitting}
+              title={t('ui.auto.regenerateHint', '重新探索页面并生成脚本（会消耗模型额度）')}
+              onClick={() =>
+                act(
+                  detail.has_script ? regenerate : generate,
+                  t('ui.auto.generateQueued', '已提交生成任务'),
+                )
+              }
             >
-              <Square size={12} /> {t('ui.auto.cancelGenerate', '终止生成')}
+              <Sparkles size={12} /> {detail.has_script ? t('ui.auto.regenerate', '重新生成') : t('ui.auto.generateScript', '生成脚本')}
             </Btn>
-          )}
-          <Btn size="sm" variant="ghost" onClick={onClose} title={t('ui.auto.close', '关闭')}>
-            <X size={15} />
-          </Btn>
+            <Btn size="sm" disabled={active || submitting || detail.status !== 'implemented'} onClick={() => act(run, t('ui.auto.runQueued', '已提交执行任务'))}>
+              <Play size={12} /> {t('ui.auto.runScript', '执行')}
+            </Btn>
+            <Btn size="sm" disabled={active || submitting || detail.status !== 'implemented'} onClick={() => act(fix, t('ui.auto.fixQueued', '已提交修复任务'))}>
+              <Wrench size={12} /> {t('ui.auto.autoFix', '自动修复')}
+            </Btn>
+            {generating && (
+              <Btn
+                size="sm"
+                variant="ghost"
+                disabled={submitting}
+                title={t('ui.auto.cancelGenerateHint', '停止当前生成/修复任务（已产生的临时资产会被丢弃）')}
+                onClick={() => act(cancelGenerate, t('ui.auto.cancelGenerateQueued', '已请求终止，正在停止任务'))}
+              >
+                <Square size={12} /> {t('ui.auto.cancelGenerate', '终止生成')}
+              </Btn>
+            )}
+          </div>
         </div>
 
         {detail.progress && active && (
@@ -560,19 +619,44 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
               {gens.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('ui.auto.noGenerations', '暂无生成记录')}</div>}
               {gens.map((g) => (
                 <div key={g.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, fontSize: 12 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 600 }}>
-                      {g.kind === 'fix' ? t('ui.auto.kindFix', '自动修复') : t('ui.auto.kindGenerate', '生成脚本')}
+                      {g.kind === 'regenerate'
+                        ? t('ui.auto.kindRegenerate', '重新生成')
+                        : g.kind === 'fix'
+                          ? t('ui.auto.kindFix', '自动修复')
+                          : t('ui.auto.kindGenerate', '生成脚本')}
                     </span>
+                    <span style={{ color: 'var(--text-muted)' }}>
+                      {t('ui.auto.generationAttempt', '第 {{n}} 次', { n: g.attempt })}
+                    </span>
+                    {(g.origin === 'local_agent' || g.model === 'local_agent') && (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          padding: '0 5px',
+                          borderRadius: 8,
+                          border: '1px solid var(--border)',
+                          color: 'var(--accent)',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {t('ui.auto.localAgentTag', '本地 Agent')}
+                      </span>
+                    )}
                     <span style={{ color: g.status === 'success' ? 'var(--success)' : g.status === 'running' ? 'var(--info)' : 'var(--error)' }}>
                       {g.status === 'success' ? t('ui.auto.pass', '通过') : g.status === 'running' ? t('ui.auto.statusRunning', '执行中') : t('ui.auto.fail', '失败')}
                     </span>
                     <ErrorCategoryTag category={g.error_category} label={errorLabel(g.error_category)} />
                     <span style={{ color: 'var(--text-muted)' }}>{g.tool_calls} {t('ui.auto.toolCalls', '次工具调用')}</span>
+                    {g.fix_rounds > 0 && (
+                      <span style={{ color: 'var(--text-muted)' }}>
+                        {t('ui.auto.fixRounds', '修复')} {g.fix_rounds}
+                      </span>
+                    )}
                     {(g.corpus_chars > 0 || g.prompt_chars > 0) && (
                       <span style={{ color: 'var(--text-muted)' }}>
                         {t('ui.auto.corpusChars', '语料')} {g.corpus_chars} · {t('ui.auto.promptChars', '输入')} {g.prompt_chars} · {t('ui.auto.completionChars', '输出')} {g.completion_chars}
-                        {g.fix_rounds > 0 ? ` · ${t('ui.auto.fixRounds', '修复')} ${g.fix_rounds}` : ''}
                       </span>
                     )}
                     <span style={{ color: 'var(--text-muted)' }}>{g.started_at?.replace('T', ' ').slice(0, 19)}</span>
@@ -586,7 +670,7 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                         {t('ui.auto.failureReason', '失败原因')}
                       </button>
                     )}
-                    {g.status === 'success' && g.has_screenshot && (
+                    {g.has_screenshot && (
                       <button
                         type="button"
                         style={linkButtonStyle}
@@ -600,13 +684,15 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
                         {t('ui.auto.finalScreenshot', '终态截图')}
                       </button>
                     )}
-                    <button
-                      type="button"
-                      style={linkButtonStyle}
-                      onClick={() => setOpenGenLog(openGenLog === g.id ? null : g.id)}
-                    >
-                      {t('ui.auto.generationLog', '查看日志')}
-                    </button>
+                    {!!g.log_rel_path && (
+                      <button
+                        type="button"
+                        style={linkButtonStyle}
+                        onClick={() => setOpenGenLog(openGenLog === g.id ? null : g.id)}
+                      >
+                        {t('ui.auto.generationLog', '查看日志')}
+                      </button>
+                    )}
                   </div>
                   {g.error_message && openGenError === g.id && (
                     <pre style={{ ...preStyle, marginTop: 8 }}>{g.error_message}</pre>

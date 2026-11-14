@@ -22,6 +22,10 @@ export interface AutomationCase {
   status: string;
   script_version: number;
   has_script: boolean;
+  /** 脚本来处：ai（平台）/ local_agent（本地 Agent 提交） */
+  source?: string;
+  authoring_by?: string;
+  authoring_at?: string | null;
   last_error_category: string | null;
   last_error_message: string | null;
   last_run_id: number | null;
@@ -121,10 +125,16 @@ export interface GenerationRecord {
   error_message: string | null;
   tool_calls: number;
   model: string;
+  /** local_agent | platform（后端派生） */
+  origin?: 'local_agent' | 'platform';
   corpus_chars: number;
   prompt_chars: number;
   completion_chars: number;
   fix_rounds: number;
+  /** 过程日志相对路径；本地 Agent 会话建行时即写入 */
+  log_rel_path?: string;
+  has_log?: boolean;
+  duration_ms?: number | null;
   /** 生成成功时首跑的终态截图可预览 */
   has_screenshot: boolean;
   started_at: string | null;
@@ -158,6 +168,7 @@ interface AutomationState {
   ) => Promise<{ created: number; skipped: number; failed: unknown[] }>;
   generate: (caseId: number) => Promise<void>;
   fix: (caseId: number) => Promise<void>;
+  regenerate: (caseId: number) => Promise<void>;
   cancelGenerate: (caseId: number) => Promise<void>;
   run: (caseId: number) => Promise<void>;
   getCase: (caseId: number) => Promise<AutomationCase>;
@@ -298,6 +309,12 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
 
   fix: async (caseId) => {
     const r = await fetch(`${BASE}/cases/${caseId}/fix`, { method: 'POST' });
+    if (!r.ok) throw new Error(await parseError(r));
+    await get().loadCases();
+  },
+
+  regenerate: async (caseId) => {
+    const r = await fetch(`${BASE}/cases/${caseId}/regenerate`, { method: 'POST' });
     if (!r.ok) throw new Error(await parseError(r));
     await get().loadCases();
   },
@@ -460,6 +477,8 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
 
 // ===== 本地 Agent 编写（MCP）=====
 
+export type AuthoringMode = 'auto' | 'create' | 'fix' | 'regenerate';
+
 export interface AuthoringTriageItem {
   case_id: number;
   title: string;
@@ -475,14 +494,16 @@ export interface AuthoringTriageItem {
     duration_ms: number | null;
     error: string;
   } | null;
-  action: 'create' | 'fix' | 'skip';
+  action: 'create' | 'fix' | 'regenerate' | 'skip';
   reason: string;
   next_tool: string | null;
+  mode?: 'auto' | 'regenerate';
 }
 
 export interface AuthoringTriageSummary {
   create: number;
   fix: number;
+  regenerate: number;
   skip: number;
 }
 
@@ -492,7 +513,7 @@ export interface AuthoringPrompt {
   project_name: string;
   case_ids: number[];
   skipped_case_ids: number[];
-  mode: 'auto' | 'create' | 'fix';
+  mode: AuthoringMode;
   action_required: number;
   summary: AuthoringTriageSummary;
   cases: AuthoringTriageItem[];
@@ -558,21 +579,34 @@ export async function fetchAuthoringActive(projectId: number): Promise<Authoring
   return data.items || [];
 }
 
+const EMPTY_TRIAGE_SUMMARY: AuthoringTriageSummary = {
+  create: 0,
+  fix: 0,
+  regenerate: 0,
+  skip: 0,
+};
+
 export async function fetchAuthoringTriage(
   projectId: number,
-  caseIds: number[]
+  caseIds: number[],
+  mode: 'auto' | 'regenerate' = 'auto'
 ): Promise<{ summary: AuthoringTriageSummary; items: AuthoringTriageItem[] }> {
-  if (caseIds.length === 0) return { summary: { create: 0, fix: 0, skip: 0 }, items: [] };
-  const r = await fetch(`${BASE}/authoring/triage?project_id=${projectId}&case_ids=${caseIds.join(',')}`);
+  if (caseIds.length === 0) return { summary: { ...EMPTY_TRIAGE_SUMMARY }, items: [] };
+  const q = new URLSearchParams({
+    project_id: String(projectId),
+    case_ids: caseIds.join(','),
+    mode,
+  });
+  const r = await fetch(`${BASE}/authoring/triage?${q.toString()}`);
   if (!r.ok) throw new Error(await parseError(r));
   const data = await r.json();
-  return { summary: data.summary || { create: 0, fix: 0, skip: 0 }, items: data.items || [] };
+  return { summary: data.summary || { ...EMPTY_TRIAGE_SUMMARY }, items: data.items || [] };
 }
 
 export async function requestAuthoringPrompt(
   projectId: number,
   caseIds: number[],
-  mode: 'auto' | 'create' | 'fix' = 'auto'
+  mode: AuthoringMode = 'auto'
 ): Promise<AuthoringPrompt> {
   const r = await fetch(`${BASE}/authoring/prompt`, {
     method: 'POST',
