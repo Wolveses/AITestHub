@@ -130,6 +130,15 @@ def generate_script_from_plan(
     asset_db: AssetDatabase = Depends(get_asset_db),
 ) -> dict:
     """根据性能测试方案描述自动从当前项目 API 资产库匹配接口并编排生成 JMeter 脚本。"""
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if not is_ai_assist_enabled():
+        raise HTTPException(
+            403,
+            "系统设置已关闭「LLM 自动化辅助能力」，暂不可使用 AI 智能生成性能脚本；"
+            "请改用手动上传 JMX 脚本或前往系统设置开启",
+        )
+
     llm = None
     try:
         from insight_aitest.modules.ai.backend.deps import get_llm

@@ -103,8 +103,10 @@ class PerfAIService:
         reason = ""
         steps_config = []
 
-        # 3. 如果配置了 LLM，则由大模型智能挑选与编排
-        if llm is not None:
+        # 3. 如果配置了 LLM 且平台自动化辅助开关开启，则由大模型智能挑选与编排
+        from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+        if llm is not None and is_ai_assist_enabled():
             try:
                 payload = {
                     "plan_description": plan_description,
