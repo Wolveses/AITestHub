@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Sparkles, Loader2, Play, Check } from 'lucide-react';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 import { useServerPerfStore } from '../../store/serverPerfStore';
 
 interface PerfAIGenerateModalProps {
@@ -12,6 +13,7 @@ interface PerfAIGenerateModalProps {
 
 export function PerfAIGenerateModal({ open, onClose, projectId, onSuccess }: PerfAIGenerateModalProps) {
   const { loadScripts } = useServerPerfStore();
+  const aiAssistEnabled = useCapabilitiesStore((s) => s.aiAssistEnabled);
   const [planDesc, setPlanDesc] = useState('');
   const [concurrency, setConcurrency] = useState(10);
   const [rampUp, setRampUp] = useState(5);
@@ -272,18 +274,25 @@ export function PerfAIGenerateModal({ open, onClose, projectId, onSuccess }: Per
           </div>
 
           <div>
+            {!aiAssistEnabled && (
+              <div style={{ fontSize: 12, color: 'var(--error)', marginBottom: 8 }}>
+                系统设置已关闭「LLM 自动化辅助能力」，暂不可使用 AI 自动挑选接口生成脚本，请前往系统设置开启或手动上传 JMX。
+              </div>
+            )}
             <button
               onClick={handleGenerate}
-              disabled={generating}
+              disabled={generating || !aiAssistEnabled}
+              title={!aiAssistEnabled ? '系统设置已关闭 LLM 自动化辅助能力' : undefined}
               style={{
                 padding: '8px 16px',
                 borderRadius: 6,
                 border: 'none',
                 background: 'var(--accent)',
-                color: '#fff',
+                color: 'var(--bg-base)',
                 fontSize: 13,
                 fontWeight: 600,
-                cursor: generating ? 'not-allowed' : 'pointer',
+                cursor: generating || !aiAssistEnabled ? 'not-allowed' : 'pointer',
+                opacity: !aiAssistEnabled ? 0.5 : 1,
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 6,

@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import { toast } from 'sonner';
 import { Sparkles, Upload, Play, Check, FileCode, Loader2 } from 'lucide-react';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 import { useServerPerfStore } from '../../store/serverPerfStore';
 
 interface CreateScenarioModalProps {
@@ -14,9 +15,11 @@ type Mode = 'ai' | 'upload';
 
 export function CreateScenarioModal({ open, onClose, projectId, onSuccess }: CreateScenarioModalProps) {
   const { loadScripts } = useServerPerfStore();
+  const aiAssistEnabled = useCapabilitiesStore((s) => s.aiAssistEnabled);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [mode, setMode] = useState<Mode>('ai');
+  const effectiveMode: Mode = aiAssistEnabled ? mode : 'upload';
 
   // 基础表单
   const [scenarioName, setScenarioName] = useState('');
@@ -156,7 +159,7 @@ export function CreateScenarioModal({ open, onClose, projectId, onSuccess }: Cre
           project_id: projectId,
           name: scenarioName,
           description: scenarioDesc,
-          plan_description: mode === 'ai' ? planDesc : `手动上传脚本: ${uploadFileName}`,
+          plan_description: effectiveMode === 'ai' ? planDesc : `手动上传脚本: ${uploadFileName}`,
           config: generatedData?.config || { steps: generatedData?.steps || [] },
           jmx_content: jmxContent,
           asset_ids: generatedData?.selected_asset_ids || [],
@@ -238,22 +241,25 @@ export function CreateScenarioModal({ open, onClose, projectId, onSuccess }: Cre
           {/* 模式切换选项卡 */}
           <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid var(--border)', paddingBottom: 12 }}>
             <button
-              onClick={() => setMode('ai')}
+              onClick={() => aiAssistEnabled && setMode('ai')}
+              disabled={!aiAssistEnabled}
+              title={!aiAssistEnabled ? '系统设置已关闭「LLM 自动化辅助能力」，暂不可使用 AI 自动生成' : undefined}
               style={{
                 padding: '6px 14px',
                 borderRadius: 6,
                 border: 'none',
-                background: mode === 'ai' ? 'var(--accent)' : 'var(--bg-base)',
-                color: mode === 'ai' ? '#fff' : 'var(--text-secondary)',
+                background: effectiveMode === 'ai' ? 'var(--accent)' : 'var(--bg-base)',
+                color: effectiveMode === 'ai' ? 'var(--bg-base)' : 'var(--text-secondary)',
                 fontSize: 13,
                 fontWeight: 600,
-                cursor: 'pointer',
+                cursor: !aiAssistEnabled ? 'not-allowed' : 'pointer',
+                opacity: !aiAssistEnabled ? 0.5 : 1,
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 6,
               }}
             >
-              <Sparkles size={14} /> AI 填入测试方案自动生成
+              <Sparkles size={14} /> AI 填入测试方案自动生成{!aiAssistEnabled ? '（设置已关闭）' : ''}
             </button>
             <button
               onClick={() => setMode('upload')}
@@ -261,8 +267,8 @@ export function CreateScenarioModal({ open, onClose, projectId, onSuccess }: Cre
                 padding: '6px 14px',
                 borderRadius: 6,
                 border: 'none',
-                background: mode === 'upload' ? 'var(--accent)' : 'var(--bg-base)',
-                color: mode === 'upload' ? '#fff' : 'var(--text-secondary)',
+                background: effectiveMode === 'upload' ? 'var(--accent)' : 'var(--bg-base)',
+                color: effectiveMode === 'upload' ? 'var(--bg-base)' : 'var(--text-secondary)',
                 fontSize: 13,
                 fontWeight: 600,
                 cursor: 'pointer',
@@ -320,7 +326,7 @@ export function CreateScenarioModal({ open, onClose, projectId, onSuccess }: Cre
           </div>
 
           {/* 模式 A: AI 填入测试方案自动生成 */}
-          {mode === 'ai' && (
+          {effectiveMode === 'ai' && (
             <div
               style={{
                 padding: 16,
@@ -450,7 +456,7 @@ export function CreateScenarioModal({ open, onClose, projectId, onSuccess }: Cre
           )}
 
           {/* 模式 B: 手动上传 JMX 文件 */}
-          {mode === 'upload' && (
+          {effectiveMode === 'upload' && (
             <div
               style={{
                 padding: 24,
