@@ -612,6 +612,14 @@ export default {
       langfuseSecretKey: 'Secret Key',
       langfuseSecretKeyPlaceholder: 'sk-lf-...',
       openLangfuseConsole: '打开控制台 ↗',
+      // 平台 LLM 自动化辅助能力开关
+      aiAssistTitle: '平台 LLM 自动化辅助能力',
+      aiAssistEnabledTag: '· 已开启',
+      aiAssistDisabledTag: '· 已关闭',
+      aiAssistToggleLabel: '启用内置 LLM 自动化辅助（UI 脚本生成/视觉执行、API 整理、AI 参与 API 用例生成、性能 AI 选型）',
+      aiAssistScopeHint: '关闭后：以上模块将禁用内置大模型触发（其中多接口组装 API 用例自动退化为纯规则排序）；「测试 Agent」全部对话/技能与 UI「本地 Agent」编码及执行完全不受影响。',
+      aiAssistUpdatedOn: '已开启平台 LLM 自动化辅助能力',
+      aiAssistUpdatedOff: '已关闭平台 LLM 自动化辅助能力（「测试 Agent」与「本地 Agent」不受影响）',
     },
 
     // === AI 模块 ===

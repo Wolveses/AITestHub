@@ -611,6 +611,14 @@ export default {
       langfuseSecretKey: 'Secret Key',
       langfuseSecretKeyPlaceholder: 'sk-lf-...',
       openLangfuseConsole: 'Open Console ↗',
+      // Platform LLM automation assist toggle
+      aiAssistTitle: 'Platform LLM Automation Assist',
+      aiAssistEnabledTag: '· Enabled',
+      aiAssistDisabledTag: '· Disabled',
+      aiAssistToggleLabel: 'Enable built-in LLM automation assist (UI script gen/vision run, API asset enhance, AI API flow compose, Perf AI script)',
+      aiAssistScopeHint: 'When disabled, built-in LLM triggers across those modules are blocked (API flow composition falls back cleanly to rule-based ordering). Test Agent capabilities and UI Local Agent authoring/execution remain 100% unaffected.',
+      aiAssistUpdatedOn: 'Platform LLM automation assist enabled',
+      aiAssistUpdatedOff: 'Platform LLM automation assist disabled (Test Agent & Local Agent remain unaffected)',
     },
 
     // === AI module ===

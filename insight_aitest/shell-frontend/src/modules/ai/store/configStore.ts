@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 
 /** 后端 GET /config 返回的脱敏配置（spec §6.6）。 */
 export interface AIConfig {
@@ -30,6 +31,8 @@ export interface AIConfig {
   langfuse_public_key?: string;
   langfuse_secret_key_set?: boolean;
   langfuse_host?: string;
+  // 非 Agent 平台 LLM 自动化辅助能力开关
+  ai_assist_enabled?: boolean;
   // 多 Provider
   providers: ProviderOut[];
   active_provider_id: string;
@@ -63,6 +66,7 @@ export interface AIConfigUpdate {
   langfuse_public_key?: string;
   langfuse_secret_key?: string;
   langfuse_host?: string;
+  ai_assist_enabled?: boolean;
 }
 
 /** 后端返回的 Provider（api_key 脱敏为 api_key_set）。 */
@@ -121,6 +125,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
     try {
       const r = await fetch(`${BASE}/config`);
       const config = await r.json();
+      if (typeof config?.ai_assist_enabled === 'boolean') {
+        useCapabilitiesStore.getState().setAiAssistEnabled(config.ai_assist_enabled);
+      }
       set({ config });
     } finally {
       set({ loading: false });
@@ -140,6 +147,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
         throw new Error(msg || `保存失败（${r.status}）`);
       }
       const config = await r.json();
+      if (typeof config?.ai_assist_enabled === 'boolean') {
+        useCapabilitiesStore.getState().setAiAssistEnabled(config.ai_assist_enabled);
+      }
       set({ config });
     } finally {
       set({ saving: false });
@@ -169,6 +179,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
         throw new Error(msg || `保存失败（${r.status}）`);
       }
       const config = await r.json();
+      if (typeof config?.ai_assist_enabled === 'boolean') {
+        useCapabilitiesStore.getState().setAiAssistEnabled(config.ai_assist_enabled);
+      }
       set({ config });
     } finally {
       set({ saving: false });
@@ -186,6 +199,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
         throw new Error(msg || `删除失败（${r.status}）`);
       }
       const config = await r.json();
+      if (typeof config?.ai_assist_enabled === 'boolean') {
+        useCapabilitiesStore.getState().setAiAssistEnabled(config.ai_assist_enabled);
+      }
       set({ config });
     } finally {
       set({ saving: false });
@@ -203,6 +219,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
         throw new Error(msg || `切换失败（${r.status}）`);
       }
       const config = await r.json();
+      if (typeof config?.ai_assist_enabled === 'boolean') {
+        useCapabilitiesStore.getState().setAiAssistEnabled(config.ai_assist_enabled);
+      }
       set({ config });
     } finally {
       set({ saving: false });

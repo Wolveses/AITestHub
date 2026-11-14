@@ -123,6 +123,9 @@ export function SettingsPanel() {
       {/* ===== 主题切换 ===== */}
       <ThemeSection />
 
+      {/* ===== 平台 LLM 自动化辅助能力总开关 ===== */}
+      <AiAssistSection />
+
       {/* ===== Provider 管理（Cursor 风格灵活切换）===== */}
       <ProviderSection />
 
@@ -725,6 +728,68 @@ function ProviderEditor({ provider, presets, saving, onSave, onCancel, onTest }:
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+function AiAssistSection() {
+  const { t } = useTranslation();
+  const { config, saving, updateConfig } = useConfigStore();
+  const [statusMsg, setStatusMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const enabled = config?.ai_assist_enabled ?? true;
+
+  const handleToggle = async (next: boolean) => {
+    setStatusMsg(null);
+    try {
+      await updateConfig({ ai_assist_enabled: next });
+      setStatusMsg({
+        ok: true,
+        text: next ? t('settings.aiAssistUpdatedOn') : t('settings.aiAssistUpdatedOff'),
+      });
+    } catch (e) {
+      setStatusMsg({ ok: false, text: errorMessage(e, t('settings.saveFailed')) });
+    }
+  };
+
+  return (
+    <div style={{ borderTop: '1px solid var(--bg-card)', margin: '20px 0 4px', paddingTop: 14 }}>
+      <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <Play size={12} strokeWidth={1.5} style={{ color: enabled ? 'var(--accent)' : 'var(--text-muted)' }} />
+        <span>
+          {t('settings.aiAssistTitle')}
+          {enabled ? t('settings.aiAssistEnabledTag') : t('settings.aiAssistDisabledTag')}
+        </span>
+      </div>
+      <label
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          fontSize: 13,
+          color: 'var(--text-primary)',
+          cursor: saving ? 'wait' : 'pointer',
+          padding: '10px 12px',
+          background: 'var(--bg-card)',
+          border: '1px solid var(--bg-elevated)',
+          borderRadius: 6,
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={saving}
+          onChange={(e) => handleToggle(e.target.checked)}
+        />
+        <span>{t('settings.aiAssistToggleLabel')}</span>
+      </label>
+      <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
+        {t('settings.aiAssistScopeHint')}
+      </p>
+      {statusMsg && (
+        <div style={{ marginTop: 6, fontSize: 12, color: statusMsg.ok ? 'var(--chart-4)' : 'var(--error)' }}>
+          {statusMsg.text}
+        </div>
+      )}
     </div>
   );
 }

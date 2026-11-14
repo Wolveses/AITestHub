@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { PlatformRouter } from './routing';
 import { AuthPage } from './shell/AuthPage';
 import { useAuthStore } from './shared/store/authStore';
+import { useCapabilitiesStore } from './shared/store/capabilitiesStore';
 import type { ModuleManifest } from './shell/types';
 import './index.css';
 
@@ -13,11 +14,13 @@ type State =
 export default function App() {
   const [state, setState] = useState<State>({ status: 'loading' });
   const { token, checkAuth } = useAuthStore();
+  const loadCapabilities = useCapabilitiesStore((s) => s.loadCapabilities);
   const [authChecked, setAuthChecked] = useState(false);
 
   useEffect(() => {
     checkAuth().finally(() => setAuthChecked(true));
-  }, [checkAuth]);
+    loadCapabilities();
+  }, [checkAuth, loadCapabilities]);
 
   useEffect(() => {
     fetch('/api/platform/modules')
