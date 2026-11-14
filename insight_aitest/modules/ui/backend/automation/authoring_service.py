@@ -86,7 +86,20 @@ def resolve_case(db, case_id: int, project_id: int):
     return case
 
 
-def case_payload(case) -> dict:
+def case_payload(case, include_script_content: bool = True) -> dict:
+    """用例快照。
+
+    ``include_script_content=False`` 时不回传脚本全文（默认 True 保留既有调用语义）；
+    MCP ``ui.case.get`` 显式传 False，修复场景按需再取全文。
+    """
+    script = {
+        "version": int(case.script_version or 0),
+        "hash": case.script_hash or "",
+        "path": case.script_rel_path or "",
+        "exists": bool(case.script_rel_path),
+    }
+    if include_script_content:
+        script["content"] = contract.current_script_source(case)
     return {
         "case_id": int(case.id),
         "project_id": int(case.project_id),
@@ -100,13 +113,7 @@ def case_payload(case) -> dict:
         "params": dict(case.params_json or {}),
         "params_schema": list(case.params_schema_json or []),
         "status": case.status,
-        "script": {
-            "version": int(case.script_version or 0),
-            "hash": case.script_hash or "",
-            "path": case.script_rel_path or "",
-            "exists": bool(case.script_rel_path),
-            "content": contract.current_script_source(case),
-        },
+        "script": script,
         "source": getattr(case, "source", CaseSource.AI),
         "updated_at": case.updated_at.isoformat() if case.updated_at else None,
     }
@@ -674,7 +681,7 @@ def submit(
     if expect_case_rev and expect_case_rev != current_rev:
         return fail(
             "STALE_CASE",
-            f"用例已被修改（case_rev={current_rev}），请重新 ui.case.get 后生成脚本",
+            f"用例已被修改（case_rev={current_rev}），请重新调用 ui.contract.get 获取最新 case_rev 后重新生成",
             case_rev=current_rev,
         )
 
@@ -688,6 +695,7 @@ def submit(
         )
 
     # 守卫 3：试跑状态（状态机 + TTL）
+    # 前置缺失与 validate 的前置区分开：否则 required_next 会指回 validate，形成重试环
     state = db.get_authoring_state(int(case.id))
     if (
         state is None
@@ -697,7 +705,7 @@ def submit(
         or datetime.now() - state.dry_run_at > DRY_RUN_TTL
     ):
         return fail(
-            "VALIDATION_REQUIRED",
+            "DRY_RUN_REQUIRED",
             "当前 files 尚未通过 ui.script.dry_run（24 小时内有效），请先试跑",
         )
 

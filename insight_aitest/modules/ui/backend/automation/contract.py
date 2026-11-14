@@ -26,7 +26,18 @@ from pathlib import Path
 from insight_aitest.modules.ui.backend.automation import paths
 from insight_aitest.modules.ui.backend.automation.env_service import site_url
 
-CONTRACT_VERSION = "1.0"
+CONTRACT_VERSION = "1.1"
+
+# 硬规则一句话摘要：contract.get 的文本摘要与会话指令共用，避免客户端无 structuredContent 时丢规则
+RULES_DIGEST = (
+    "同步 def test_xxx(page)；禁 async/await、ai_assert/midscene、sync_playwright()/launch；"
+    "禁 wait_for_timeout/sleep；地址一律 base_url()；每个 test ≥3 条 print（含 [步骤] 与 [断言]）；"
+    "只提交 case.py、pages/<name>.py、common/<name>.py"
+)
+
+
+def rules_digest() -> str:
+    return RULES_DIGEST
 
 CASE_FILE = "case.py"
 ASSET_DIRS = ("pages", "common")
@@ -81,8 +92,17 @@ ERROR_FIX = {
     "TOKEN_IN_SOURCE": "脚本内不要写死 token/Authorization，运行时平台自动注入登录态",
     "HASH_MISMATCH": "提交的 files 与 source_hash 不一致；请用 ui.script.validate 返回的最新 source_hash",
     "VALIDATION_REQUIRED": "先调用 ui.script.validate（必要时再 ui.script.dry_run），再提交",
-    "STALE_CASE": "用例内容已被修改，请重新调用 ui.case.get 获取最新 case_rev 后重新生成",
-    "SCRIPT_CONFLICT": "平台脚本版本已变化，请重新调用 ui.case.get 获取最新 script_version",
+    "STALE_CASE": (
+        "用例内容已被修改，请从 ui.contract.get 重新获取最新 case_rev 后重新生成，"
+        "并经 ui.script.validate → ui.script.dry_run → ui.script.submit"
+    ),
+    "SCRIPT_CONFLICT": (
+        "平台脚本版本已变化，请重新调用 ui.contract.get 获取最新 script.version 后依次执行 "
+        "ui.script.validate → ui.script.dry_run → ui.script.submit"
+    ),
+    "DRY_RUN_REQUIRED": (
+        "当前 files 尚未通过 ui.script.dry_run（24 小时内有效）；请先试跑，不要重复 validate"
+    ),
     "ASSET_CONFLICT": "资产文件内容与平台不一致；确认覆盖后传 force_assets=true，或复用现有资产",
     "BUSY": "同一用例同时只允许一个本地 Agent 操作，请稍后重试",
     "CASE_NOT_FOUND": "检查 case_id 是否属于当前项目",
@@ -100,7 +120,8 @@ FAIL_REQUIRED_NEXT = {
     "HASH_MISMATCH": "ui.script.validate",
     "VALIDATION_REQUIRED": "ui.script.validate",
     "STALE_CASE": "ui.contract.get",
-    "SCRIPT_CONFLICT": "ui.case.get",
+    "SCRIPT_CONFLICT": "ui.contract.get",
+    "DRY_RUN_REQUIRED": "ui.script.dry_run",
     "ASSET_CONFLICT": "ui.script.submit",
     "BUSY": None,
     "PERMISSION_DENIED": None,
@@ -108,29 +129,52 @@ FAIL_REQUIRED_NEXT = {
     "ENV_NOT_ALLOWED": None,
 }
 
-# 不可重试：人工介入才能推进
-FATAL_CODES = {"PERMISSION_DENIED", "ENV_NOT_CONFIGURED", "ENV_NOT_ALLOWED", "CASE_NOT_FOUND"}
+# 会话/项目级：立即停止整个批次
+SESSION_FATAL_CODES = {"PERMISSION_DENIED", "ENV_NOT_CONFIGURED", "ENV_NOT_ALLOWED"}
+# 用例级：跳过当前用例，继续下一例
+CASE_FATAL_CODES = {"CASE_NOT_FOUND"}
+# 保留原语义：retryable=False
+FATAL_CODES = SESSION_FATAL_CODES | CASE_FATAL_CODES
 
 # 编写流程（contract.get 返回给 Agent；工具描述里不写步骤，避免与新增业务串味）
 WORKFLOW_CREATE = {
     "id": "ui.create@1",
+    "compatible": "additive",
     "steps": [
-        {"tool": "ui.contract.get", "required": True, "gives": ["rules", "case.case_rev", "script.version"]},
+        {
+            "tool": "ui.contract.get",
+            "required": True,
+            "gives": ["rules", "case.case_rev", "script.version", "case.params"],
+        },
         {"tool": "ui.example.get", "required": False, "after": "ui.contract.get"},
         {"tool": "ui.env.get", "required": False, "when": "需要浏览器探索或登录态"},
-        {"tool": "ui.case.get", "required": True},
+        {
+            "tool": "ui.case.get",
+            "required": False,
+            "when": "仅需单独刷新快照；case_rev 与 script.version 以 ui.contract.get 为准",
+        },
         {"tool": "ui.script.validate", "required": True, "on_fail": "按 violations[].fix 修正后重试本步"},
         {"tool": "ui.script.dry_run", "required": True, "on_fail": "按 log_tail 修正后回到 ui.script.validate"},
         {"tool": "ui.script.submit", "required": True},
     ],
-    "resume": {"on_stale": "ui.contract.get", "on_conflict": "ui.script.validate"},
-    "stop_on": sorted(FATAL_CODES),
+    "resume": {
+        "on_stale": (
+            "从 ui.contract.get 重新开始 workflow（重新生成后经 "
+            "ui.script.validate → ui.script.dry_run → ui.script.submit）"
+        ),
+        "on_conflict": (
+            "ui.contract.get → ui.script.validate → ui.script.dry_run → ui.script.submit"
+        ),
+    },
+    "stop_on": sorted(SESSION_FATAL_CODES),
+    "skip_case_on": sorted(CASE_FATAL_CODES),
     "max_retry_same_error": 3,
 }
 
 # 修复流程：以现有脚本为基线的最小改动
 WORKFLOW_FIX = {
     "id": "ui.fix@1",
+    "compatible": "additive",
     "steps": [
         {
             "tool": "ui.run.latest",
@@ -143,14 +187,35 @@ WORKFLOW_FIX = {
             "required": True,
             "gives": ["rules", "script.content", "script.version", "case.case_rev"],
         },
-        {"tool": "ui.case.get", "required": True},
+        {
+            "tool": "ui.case.get",
+            "required": False,
+            "when": (
+                "需要单独刷新快照；现有脚本全文见 ui.contract.get.script.content，"
+                "或 ui.case.get(include_script_content=true)"
+            ),
+        },
         {"tool": "ui.example.get", "required": False, "when": "需要同类失败的历史解法"},
         {"tool": "ui.script.validate", "required": True, "on_fail": "按 violations[].fix 修正后重试本步"},
         {"tool": "ui.script.dry_run", "required": True, "on_fail": "按 log_tail 修正后回到 ui.script.validate"},
         {"tool": "ui.script.submit", "required": True},
     ],
-    "resume": {"on_stale": "ui.contract.get", "on_conflict": "ui.script.validate"},
-    "stop_on": sorted(FATAL_CODES),
+    "resume": {
+        "on_stale": (
+            "从 ui.contract.get 重新开始 workflow（重新生成后经 "
+            "ui.script.validate → ui.script.dry_run → ui.script.submit）"
+        ),
+        "on_conflict": (
+            "ui.contract.get → ui.script.validate → ui.script.dry_run → ui.script.submit"
+        ),
+    },
+    "constraints": [
+        "以现有脚本为基线最小修改",
+        "不改动无关步骤",
+        "禁止为通过而删除或放宽断言",
+    ],
+    "stop_on": sorted(SESSION_FATAL_CODES),
+    "skip_case_on": sorted(CASE_FATAL_CODES),
     "max_retry_same_error": 3,
 }
 
@@ -462,8 +527,12 @@ def validate_source(files: dict[str, str], project_id: int, run_l2: bool = True)
     }
 
 
-def asset_catalog(project_id: int) -> list[dict]:
-    """项目现有 pages/common 资产清单（供本地 Agent 复用，避免重复造轮子）。"""
+def asset_catalog(project_id: int, include_content: bool = False) -> list[dict]:
+    """项目现有 pages/common 资产清单（供本地 Agent 复用，避免重复造轮子）。
+
+    默认只返回 path/sha256/size，避免与 contract.get 的其他字段重复传输大段源码；
+    需要源码时由调用方显式传 ``include_content=True``。
+    """
     out: list[dict] = []
     for package in ASSET_DIRS:
         root = paths.pages_dir(project_id) if package == "pages" else paths.common_dir(project_id)
@@ -474,21 +543,26 @@ def asset_catalog(project_id: int) -> list[dict]:
                 text = file.read_text(encoding="utf-8")
             except OSError:
                 continue
-            out.append(
-                {
-                    "path": f"{package}/{file.name}",
-                    "sha256": _sha(text),
-                    "size": len(text.encode("utf-8")),
-                    "content": text,
-                }
-            )
+            item = {
+                "path": f"{package}/{file.name}",
+                "sha256": _sha(text),
+                "size": len(text.encode("utf-8")),
+            }
+            if include_content:
+                item["content"] = text
+            out.append(item)
     return out
 
 
-def contract_rules() -> dict:
-    """回给本地 Agent 的硬约束（与校验器同源，改规则只需改这里）。"""
-    return {
+def contract_rules(*, include_error_codes: bool = True, include_hard_rules: bool = False) -> dict:
+    """回给本地 Agent 的硬约束（与校验器同源，改规则只需改这里）。
+
+    默认保留错误码表以兼容既有调用；contract.get 会显式关闭，改由失败封套与
+    ``insight://rules`` 提供。``include_hard_rules=True`` 时附带平台已知坑，供资源兜底。
+    """
+    rules = {
         "contract_version": CONTRACT_VERSION,
+        "digest": RULES_DIGEST,
         "files": {
             "required": [CASE_FILE],
             "optional": ["pages/<name>.py", "common/<name>.py"],
@@ -512,8 +586,13 @@ def contract_rules() -> dict:
             "required": "每个 def test_xxx 至少 3 条 print，且包含 [步骤] 与 [断言]/[校验]",
             "sample": "print(f\"[步骤] 打开用户列表 {base_url()}\")",
         },
-        "error_codes": ERROR_FIX,
     }
+    if include_error_codes:
+        rules["error_codes"] = ERROR_FIX
+    if include_hard_rules:
+        rules["hard_rules"] = list(HARD_RULES)
+        rules["known_traps"] = list(KNOWN_TRAPS)
+    return rules
 
 
 def current_script_source(case) -> str:
@@ -531,10 +610,18 @@ def current_script_source(case) -> str:
         return ""
 
 
-def contract_payload(case, env, intent: str = "create") -> dict:
+def contract_payload(
+    case,
+    env,
+    intent: str = "create",
+    *,
+    include_assets_content: bool = False,
+    include_error_codes: bool = False,
+) -> dict:
     """单用例的完整契约快照（contract.get 的返回体）。
 
     intent=fix 时返回以现有脚本为基线的修复流程，否则返回新建流程。
+    资产默认只给元数据、规则默认不含错误码表，避免每用例重复传输大段内容。
     """
     project_id = int(case.project_id)
     script = {
@@ -556,12 +643,18 @@ def contract_payload(case, env, intent: str = "create") -> dict:
             "expected": case.expected or "",
             "site": case.site,
             "case_rev": case_rev(case),
+            "params": dict(getattr(case, "params_json", None) or {}),
             "params_schema": list(getattr(case, "params_schema_json", None) or []),
+            "category_path": getattr(case, "category_path", "") or "",
+            "status": getattr(case, "status", "") or "",
         },
         "script": script,
         "env": _env_summary(env, case) if env is not None else None,
-        "assets": asset_catalog(project_id),
-        "rules": contract_rules(),
+        "assets": asset_catalog(project_id, include_content=include_assets_content),
+        "rules": contract_rules(
+            include_error_codes=include_error_codes,
+            include_hard_rules=False,
+        ),
         "intent": "fix" if intent == "fix" else "create",
         "workflow": WORKFLOW_FIX if intent == "fix" else WORKFLOW_CREATE,
     }
