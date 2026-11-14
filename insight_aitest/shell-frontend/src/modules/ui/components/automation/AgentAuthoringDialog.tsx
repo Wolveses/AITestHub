@@ -30,6 +30,49 @@ function stageOf(item: AuthoringStatusItem, submitted: boolean): string {
   return '';
 }
 
+function fallbackCopyText(text: string, container?: HTMLElement | null): boolean {
+  const host = container ?? document.body;
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '0';
+  ta.style.left = '0';
+  ta.style.width = '1px';
+  ta.style.height = '1px';
+  ta.style.padding = '0';
+  ta.style.border = '0';
+  ta.style.opacity = '0';
+  ta.style.pointerEvents = 'none';
+  const prevFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  host.appendChild(ta);
+  try {
+    // 挂在 Dialog 容器内，避免被 Radix Dialog focus-trap 抢回焦点导致 execCommand 失败
+    ta.focus({ preventScroll: true });
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    return document.execCommand('copy');
+  } finally {
+    host.removeChild(ta);
+    prevFocus?.focus?.({ preventScroll: true });
+  }
+}
+
+async function copyText(text: string, container?: HTMLElement | null): Promise<void> {
+  if (!text) throw new Error('empty');
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      /* 降级到同步 execCommand */
+    }
+  }
+  if (!fallbackCopyText(text, container)) {
+    throw new Error('copy_failed');
+  }
+}
+
 export function AgentAuthoringDialog({
   open,
   onClose,
@@ -49,6 +92,7 @@ export function AgentAuthoringDialog({
   const [tokens, setTokens] = useState<AuthoringToken[]>([]);
   const [showTokens, setShowTokens] = useState(false);
   const seqRef = useRef(0);
+  const dialogBodyRef = useRef<HTMLDivElement>(null);
 
   const refreshStatus = useCallback(async () => {
     if (caseIds.length === 0) return;
@@ -102,7 +146,7 @@ export function AgentAuthoringDialog({
 
   const copy = async (text: string, label: string) => {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text, dialogBodyRef.current);
       toast.success(t('ui.auto.copied', '已复制{{label}}', { label }));
     } catch {
       toast.error(t('ui.auto.copyFailed', '复制失败，请手动选中复制'));
@@ -127,7 +171,7 @@ export function AgentAuthoringDialog({
       width="min(900px, 95vw)"
       title={t('ui.auto.agentAuthoringTitle', '交给本地 Agent')}
     >
-      <div style={{ padding: '4px 20px 18px', maxHeight: '76vh', overflowY: 'auto' }}>
+      <div ref={dialogBodyRef} style={{ padding: '4px 20px 18px', maxHeight: '76vh', overflowY: 'auto' }}>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.7 }}>
           {t('ui.auto.agentAuthoringDesc', '把下面的文案粘贴到你的本地 Agent 执行')}
         </div>
