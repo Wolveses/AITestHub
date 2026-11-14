@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -16,6 +17,28 @@ from insight_aitest.modules.ui.backend.automation.current_env import project_nam
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 
 router = APIRouter(prefix="/automation/authoring", tags=["ui-automation-authoring"])
+
+
+def _client_base(request: Request) -> str:
+    """推导浏览器实际访问的地址。
+
+    前端开发服务器会把 /api/* 代理到 127.0.0.1:8001 并改写 Host，
+    直接取 request.base_url 会得到 127.0.0.1，其他网口访问时文案里的 MCP 地址不可用。
+    这里优先用浏览器带来的 Origin/Referer 主机名，端口沿用后端实际监听端口。
+    """
+    base = str(request.base_url).rstrip("/")
+    forwarded = request.headers.get("x-forwarded-host") or ""
+    if forwarded:
+        scheme = (request.headers.get("x-forwarded-proto") or "http").split(",")[0].strip()
+        return f"{scheme}://{forwarded.split(',')[0].strip()}"
+    origin = request.headers.get("origin") or request.headers.get("referer") or ""
+    if origin:
+        parsed = urlparse(origin)
+        host = parsed.hostname or ""
+        if host and host not in ("localhost", "127.0.0.1"):
+            port = urlparse(base).port
+            return f"{parsed.scheme}://{host}:{port}" if port else f"{parsed.scheme}://{host}"
+    return base
 
 
 def build_prompt(case_ids: list[int], token: str, mcp_url: str) -> str:
@@ -132,7 +155,7 @@ async def create_prompt(request: Request, body: dict):
     if not valid_ids:
         raise HTTPException(404, "勾选的用例均不属于当前项目")
 
-    base = str(request.base_url).rstrip("/")
+    base = _client_base(request)
     mcp_url = f"{base}/mcp"
     triage = svc.triage_cases(db, cases)
     action_required = triage["summary"]["create"] + triage["summary"]["fix"]
