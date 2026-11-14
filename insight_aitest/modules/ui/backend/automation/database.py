@@ -159,6 +159,23 @@ def _ensure_ui_cases_authoring(db_path: str) -> None:
         conn.commit()
 
 
+def _ensure_ui_authoring_session(db_path: str) -> None:
+    """给旧 ui_authoring_states 表补本地 Agent 会话绑定列（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ui_authoring_states)")}
+        if not cols:
+            return
+        for name, ddl in (
+            ("authoring_mode", "TEXT NOT NULL DEFAULT ''"),
+            ("generation_id", "INTEGER"),
+        ):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE ui_authoring_states ADD COLUMN {name} {ddl}")
+        conn.commit()
+
+
 class UIAutomationDatabase:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -189,6 +206,7 @@ class UIAutomationDatabase:
                 _ensure_ui_envs_auth_script,
                 _ensure_ui_envs_local_agent,
                 _ensure_ui_cases_authoring,
+                _ensure_ui_authoring_session,
             ],
         )
 
@@ -225,6 +243,16 @@ class UIAutomationDatabase:
                 )
                 c.last_error_message = "服务重启导致任务中断"
                 c.updated_at = datetime.now()
+            # 本地 Agent 会话已不可能存活：清空绑定，下一次 contract.get 自动新建记录
+            states = list(
+                s.scalars(
+                    select(AuthoringState).where(AuthoringState.generation_id.is_not(None))
+                )
+            )
+            for st in states:
+                st.generation_id = None
+                st.authoring_mode = ""
+                st.updated_at = datetime.now()
             return len(gens) + len(cases)
 
     def get_case(self, case_id: int) -> UiCase | None:
@@ -382,8 +410,38 @@ class UIAutomationDatabase:
             s.flush()
             return gen.id
 
+    def get_generation(self, gen_id: int) -> UiGeneration | None:
+        if not gen_id:
+            return None
+        with session_scope(self.db_path) as s:
+            gen = s.get(UiGeneration, int(gen_id))
+            if gen is not None:
+                s.expunge(gen)
+            return gen
+
+    def count_generations(self, case_id: int, kind: str | None = None) -> int:
+        stmt = select(func.count(UiGeneration.id)).where(UiGeneration.ui_case_id == case_id)
+        if kind:
+            stmt = stmt.where(UiGeneration.kind == kind)
+        with session_scope(self.db_path) as s:
+            return int(s.scalar(stmt) or 0)
+
+    def bump_generation(self, gen_id: int, **deltas: int) -> None:
+        """原子自增（调用方保证同 case 串行）；无会话时静默跳过。"""
+        if not gen_id:
+            return
+        with session_scope(self.db_path) as s:
+            gen = s.get(UiGeneration, int(gen_id))
+            if gen is None:
+                return
+            for key, delta in deltas.items():
+                if hasattr(gen, key):
+                    setattr(gen, key, int(getattr(gen, key) or 0) + int(delta))
+
     def update_generation(self, gen_id: int, **fields) -> None:
         """更新生成记录（生成期先落日志路径，结束时再补终态）。"""
+        if not gen_id:
+            return
         with session_scope(self.db_path) as s:
             gen = s.get(UiGeneration, gen_id)
             if gen is None:
@@ -393,6 +451,8 @@ class UIAutomationDatabase:
                     setattr(gen, k, v)
 
     def finish_generation(self, gen_id: int, **fields) -> None:
+        if not gen_id:
+            return
         with session_scope(self.db_path) as s:
             gen = s.get(UiGeneration, gen_id)
             if gen is None:

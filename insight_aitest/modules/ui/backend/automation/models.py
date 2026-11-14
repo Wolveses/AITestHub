@@ -31,6 +31,7 @@ class CaseStatus:
 class GenerationKind:
     GENERATE = "generate"
     FIX = "fix"
+    REGENERATE = "regenerate"
 
 
 class GenerationStatus:
@@ -249,6 +250,10 @@ class AuthoringState(MappedAsDataclass, Base, kw_only=True):
     last_error: Mapped[str] = mapped_column(Text, default="")
     lease_owner: Mapped[str] = mapped_column(Text, default="")
     lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    # 本轮本地编写会话绑定的生成记录（None 表示尚未开始或已收尾）
+    generation_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # 本轮请求模式：""（auto）/ "regenerate"；用于展示与模式切换判定
+    authoring_mode: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
 
 

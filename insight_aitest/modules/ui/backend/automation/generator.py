@@ -1468,6 +1468,10 @@ class GenerationJob:
             return
         project_id = int(case.project_id)
         is_fix = self.kind == GenerationKind.FIX
+        op = {
+            GenerationKind.FIX: "fix",
+            GenerationKind.REGENERATE: "regenerate",
+        }.get(self.kind, "generate")
         self.db.update_case(
             self.case_id,
             status=CaseStatus.FIXING if is_fix else CaseStatus.GENERATING,
@@ -1495,7 +1499,7 @@ class GenerationJob:
             from insight_aitest.platform.services.llm.tracing import trace_context
 
             with trace_context(
-                name=f"ui.script.{'fix' if is_fix else 'generate'}",
+                name=f"ui.script.{op}",
                 session_id=f"ui-case-{self.case_id}-gen-{self.gen_id}",
                 tags=["module:ui", f"kind:{self.kind}"],
                 metadata={
