@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { Loader2, Search, X } from 'lucide-react';
 import { Modal } from '../../../components/ui/modal';
 import { useProjectStore } from '../../../shared/store/projectStore';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 import { useAssetStore, type ApiAsset } from '../store/assetStore';
 import { useRunStore, type ApiCase } from '../store/runStore';
 import { ApiStepsEditor, type ApiContent, type ApiStep } from '../../testcase/components/ApiStepsEditor';
@@ -214,6 +215,7 @@ export function NewCaseDialog({
 }) {
   const { t } = useTranslation();
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
+  const aiAssistEnabled = useCapabilitiesStore((s) => s.aiAssistEnabled);
   const { fetchAssets, importCase } = useAssetStore();
   const createCase = useRunStore((s) => s.createCase);
 
@@ -223,18 +225,19 @@ export function NewCaseDialog({
   const [selected, setSelected] = useState<number[]>([]);
   const [aiOrder, setAiOrder] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const effectiveAiOrder = aiAssistEnabled && aiOrder;
 
   useEffect(() => {
     if (!open) return;
     setTitle('');
     setSelected([]);
-    setAiOrder(true);
+    setAiOrder(aiAssistEnabled);
     setLoading(true);
     fetchAssets(currentProjectId)
       .then(setAssets)
       .catch((e) => toast.error(String(e)))
       .finally(() => setLoading(false));
-  }, [open, currentProjectId, fetchAssets]);
+  }, [open, currentProjectId, fetchAssets, aiAssistEnabled]);
 
   const toggle = (id: number) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -248,7 +251,7 @@ export function NewCaseDialog({
     setSubmitting(true);
     try {
       if (selected.length > 0) {
-        const result = await importCase(selected, name, aiOrder);
+        const result = await importCase(selected, name, effectiveAiOrder);
         toast.success(t('api.composeDone', { id: result.case_id, steps: result.step_count }));
         onCreated(result.case_id);
       } else {
@@ -278,11 +281,29 @@ export function NewCaseDialog({
           <span>{t('api.assetSelectedCount', { count: selected.length })}</span>
         </div>
         <AssetPicker assets={assets} selected={selected} onToggle={toggle} loading={loading} />
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }}>
-          <input type="checkbox" checked={aiOrder} onChange={(e) => setAiOrder(e.target.checked)} />
-          {t('api.aiArrange')}
+        <label
+          title={!aiAssistEnabled ? '系统设置已关闭 LLM 自动化辅助能力' : undefined}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            fontSize: 12,
+            color: aiAssistEnabled ? 'var(--text-secondary)' : 'var(--text-muted)',
+            cursor: aiAssistEnabled ? 'pointer' : 'not-allowed',
+            opacity: aiAssistEnabled ? 1 : 0.7,
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={effectiveAiOrder}
+            disabled={!aiAssistEnabled}
+            onChange={(e) => setAiOrder(e.target.checked)}
+          />
+          {t('api.aiArrange')}{!aiAssistEnabled ? '（设置已关闭，将按规则编排）' : ''}
         </label>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('api.aiArrangeHint')}</div>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          {aiAssistEnabled ? t('api.aiArrangeHint') : '当前已关闭内置 AI 辅助，将使用接口参数依赖规则自动编排步骤与依赖。'}
+        </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
           <button onClick={onClose} style={btnStyle()}>{t('common.cancel')}</button>
           <button onClick={submit} disabled={submitting} style={btnStyle(true, submitting)}>
@@ -309,6 +330,7 @@ export function CaseEditorDialog({
 }) {
   const { t } = useTranslation();
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
+  const aiAssistEnabled = useCapabilitiesStore((s) => s.aiAssistEnabled);
   const { fetchAssets, composeSteps } = useAssetStore();
   const updateCase = useRunStore((s) => s.updateCase);
 
@@ -349,7 +371,7 @@ export function CaseEditorDialog({
     }
     setImporting(true);
     try {
-      const result = await composeSteps(picked, title.trim() || caseItem?.title || '', true);
+      const result = await composeSteps(picked, title.trim() || caseItem?.title || '', aiAssistEnabled);
       setContent((prev) => ({
         base_url: prev.base_url || result.base_url,
         steps: [...prev.steps, ...(result.steps as ApiStep[])],

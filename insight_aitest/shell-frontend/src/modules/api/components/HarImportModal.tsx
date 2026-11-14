@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 import {
   Upload,
   CheckCircle2,
@@ -67,7 +68,9 @@ export const HarImportModal: React.FC<HarImportModalProps> = ({
 
   const [candidates, setCandidates] = useState<HarCandidate[]>([]);
   const [selectedFps, setSelectedFps] = useState<string[]>([]);
+  const aiAssistEnabled = useCapabilitiesStore((s) => s.aiAssistEnabled);
   const [autoEnhance, setAutoEnhance] = useState<boolean>(true);
+  const effectiveAutoEnhance = aiAssistEnabled && autoEnhance;
   const [methodFilter, setMethodFilter] = useState<string>('ALL');
   const [searchPath, setSearchPath] = useState<string>('');
   const [conflictStrategy, setConflictStrategy] = useState<'overwrite' | 'skip'>('skip');
@@ -193,7 +196,7 @@ export const HarImportModal: React.FC<HarImportModalProps> = ({
           project_id: projectId,
           items: toImport,
           conflict_strategy: conflictStrategy,
-          auto_enhance: autoEnhance,
+          auto_enhance: effectiveAutoEnhance,
         }),
       });
       const data = await res.json();
@@ -203,7 +206,7 @@ export const HarImportModal: React.FC<HarImportModalProps> = ({
 
       const msg = `导入完成：新增 ${data.imported || 0} 个，覆盖更新 ${data.updated || 0} 个${
         data.skipped ? `，跳过已存在 ${data.skipped} 个` : ''
-      }！${autoEnhance ? '后台已触发 AI 自动整理。' : ''}`;
+      }！${effectiveAutoEnhance ? '后台已触发 AI 自动整理。' : ''}`;
       toast.success(msg);
       onImportSuccess();
       handleClose();
@@ -495,22 +498,25 @@ export const HarImportModal: React.FC<HarImportModalProps> = ({
 
               <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
                 <label
+                  title={!aiAssistEnabled ? '系统设置已关闭 LLM 自动化辅助能力' : undefined}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: 6,
                     fontSize: 12,
-                    color: 'var(--text-primary)',
-                    cursor: 'pointer',
+                    color: aiAssistEnabled ? 'var(--text-primary)' : 'var(--text-muted)',
+                    cursor: aiAssistEnabled ? 'pointer' : 'not-allowed',
+                    opacity: aiAssistEnabled ? 1 : 0.65,
                   }}
                 >
                   <input
                     type="checkbox"
-                    checked={autoEnhance}
+                    checked={effectiveAutoEnhance}
+                    disabled={!aiAssistEnabled}
                     onChange={(e) => setAutoEnhance(e.target.checked)}
                   />
-                  <Sparkles size={14} color="#d97706" />
-                  导入后自动触发 AI 整理
+                  <Sparkles size={14} style={{ color: 'var(--accent)' }} />
+                  导入后自动触发 AI 整理{!aiAssistEnabled ? '（设置已关闭）' : ''}
                 </label>
 
                 <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>

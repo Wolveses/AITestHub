@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { Bot, FilePlus2, KeyRound, Loader2, Play, RefreshCw, Send, Trash2, VolumeX, X, Upload } from 'lucide-react';
 import { useProjectStore } from '../../shared/store/projectStore';
 import { useConfirmStore } from '../../shared/store/confirmStore';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 import { useIsMobile } from '../../shared/hooks/useIsMobile';
 import { EnvironmentSelect } from './components/EnvironmentSelect';
 import { HarImportModal } from './components/HarImportModal';
@@ -83,6 +84,7 @@ const btnStyle = (disabled = false): CSSProperties => ({
 
 export function AssetsTab() {
   const { t } = useTranslation();
+  const aiAssistEnabled = useCapabilitiesStore((s) => s.aiAssistEnabled);
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
   const confirm = useConfirmStore((s) => s.confirm);
   const isMobile = useIsMobile();
@@ -518,7 +520,11 @@ export function AssetsTab() {
               </button>
             ) : (
               <>
-                <button style={btnStyle(busy || enhancing)} disabled={busy || enhancing} onClick={async () => {
+                <button
+                  style={btnStyle(busy || enhancing || !aiAssistEnabled)}
+                  disabled={busy || enhancing || !aiAssistEnabled}
+                  title={!aiAssistEnabled ? '系统设置已关闭「LLM 自动化辅助能力」，暂不可使用 AI 整理' : undefined}
+                  onClick={async () => {
                   setEnhancing(true);
                   setMeta(null);
                   toast.loading(t('api.aiEnhancing'), { id: 'asset-enhance' });
