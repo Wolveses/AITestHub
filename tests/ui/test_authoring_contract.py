@@ -1,12 +1,22 @@
 # -*- coding: utf-8 -*-
 """本地 Agent 编写的契约校验与入库状态机测试。"""
 
+import asyncio
+import inspect
+import json
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from insight_aitest.modules.ui.backend.automation import authoring_service as svc
-from insight_aitest.modules.ui.backend.automation import contract, example_service, lessons, paths
+from insight_aitest.modules.ui.backend.automation import (
+    contract,
+    example_service,
+    lessons,
+    paths,
+    prompt_builder,
+)
 from insight_aitest.modules.ui.backend.automation.database import UIAutomationDatabase
 from insight_aitest.modules.ui.backend.automation.models import AuthoringStage, CaseStatus
 
@@ -218,7 +228,9 @@ def test_submit_requires_dry_run(db, case):
         expect_script_version=0,
     )
     assert result["ok"] is False
-    assert result["code"] == "VALIDATION_REQUIRED"
+    assert result["code"] == "DRY_RUN_REQUIRED"
+    assert result["retryable"] is True
+    assert result["required_next"] == "ui.script.dry_run"
 
 
 def test_asset_conflict_requires_force(monkeypatch, tmp_path, db, case):
@@ -455,10 +467,11 @@ def test_prompts_and_resources_registered():
     from insight_aitest.modules.ui.backend.automation.mcp_server import get_mcp_server
 
     server = get_mcp_server()
-    assert [p.name for p in asyncio.run(server.list_prompts())] == ["ui.create", "ui.fix"]
+    assert [p.name for p in asyncio.run(server.list_prompts())] == ["ui.auto", "ui.create", "ui.fix"]
     assert [str(r.uri) for r in asyncio.run(server.list_resources())] == [
         "insight://rules",
         "insight://template",
+        "insight://instructions",
     ]
 
 
@@ -547,6 +560,15 @@ def test_fail_envelope_guides_next_tool():
     assert err["retryable"] is True
     assert err["required_next"] == "ui.contract.get"
 
+    conflict = svc.fail("SCRIPT_CONFLICT", "脚本版本冲突")
+    assert conflict["required_next"] == "ui.contract.get"
+    assert "ui.contract.get" in conflict["fix"]
+
+    dry_run = svc.fail("DRY_RUN_REQUIRED", "尚未试跑")
+    assert dry_run["retryable"] is True
+    assert dry_run["required_next"] == "ui.script.dry_run"
+    assert "dry_run" in dry_run["fix"]
+
     fatal = svc.fail("PERMISSION_DENIED", "无权限")
     assert fatal["retryable"] is False
     assert fatal["required_next"] is None
@@ -591,3 +613,381 @@ def test_summary_result_keeps_payload_out_of_text():
     assert result.is_error is False
     assert result.structured_content["blob"] == "x" * 5000
     assert len(result.content[0].text) < 200
+
+
+# ===== v4：文案精简 / MCP 协议降级兜底 =====
+
+
+class _FakeRequest:
+    """最小 Request 替身：只覆盖 _client_base 与 create_prompt 用到的属性。"""
+
+    def __init__(self, base_url: str = "http://127.0.0.1:8001/api/", headers: dict | None = None):
+        self.base_url = base_url
+        self.headers = headers or {}
+
+
+@pytest.fixture()
+def mcp_srv(monkeypatch, tmp_path, db):
+    """进程内 MCP 上下文：项目 1 / owner token:1 / fixture DB / 临时工作区。"""
+    from insight_aitest.modules.ui.backend.automation import mcp_server
+
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path / "ws")
+    monkeypatch.setattr(mcp_server, "get_automation_db", lambda: db)
+    monkeypatch.setattr(mcp_server, "resolve_current_env", lambda *a, **k: None)
+    project_reset = mcp_server._current_project.set(1)
+    owner_reset = mcp_server._current_owner.set("token:1")
+    try:
+        yield mcp_server
+    finally:
+        mcp_server._current_owner.reset(owner_reset)
+        mcp_server._current_project.reset(project_reset)
+
+
+def _call(server, name: str, arguments: dict):
+    return asyncio.run(server.call_tool(name, arguments))
+
+
+def _prompt_text(server, name: str, arguments: dict) -> str:
+    result = asyncio.run(server.get_prompt(name, arguments))
+    return result.messages[0].content.text
+
+
+def _exc_chain_text(exc: BaseException) -> str:
+    parts: list[str] = []
+    current: BaseException | None = exc
+    while current is not None:
+        parts.append(str(current))
+        current = current.__cause__
+    return " | ".join(parts)
+
+
+def test_prompt_builder_rest_variants():
+    texts = [
+        prompt_builder.render_auto_prompt([1, 2], "ins_tok", "http://192.168.1.20:8001/mcp"),
+        prompt_builder.render_create_prompt([1, 2], "ins_tok", "http://192.168.1.20:8001/mcp"),
+        prompt_builder.render_fix_prompt([1, 2], "ins_tok", "http://192.168.1.20:8001/mcp"),
+    ]
+    for text in texts:
+        assert "- case_ids: 1,2" in text
+        assert "- Authorization: Bearer ins_tok" in text
+        assert len(text.splitlines()) <= 5
+        assert "【前置检查】" not in text
+        assert "【处理顺序】" not in text
+        assert "```" not in text
+
+
+def test_prompt_builder_native_no_fake_token():
+    text = prompt_builder.render_auto_prompt([1])
+    assert "Bearer" not in text
+    assert "沿用当前 MCP 会话（无需额外 Token）" in text
+    assert "MCP:" not in text
+
+
+def test_prompt_builder_dedup_and_batch_hint():
+    assert prompt_builder.parse_case_ids("1,1,abc,2") == [1, 2]
+    text = prompt_builder.render_auto_prompt(range(1, 52))
+    assert "- triage 分批: 每批最多 50 个" in text
+
+
+def test_mcp_auto_prompt_registered_and_small():
+    from insight_aitest.modules.ui.backend.automation.mcp_server import get_mcp_server
+
+    server = get_mcp_server()
+    text = _prompt_text(server, "ui.auto", {"case_ids": "1,2"})
+    assert "ui.case.triage" in text
+    assert len(text) < 1500
+    with pytest.raises(Exception) as exc:
+        _prompt_text(server, "ui.auto", {"case_ids": "abc"})
+    assert "case_ids" in _exc_chain_text(exc.value)
+
+
+def test_mcp_create_prompt_no_cross_layer_import():
+    from insight_aitest.modules.ui.backend.automation import mcp_server
+
+    source = inspect.getsource(mcp_server)
+    assert "routes.authoring" not in source
+    text = _prompt_text(mcp_server.get_mcp_server(), "ui.create", {"case_ids": "1,2"})
+    assert "ui.create workflow" in text
+    assert "【前置检查】" not in text
+    assert len(text) < 1500
+
+
+def test_mcp_fix_prompt_no_inline_script_or_log(db, case, mcp_srv):
+    text = _prompt_text(mcp_srv.get_mcp_server(), "ui.fix", {"case_id": str(case.id)})
+    assert "ui.run.latest" in text
+    assert "【现有脚本】" not in text
+    assert "```python" not in text
+    assert len(text) < 1500
+
+    with pytest.raises(Exception) as exc:
+        _prompt_text(mcp_srv.get_mcp_server(), "ui.fix", {"case_id": "99999"})
+    assert "CASE_NOT_FOUND" in _exc_chain_text(exc.value)
+
+
+def test_instructions_and_resource_are_identical():
+    from insight_aitest.modules.ui.backend.automation import mcp_server
+
+    server = mcp_server.get_mcp_server()
+    text = asyncio.run(server.read_resource("insight://instructions"))[0].content
+    assert text == mcp_server.INSTRUCTIONS
+    for keyword in (
+        "Playwright",
+        "ui.case.triage",
+        "DRY_RUN_REQUIRED",
+        "insight://rules",
+        "insight://template",
+        "CASE_NOT_FOUND",
+    ):
+        assert keyword in text
+
+
+def test_contract_summary_has_dynamic_workflow(db, case, mcp_srv):
+    result = _call(mcp_srv.get_mcp_server(), "ui.contract.get", {"case_id": int(case.id)})
+    assert result.is_error is False
+    text = result.content[0].text
+    assert "ui.create@1:" in text
+    assert "ui.script.validate → ui.script.dry_run → ui.script.submit" in text
+    assert "ui.example.get?" in text
+    assert "硬规则：" in text
+    assert "完整 rules / env / assets / workflow 见 structuredContent" not in text
+
+
+def test_contract_assets_metadata_by_default(monkeypatch, tmp_path, case):
+    monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path / "ws")
+    (paths.pages_dir(1) / "login_page.py").write_text(
+        "def open_login(page):\n    pass\n", encoding="utf-8"
+    )
+    payload = contract.contract_payload(case, None)
+    assert payload["assets"]
+    assert all("content" not in item for item in payload["assets"])
+    assert all({"path", "sha256", "size"} <= set(item) for item in payload["assets"])
+
+    with_content = contract.contract_payload(case, None, include_assets_content=True)
+    assert all("content" in item for item in with_content["assets"])
+
+
+def test_contract_rules_pruned_and_resource_full(case):
+    from insight_aitest.modules.ui.backend.automation.mcp_server import get_mcp_server
+
+    assert "error_codes" in contract.contract_rules()
+    payload = contract.contract_payload(case, None)
+    assert "error_codes" not in payload["rules"]
+    assert payload["rules"]["digest"]
+
+    rules_text = asyncio.run(get_mcp_server().read_resource("insight://rules"))[0].content
+    rules = json.loads(rules_text)
+    assert {"error_codes", "hard_rules", "known_traps", "digest"} <= set(rules)
+
+
+def test_contract_case_includes_params_and_status(case):
+    payload = contract.contract_payload(case, None)
+    assert {"params", "category_path", "status"} <= set(payload["case"])
+    assert isinstance(payload["case"]["params"], dict)
+
+
+def test_case_get_omits_script_content_by_default(db, case, mcp_srv):
+    server = mcp_srv.get_mcp_server()
+    default = _call(server, "ui.case.get", {"case_id": int(case.id)})
+    assert default.is_error is False
+    assert "content" not in default.structured_content["script"]
+
+    full = _call(server, "ui.case.get", {"case_id": int(case.id), "include_script_content": True})
+    assert "content" in full.structured_content["script"]
+
+
+def test_env_get_failure_is_error(monkeypatch, db, case, mcp_srv):
+    monkeypatch.setattr(
+        svc, "env_payload", lambda _db, _case: svc.fail("ENV_NOT_CONFIGURED", "项目未配置环境")
+    )
+    result = _call(mcp_srv.get_mcp_server(), "ui.env.get", {"case_id": int(case.id)})
+    assert result.is_error is True
+    assert result.structured_content is None
+    assert '"code": "ENV_NOT_CONFIGURED"' in result.content[0].text
+
+
+def test_case_triage_reports_missing_and_next_tool(monkeypatch, db, mcp_srv):
+    ids = [
+        db.create_case(
+            project_id=1,
+            kb_document_id=2000 + index,
+            title=f"用例 {index}",
+            precondition="",
+            steps=["a"],
+            expected="b",
+            site="frontend",
+        )
+        for index in range(25)
+    ]
+    for cid in ids[23:]:
+        db.update_case(
+            cid,
+            status=CaseStatus.IMPLEMENTED,
+            script_rel_path="scripts/1/case.py",
+            script_version=2,
+        )
+    monkeypatch.setattr(
+        db,
+        "latest_script_runs",
+        lambda _ids: {ids[23]: {"status": "failed", "error": "SELECTOR_NOT_FOUND: 登录按钮"}},
+    )
+
+    result = _call(mcp_srv.get_mcp_server(), "ui.case.triage", {"case_ids": ids + [999999]})
+    assert result.is_error is False
+    data = result.structured_content
+    assert data["missing_case_ids"] == [999999]
+    assert data["summary"] == {"create": 23, "fix": 1, "skip": 1}
+
+    text = result.content[0].text
+    assert "→ ui.contract.get" in text
+    assert "→ ui.run.latest" in text
+    assert f"- {ids[24]} skip（" in text
+    assert "None" not in text
+    item_lines = [
+        line for line in text.splitlines() if line.startswith("- ") and "missing_case_ids:" not in line
+    ]
+    assert len(item_lines) == 25
+    assert "- missing_case_ids: 999999" in text
+
+
+def test_case_triage_dedup(db, mcp_srv):
+    cid = db.create_case(
+        project_id=1,
+        kb_document_id=3001,
+        title="重复勾选",
+        precondition="",
+        steps=["a"],
+        expected="b",
+        site="frontend",
+    )
+    result = _call(mcp_srv.get_mcp_server(), "ui.case.triage", {"case_ids": [cid, cid]})
+    data = result.structured_content
+    assert data["missing_case_ids"] == []
+    assert data["summary"]["create"] == 1
+    assert len(data["items"]) == 1
+    assert result.content[0].text.count(f"- {cid} ") == 1
+
+
+def test_workflow_contract_consistency():
+    for workflow in (contract.WORKFLOW_CREATE, contract.WORKFLOW_FIX):
+        assert workflow["compatible"] == "additive"
+        assert set(workflow["stop_on"]) == contract.SESSION_FATAL_CODES
+        assert set(workflow["skip_case_on"]) == contract.CASE_FATAL_CODES
+        assert "ui.script.dry_run" in workflow["resume"]["on_conflict"]
+        assert "ui.contract.get" in workflow["resume"]["on_conflict"]
+        assert "ui.contract.get" in workflow["resume"]["on_stale"]
+    assert "CASE_NOT_FOUND" not in contract.WORKFLOW_CREATE["stop_on"]
+    assert len(contract.WORKFLOW_FIX["constraints"]) == 3
+
+
+def test_tool_output_schemas_declare_stable_fields():
+    tools = _tools()
+    assert {"params", "category_path", "status", "script"} <= set(
+        tools["ui.case.get"].output_schema["properties"]
+    )
+    assert "usage" in tools["ui.env.get"].output_schema["properties"]
+    assert "assets_written" in tools["ui.script.submit"].output_schema["properties"]
+    assert "files" in tools["ui.script.validate"].output_schema["properties"]
+    assert "stats" in tools["ui.example.get"].output_schema["properties"]
+
+
+def test_example_summary_contains_resource_pointers(db, case, mcp_srv):
+    result = _call(mcp_srv.get_mcp_server(), "ui.example.get", {"case_id": int(case.id)})
+    text = result.content[0].text
+    assert "insight://rules" in text
+    assert "insight://template" in text
+    assert "truncated=" in text
+
+
+def test_run_latest_no_run_points_to_contract(db, case, mcp_srv):
+    result = _call(mcp_srv.get_mcp_server(), "ui.run.latest", {"case_id": int(case.id)})
+    text = result.content[0].text
+    assert "无执行记录" in text
+    assert "ui.contract.get" in text
+    assert "intent" in text
+
+
+# ===== REST 入口：文案 / mode 校验 / 不产生孤儿 Token =====
+
+
+def _rest_routes(monkeypatch, db):
+    from insight_aitest.modules.ui.backend.automation.routes import authoring as routes
+
+    monkeypatch.setattr(routes, "get_automation_db", lambda: db)
+    monkeypatch.setattr(routes, "project_name", lambda pid: f"项目 {pid}")
+    return routes
+
+
+def test_rest_mode_validation_no_orphan_token(monkeypatch):
+    from fastapi import HTTPException
+
+    from insight_aitest.modules.ui.backend.automation.routes import authoring as routes
+
+    created: list = []
+    monkeypatch.setattr(routes.mcp_tokens, "create_token", lambda *a, **k: created.append(1))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            routes.create_prompt(_FakeRequest(), {"project_id": 1, "case_ids": [1], "mode": "bogus"})
+        )
+    assert exc.value.status_code == 400
+    assert created == []
+
+
+def test_rest_auto_all_skip_no_token(monkeypatch, db, case):
+    db.update_case(
+        case.id, status=CaseStatus.IMPLEMENTED, script_rel_path="scripts/1/case.py", script_version=1
+    )
+    routes = _rest_routes(monkeypatch, db)
+
+    def _unexpected(*_a, **_k):
+        raise AssertionError("全部 skip 时不应创建 Token")
+
+    monkeypatch.setattr(routes.mcp_tokens, "create_token", _unexpected)
+    result = asyncio.run(
+        routes.create_prompt(_FakeRequest(), {"project_id": 1, "case_ids": [int(case.id)]})
+    )
+    assert result["prompt"] is None
+    assert result["token"] is None
+    assert result["action_required"] == 0
+
+
+def test_rest_create_and_fix_prompt(monkeypatch, db, case):
+    routes = _rest_routes(monkeypatch, db)
+    created: list[int] = []
+    row = SimpleNamespace(id=7, expires_at=None)
+
+    def _fake_create_token(project_id, name=""):
+        created.append(project_id)
+        return "ins_tok", row
+
+    monkeypatch.setattr(routes.mcp_tokens, "create_token", _fake_create_token)
+
+    create_result = asyncio.run(
+        routes.create_prompt(
+            _FakeRequest(), {"project_id": 1, "case_ids": [int(case.id)], "mode": "create"}
+        )
+    )
+    assert create_result["mode"] == "create"
+    assert "为下列用例编写脚本并入库" in create_result["prompt"]
+    assert "Bearer ins_tok" in create_result["prompt"]
+    assert f"- case_ids: {int(case.id)}" in create_result["prompt"]
+
+    fix_result = asyncio.run(
+        routes.create_prompt(
+            _FakeRequest(), {"project_id": 1, "case_ids": [int(case.id)], "mode": "fix"}
+        )
+    )
+    assert fix_result["mode"] == "fix"
+    assert "修复下列用例并重新入库" in fix_result["prompt"]
+    assert created == [1, 1]
+
+
+def test_client_base_forwarded_and_origin():
+    from insight_aitest.modules.ui.backend.automation.routes.authoring import _client_base
+
+    forwarded = _FakeRequest(
+        headers={"x-forwarded-host": "192.168.1.20:8001", "x-forwarded-proto": "http"}
+    )
+    assert _client_base(forwarded) == "http://192.168.1.20:8001"
+
+    origin = _FakeRequest(headers={"origin": "http://192.168.1.20:3000"})
+    assert _client_base(origin) == "http://192.168.1.20:8001"
