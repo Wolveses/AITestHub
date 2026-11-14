@@ -169,7 +169,7 @@ export function AgentAuthoringDialog({
                   style={{
                     ...inputStyle,
                     width: '100%',
-                    height: 260,
+                    height: 140,
                     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
                     fontSize: 12,
                     lineHeight: 1.6,
