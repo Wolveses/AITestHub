@@ -6,7 +6,8 @@
 - ``ui.contract.get`` / ``ui.env.get`` / ``ui.case.get`` / ``ui.case.triage`` / ``ui.example.get``
   / ``ui.run.latest``
 - ``ui.script.validate`` / ``ui.script.dry_run`` / ``ui.script.submit``
-附：prompts ``ui.create`` / ``ui.fix``，resources ``insight://rules`` / ``insight://template``。
+附：prompts ``ui.auto`` / ``ui.create`` / ``ui.fix``，
+resources ``insight://rules`` / ``insight://template`` / ``insight://instructions``。
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import JSONResponse
 
 from insight_aitest.modules.ui.backend.automation import authoring_service as svc
-from insight_aitest.modules.ui.backend.automation import contract, example_service, mcp_tokens
+from insight_aitest.modules.ui.backend.automation import contract, example_service, mcp_tokens, prompt_builder
 from insight_aitest.modules.ui.backend.automation.current_env import resolve_current_env
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 
@@ -70,6 +71,7 @@ class ToolPayload(BaseModel):
 
 class ContractPayload(ToolPayload):
     contract_version: str = ""
+    generated_at: str = ""
     case: dict = Field(default_factory=dict)
     script: dict = Field(default_factory=dict)
     env: dict | None = None
@@ -82,6 +84,7 @@ class ContractPayload(ToolPayload):
 class TriagePayload(ToolPayload):
     summary: dict = Field(default_factory=dict)
     items: list = Field(default_factory=list)
+    missing_case_ids: list[int] = Field(default_factory=list)
 
 
 class EnvPayload(ToolPayload):
@@ -93,17 +96,30 @@ class EnvPayload(ToolPayload):
     auth: dict = Field(default_factory=dict)
     auth_ready: bool = False
     message: str = ""
+    usage: str = ""
 
 
 class CasePayload(ToolPayload):
     case_id: int = 0
+    project_id: int = 0
     title: str = ""
+    precondition: str = ""
+    steps: list = Field(default_factory=list)
+    expected: str = ""
     site: str = ""
+    category_path: str = ""
     case_rev: str = ""
+    params: dict = Field(default_factory=dict)
+    params_schema: list = Field(default_factory=list)
+    status: str = ""
+    source: str = ""
+    updated_at: str | None = None
     script: dict = Field(default_factory=dict)
 
 
 class ExamplePayload(ToolPayload):
+    contract_version: str = ""
+    case: dict = Field(default_factory=dict)
     hard_rules: list = Field(default_factory=list)
     known_traps: list = Field(default_factory=list)
     lessons: list = Field(default_factory=list)
@@ -112,12 +128,14 @@ class ExamplePayload(ToolPayload):
     assets: list = Field(default_factory=list)
     template: str = ""
     note: str = ""
+    stats: dict = Field(default_factory=dict)
 
 
 class ValidatePayload(ToolPayload):
     stage: str = ""
     source_hash: str = ""
     violations: list = Field(default_factory=list)
+    files: list[str] = Field(default_factory=list)
     next: str = ""
 
 
@@ -135,6 +153,7 @@ class SubmitPayload(ToolPayload):
     script_version: int = 0
     source_hash: str = ""
     script_path: str = ""
+    assets_written: list = Field(default_factory=list)
     message: str = ""
 
 
@@ -169,13 +188,17 @@ def _file_dicts(files: list[FileItem]) -> list[dict]:
     return [item.model_dump() for item in files]
 
 INSTRUCTIONS = """Insight-AITest：UI 自动化脚本「本地编写 + 平台校验入库」服务。
-- 认证：请求头 Authorization: Bearer <token>，Token 绑定项目；不要写入脚本、不要提交仓库。
-- 流程：不预设固定顺序，只以 ui.contract.get 返回的 workflow 为准；返回体的 intent 表示新建还是修复。
-- 批量处理：先调用 ui.case.triage 判定每个用例该 create / fix / skip，skip 的用例不要改动。
-- 规则优先级：本次 ui.contract.get 的 rules > ui.example.get 的 lessons/known_traps > 通用经验；与实测页面冲突时以实测为准。
-- 失败处理：isError=true 时读 code/fix/required_next 再决定是否重试；同一错误码连续 3 次不推进就停止并说明原因。
-- 终止条件：PERMISSION_DENIED / CASE_NOT_FOUND / ENV_NOT_CONFIGURED / ENV_NOT_ALLOWED 立即停止。
-- 只操作当前 Token 项目内的用例，不要修改其他用例或平台资产。"""
+- 认证与边界：请求头 Authorization: Bearer <token>，Token 绑定项目；不要写入脚本或提交仓库；只操作当前 Token 项目内的用例，不改其他用例与平台资产。
+- 浏览器前置：需要页面探索时使用本机 Playwright MCP + Chromium；未安装先自行启用（npx @playwright/mcp@latest、npx playwright install chromium）；站点地址与登录态从 ui.env.get 获取。
+- 分诊优先：批量任务先 ui.case.triage；返回 skip 的用例优先级最高，不调用 ui.contract.get 或任何写工具。单次 triage 最多 50 个 ID，超出分批。
+- 串行与流程：逐例串行，上一例 submit 完成或放弃后再开始下一例；单例失败不阻塞其他用例。以 ui.contract.get 返回的 intent 与 workflow 为准；ui.run.latest 返回 run=null 时按 ui.contract.get 的 intent 处理。
+- 标准路径：create = ui.contract.get → (ui.example.get?) → (ui.env.get?) → ui.script.validate → ui.script.dry_run → ui.script.submit；fix = ui.run.latest → ui.contract.get → ui.script.validate → ui.script.dry_run → ui.script.submit。ui.case.get 仅用于刷新快照或取脚本全文，case_rev 与 script.version 以 ui.contract.get 为准。
+- 规则优先级：ui.contract.get.rules > ui.example.get.lessons/known_traps > 通用经验；与页面实测冲突时以实测为准。
+- 修复约束：以现有脚本为基线最小修改，不改无关步骤，禁止为通过而删除或放宽断言。
+- 失败处理：isError=true 时先读 code / fix / required_next；同一错误码连续 3 次无进展就放弃该用例。收到 DRY_RUN_REQUIRED 时先 ui.script.dry_run，不要反复 validate。
+- 终止作用域：PERMISSION_DENIED / ENV_NOT_CONFIGURED / ENV_NOT_ALLOWED 立即停止整个批次；CASE_NOT_FOUND 跳过当前用例继续；ENV_INVALID 停止当前用例并回报，等待环境恢复。
+- 兜底：客户端未注入本说明时先读 insight://instructions；未展示 structuredContent 时读 insight://rules 与 insight://template，workflow 步骤以 ui.contract.get 的文本摘要为准，现有脚本用 ui.case.get(include_script_content=true)。
+- 回报：全部完成后逐用例汇报「结论（create/fix/skip）、改动点与脚本版本、validate/dry_run 结果、未解决项」。"""
 
 
 def _error(payload: dict) -> CallToolResult:
@@ -204,92 +227,66 @@ def _mcp_url() -> str:
     return f"{base}/mcp" if base else "http://127.0.0.1:8001/mcp"
 
 
-def _fix_prompt_text(case_id: int, token: str) -> str:
-    db = _db()
-    case = svc.resolve_case(db, case_id, _project_id())
-    if case is None:
-        raise ToolError(f"CASE_NOT_FOUND：用例 {case_id} 不存在或不属于当前 Token 的项目")
-    info = svc.case_payload(case)
-    run = svc.latest_run_summary(db, case, history=3)
-    latest = run.get("run") or {}
-    script = str((info.get("script") or {}).get("content") or "")[:12000]
-    log_tail = str(latest.get("log_tail") or "")[-4000:]
-    failure = latest.get("failure_point") or "（暂无执行记录或未记录失败原因）"
-    return f"""你是资深 Playwright UI 自动化测试工程师。请通过 Insight-AITest 平台 MCP 服务，修复用例 {case_id} 的现有脚本并重新入库。
-
-【MCP 接入】
-- 服务地址：{_mcp_url()}（Streamable HTTP）
-- 请求头：Authorization: Bearer {token or "<从平台生成的 Bearer Token>"}
-- 可用工具：ui.run.latest / ui.contract.get / ui.case.get / ui.example.get / ui.script.validate / ui.script.dry_run / ui.script.submit
-- Token 只在本会话使用；不要写入脚本、不要提交到仓库。
-
-【用例】
-- 标题：{info.get("title") or ""}
-- case_rev：{info.get("case_rev") or ""}（入库时原样传回）
-- 脚本版本：{(info.get("script") or {}).get("version")}
-
-【最近一次执行】
-- 状态：{latest.get("status") or "无记录"}
-- 失败原因：{failure}
-- 日志尾部：
-{log_tail or "（无）"}
-
-【修复要求】
-1. 先调用 ui.run.latest(case_id={case_id}) 复核失败现场；再调用 ui.contract.get 与 ui.case.get 获取最新规则与用例快照。
-2. 以现有脚本为基线做最小修改，不要重写整个用例、不要改动与失败无关的步骤。
-3. 不允许为了通过而删除断言、放宽断言或注释掉步骤；确属用例本身问题时在最终回报中说明。
-4. 保持日志规范：每个 test 函数至少 3 条 print，[步骤] 开头，断言前打印 [断言] 实际值与预期值。
-5. 修改后依次调用 ui.script.validate → ui.script.dry_run → ui.script.submit，全部 ok 才算完成。
-6. 同一错误码连续 3 次仍无法推进时停止并回报。
-
-【现有脚本】
-```python
-{script}
-```
-
-【最终回报】
-1. 根因 2. 改动点（文件+行为）3. 校验/试跑结果 4. 脚本版本 5. 未解决项与建议
-"""
-
-
 def _build_server() -> MCPServer:
     server = MCPServer(
         name="insight-aitest",
         title="Insight-AITest UI 自动化",
         description="UI 自动化脚本「本地编写 + 平台校验入库」服务",
         instructions=INSTRUCTIONS,
-        version="1.2.0",
+        version="1.3.0",
     )
 
     @server.tool(
         name="ui.contract.get",
         title="读取编写契约",
         description=(
-            "读取用例编写契约：用例快照与 case_rev、现有脚本版本与源码、当前环境摘要、"
-            "项目 pages/common 资产清单、文件与 import 规则、硬编码/日志约束、错误码表，"
-            "以及本次应遵循的 workflow。契约是脚本编写的唯一事实来源。"
+            "读取用例编写契约：用例快照（含 params 实际值、category_path、status）、case_rev、"
+            "现有脚本版本与源码、当前环境摘要、pages/common 资产元数据、文件/import/日志规则、"
+            "本次应遵循的 workflow。契约是 case_rev 与 script.version 的唯一事实来源。"
+            "资产默认只返回 path/sha256/size；需要源码时传 include_assets_content=true。"
+            "错误码表在失败封套与 insight://rules 中提供。"
             "进度记录：调用后平台会把该用例标记为「生成中」，仅用于前端进度展示，"
             "不修改用例、脚本或项目资产。"
         ),
         annotations=_READ,
     )
-    def contract_get(case_id: CaseId) -> ContractPayload:
+    def contract_get(
+        case_id: CaseId,
+        include_assets_content: Annotated[
+            bool,
+            Field(description="是否返回 pages/common 资产源码全文；默认 false 仅返回 path、sha256 与大小"),
+        ] = False,
+    ) -> ContractPayload:
         db, case, err = _case_or_none(case_id)
         if err:
             return _error(err)
         svc.mark_generating(db, case)
         env = resolve_current_env(db, int(case.project_id))
-        payload = contract.contract_payload(case, env, intent=svc.case_intent(db, case))
+        payload = contract.contract_payload(
+            case,
+            env,
+            intent=svc.case_intent(db, case),
+            include_assets_content=include_assets_content,
+        )
         payload["ok"] = True
         case_info = payload.get("case") or {}
         script_info = payload.get("script") or {}
+        workflow = payload.get("workflow") or {}
+        steps = workflow.get("steps") or []
+        flow = " → ".join(
+            f"{s.get('tool')}{'' if s.get('required', True) else '?'}" for s in steps
+        )
         summary = "\n".join(
             [
                 f"【编写契约】contract_version={payload.get('contract_version')} intent={payload.get('intent')}",
                 f"case_rev={case_info.get('case_rev')} script_version={script_info.get('version')} "
-                f"assets={len(payload.get('assets') or [])}",
-                f"workflow={(payload.get('workflow') or {}).get('id')}；"
-                "完整 rules / env / assets / workflow 见 structuredContent",
+                f"assets={len(payload.get('assets') or [])}"
+                f"(content={'true' if include_assets_content else 'false'})",
+                f"workflow={workflow.get('id')}: {flow}",
+                f"硬规则：{contract.rules_digest()}",
+                "rules/env/workflow 详情见 structuredContent；"
+                "规则见 insight://rules，骨架见 insight://template，"
+                "现有脚本可 ui.case.get(include_script_content=true)",
             ]
         )
         return _result(summary, payload)
@@ -310,10 +307,13 @@ def _build_server() -> MCPServer:
         if err:
             return _error(err)
         payload = await asyncio.to_thread(svc.env_payload, db, case)
-        base = _current_base.get()
+        if not payload.get("ok"):
+            # P0-1：环境未配置/未授权必须 isError=true，不能被 Agent 当成成功
+            return _error(payload)
         auth = payload.get("auth") or {}
         rel = auth.get("storage_state_url") or ""
-        if payload.get("ok") and base and rel.startswith("/"):
+        base = _current_base.get()
+        if base and rel.startswith("/"):
             auth["storage_state_url"] = base + rel
         return payload
 
@@ -321,17 +321,23 @@ def _build_server() -> MCPServer:
         name="ui.case.get",
         title="读取用例详情",
         description=(
-            "读取用例详情：标题、前置、步骤、预期、端、参数定义，以及 case_rev、script.version "
-            "与 script.content（当前脚本全文，修复时作为基线）。"
-            "case_rev 与 script.version 在入库时作为 expect_case_rev / expect_script_version 原样回传。"
+            "读取用例详情：标题、前置、步骤、预期、端、params 实际值与 category_path/status。"
+            "默认只返回脚本路径/版本/哈希元数据；需要现有脚本全文时传 include_script_content=true。"
+            "提交入库所需的 case_rev 与 script.version 请以 ui.contract.get 返回值为准。"
         ),
         annotations=_READ,
     )
-    def case_get(case_id: CaseId) -> CasePayload:
+    def case_get(
+        case_id: CaseId,
+        include_script_content: Annotated[
+            bool,
+            Field(description="是否返回现有脚本全文；默认 false，仅返回版本/路径/哈希元数据"),
+        ] = False,
+    ) -> CasePayload:
         _, case, err = _case_or_none(case_id)
         if err:
             return _error(err)
-        payload = svc.case_payload(case)
+        payload = svc.case_payload(case, include_script_content=include_script_content)
         payload["ok"] = True
         return payload
 
@@ -341,7 +347,8 @@ def _build_server() -> MCPServer:
         description=(
             "批量判定每个用例本轮该做什么：create（无脚本）、fix（最近执行失败）、"
             "skip（最近执行通过、执行中或无执行记录）。"
-            "返回每个用例的状态、case_rev、脚本版本、最近一次执行摘要，以及 action 与 next_tool。"
+            "返回每个用例的状态、case_rev、脚本版本、最近一次执行摘要，以及 action 与 next_tool；"
+            "不属于当前项目或不存在、重复的 ID 会被去重并记入 missing_case_ids。"
             "只读，不写任何状态；skip 的用例不要调用其他工具或改动脚本。"
         ),
         annotations=_READ,
@@ -349,27 +356,45 @@ def _build_server() -> MCPServer:
     def case_triage(
         case_ids: Annotated[
             list[int],
-            Field(description="要判定的用例 ID 列表；单次最多 50 个，且必须属于当前 Token 的项目", min_length=1, max_length=50),
+            Field(
+                description="要判定的用例 ID 列表；单次最多 50 个，超过 50 个请分批调用；必须属于当前 Token 的项目",
+                min_length=1,
+                max_length=50,
+            ),
         ],
     ) -> TriagePayload:
         project_id = _project_id()
         db = _db()
-        cases = [c for c in (svc.resolve_case(db, cid, project_id) for cid in case_ids) if c is not None]
-        if not cases:
+        resolved: list = []
+        missing: list[int] = []
+        seen: set[int] = set()
+        for cid in case_ids:
+            if cid in seen:
+                continue
+            seen.add(cid)
+            case = svc.resolve_case(db, cid, project_id)
+            if case is None:
+                missing.append(cid)
+            else:
+                resolved.append(case)
+        if not resolved:
             return _error(svc.fail("CASE_NOT_FOUND", "用例均不存在或不属于当前 Token 的项目"))
-        result = svc.triage_cases(db, cases)
+        result = svc.triage_cases(db, resolved)
         result["ok"] = True
+        result["missing_case_ids"] = missing
         summary = result.get("summary") or {}
         lines = [
             "【用例分诊】"
-            + " ".join(f"{k}={v}" for k, v in summary.items()),
+            + " ".join(f"{k}={v}" for k, v in summary.items())
+            + f" missing={len(missing)}",
         ]
-        for item in (result.get("items") or [])[:20]:
-            lines.append(
-                f"- {item.get('case_id')} {item.get('title') or ''} → {item.get('action')}"
-                f"（{item.get('reason') or ''}）"
-            )
-        lines.append("逐例明细与 next_tool 见 structuredContent")
+        for item in result.get("items") or []:
+            reason = str(item.get("reason") or "").replace("\n", " ")[:60]
+            tail = f" → {item['next_tool']}" if item.get("next_tool") else ""
+            lines.append(f"- {item.get('case_id')} {item.get('action')}{tail}（{reason}）")
+        if missing:
+            lines.append("- missing_case_ids: " + ",".join(str(i) for i in missing))
+        lines.append("last_run 明细见 structuredContent")
         return _result("\n".join(lines), result)
 
     @server.tool(
@@ -394,18 +419,28 @@ def _build_server() -> MCPServer:
             case, db, max_examples=max_examples, include_assets=include_assets
         )
         payload["ok"] = True
-        summary = "\n".join(
-            [
-                f"【项目经验】hard_rules={len(payload.get('hard_rules') or [])} "
-                f"known_traps={len(payload.get('known_traps') or [])} "
-                f"lessons={len(payload.get('lessons') or [])} "
-                f"routes={len(payload.get('known_routes') or [])} "
-                f"examples={len(payload.get('examples') or [])} "
-                f"assets={len(payload.get('assets') or [])}",
-                "片段、资产签名与最小骨架 template 见 structuredContent",
-            ]
+        lines = [
+            f"【项目经验】hard_rules={len(payload.get('hard_rules') or [])} "
+            f"known_traps={len(payload.get('known_traps') or [])} "
+            f"lessons={len(payload.get('lessons') or [])} "
+            f"routes={len(payload.get('known_routes') or [])} "
+            f"examples={len(payload.get('examples') or [])} "
+            f"assets={len(payload.get('assets') or [])} "
+            f"truncated={payload.get('stats', {}).get('truncated')}",
+        ]
+        if payload.get("lessons"):
+            lines.append(
+                "lessons: "
+                + "；".join(
+                    f"[{x.get('category') or '-'}] {str(x.get('title') or '')[:40]}"
+                    for x in payload["lessons"][:3]
+                )
+            )
+        lines.append(
+            "片段、资产签名与最小骨架见 structuredContent；"
+            "规则见 insight://rules，骨架见 insight://template"
         )
-        return _result(summary, payload)
+        return _result("\n".join(lines), payload)
 
     @server.tool(
         name="ui.script.validate",
@@ -458,6 +493,7 @@ def _build_server() -> MCPServer:
             "硬前置：source_hash、expect_case_rev、expect_script_version 必须与平台一致；"
             "覆盖 pages/common 需 force_assets=true（覆盖前自动备份）。写入不可回滚。"
             "默认路径为版本化新增并归档旧版；仅当 force_assets=true 时才替换已有项目资产。"
+            "试跑未通过时返回 DRY_RUN_REQUIRED，应先 ui.script.dry_run。"
         ),
         annotations=_SUBMIT,
     )
@@ -465,8 +501,8 @@ def _build_server() -> MCPServer:
         case_id: CaseId,
         files: Files,
         source_hash: SourceHash,
-        expect_case_rev: Annotated[str, Field(description="ui.case.get 返回的 case_rev，原样回传用于乐观锁")],
-        expect_script_version: Annotated[int, Field(description="ui.case.get 返回的 script.version，整数")],
+        expect_case_rev: Annotated[str, Field(description="ui.contract.get 返回的 case.case_rev，原样回传用于乐观锁")],
+        expect_script_version: Annotated[int, Field(description="ui.contract.get 返回的 script.version，整数")],
         params_schema: Annotated[list | None, Field(description="可选用例参数定义；不传表示不修改")] = None,
         force_assets: Annotated[bool, Field(description="是否允许覆盖已存在的 pages/common 资产")] = False,
     ) -> SubmitPayload:
@@ -514,14 +550,14 @@ def _build_server() -> MCPServer:
         payload["ok"] = True
         run = payload.get("run") or {}
         if not run:
-            summary = "【最近执行】无执行记录"
+            summary = "【最近执行】无执行记录；按 ui.contract.get 的 intent 处理（通常为 create）"
         else:
             summary = "\n".join(
                 [
                     f"【最近执行】status={run.get('status')} run_id={run.get('id')} "
-                    f"duration_ms={run.get('duration_ms')}",
+                    f"duration_ms={run.get('duration_ms')} script_version={run.get('script_version')}",
                     f"失败原因：{(run.get('error') or '无')[:200]}",
-                    "日志尾部、截图与历史记录见 structuredContent",
+                    "日志尾部、截图与历史见 structuredContent",
                 ]
             )
         return _result(summary, payload)
@@ -529,28 +565,54 @@ def _build_server() -> MCPServer:
     # ---- MCP prompts：把编写/修复文案交给客户端原生渲染，替代手工粘贴 ----
 
     @server.prompt(
-        name="ui.create",
-        title="本地 Agent 编写脚本",
-        description="生成可直接交给本地 Agent 的编写指令；case_ids 为逗号分隔的用例 ID，token 为平台「本地 Agent 编写」生成的 Bearer Token。",
+        name="ui.auto",
+        title="本地 Agent 自动分诊并处理",
+        description="先分诊再按 create/fix 处理；case_ids 为逗号分隔的用例 ID，token 可省略（客户端已认证时）。",
     )
-    def ui_create_prompt(case_ids: str, token: str = "") -> list[dict]:
-        from insight_aitest.modules.ui.backend.automation.routes.authoring import build_prompt
-
-        ids = [int(x) for x in str(case_ids).replace(" ", "").split(",") if x.isdigit()]
+    def ui_auto_prompt(
+        case_ids: Annotated[str, Field(description="逗号分隔的用例 ID；至少一个数字 ID")],
+        token: Annotated[str, Field(description="平台 Bearer Token；客户端已认证时可省略")] = "",
+    ) -> list[dict]:
+        ids = prompt_builder.parse_case_ids(case_ids)
         if not ids:
             raise ToolError("case_ids 至少包含一个数字用例 ID")
-        text = build_prompt(ids, token or "<从平台生成的 Bearer Token>", _mcp_url())
-        return [{"role": "user", "content": text}]
+        return [
+            {"role": "user", "content": prompt_builder.render_auto_prompt(ids, token, _mcp_url())}
+        ]
+
+    @server.prompt(
+        name="ui.create",
+        title="本地 Agent 编写脚本",
+        description="生成可直接交给本地 Agent 的编写指令；case_ids 为逗号分隔的用例 ID，token 可省略。",
+    )
+    def ui_create_prompt(
+        case_ids: Annotated[str, Field(description="逗号分隔的用例 ID；至少一个数字 ID")],
+        token: Annotated[str, Field(description="平台 Bearer Token；客户端已认证时可省略")] = "",
+    ) -> list[dict]:
+        ids = prompt_builder.parse_case_ids(case_ids)
+        if not ids:
+            raise ToolError("case_ids 至少包含一个数字用例 ID")
+        return [
+            {"role": "user", "content": prompt_builder.render_create_prompt(ids, token, _mcp_url())}
+        ]
 
     @server.prompt(
         name="ui.fix",
         title="本地 Agent 修复脚本",
-        description="基于现有脚本与最近一次执行失败生成修复指令；case_id 为用例 ID，token 为平台 Bearer Token。",
+        description="基于最近一次执行失败生成修复指令；case_id 为用例 ID，token 可省略（客户端已认证时）。",
     )
-    def ui_fix_prompt(case_id: str, token: str = "") -> list[dict]:
+    def ui_fix_prompt(
+        case_id: Annotated[str, Field(description="用例 ID，必须是当前 Token 项目内的用例")],
+        token: Annotated[str, Field(description="平台 Bearer Token；客户端已认证时可省略")] = "",
+    ) -> list[dict]:
         if not str(case_id).isdigit():
             raise ToolError("case_id 必须是数字")
-        return [{"role": "user", "content": _fix_prompt_text(int(case_id), token)}]
+        db = _db()
+        if svc.resolve_case(db, int(case_id), _project_id()) is None:
+            raise ToolError(f"CASE_NOT_FOUND：用例 {case_id} 不存在或不属于当前 Token 的项目")
+        return [
+            {"role": "user", "content": prompt_builder.render_fix_prompt([int(case_id)], token, _mcp_url())}
+        ]
 
     # ---- MCP resources：静态规则与骨架，客户端可按 URI 直接读取 ----
 
@@ -558,21 +620,37 @@ def _build_server() -> MCPServer:
         "insight://rules",
         name="编写规则",
         title="编写硬规则与错误码",
-        description="L1/L2 校验规则、import 白名单、日志格式要求、错误码与修复建议。",
+        description="L1/L2 校验规则、import 白名单、日志格式要求、硬规则摘要、已知坑、错误码与修复建议。",
         mime_type="application/json",
     )
     def rules_resource() -> str:
-        return json.dumps(contract.contract_rules(), ensure_ascii=False)
+        return json.dumps(
+            contract.contract_rules(include_error_codes=True, include_hard_rules=True),
+            ensure_ascii=False,
+        )
 
     @server.resource(
         "insight://template",
         name="最小骨架",
         title="最小可运行脚本骨架",
-        description="包含 [步骤]/[断言] 日志的最小可运行 Playwright 脚本骨架。",
+        description=(
+            "包含 [步骤]/[断言] 日志的最小可运行 Playwright 脚本骨架；"
+            "后台最小骨架；前台用例请用 ui.example.get 获取对应 site 的骨架。"
+        ),
         mime_type="text/x-python",
     )
     def template_resource() -> str:
         return example_service.template()
+
+    @server.resource(
+        "insight://instructions",
+        name="运行规范",
+        title="本地 Agent 全局操作规范",
+        description="认证/边界、浏览器前置、分诊优先级、串行规则、终止作用域、标准路径与降级路径。",
+        mime_type="text/plain",
+    )
+    def instructions_resource() -> str:
+        return INSTRUCTIONS
 
     return server
 
