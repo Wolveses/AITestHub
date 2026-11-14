@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
+from insight_aitest.modules.ui.backend.automation import authoring_service as svc
 from insight_aitest.modules.ui.backend.automation import concurrency, paths
 from insight_aitest.modules.ui.backend.automation.database import UIAutomationDatabase
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
@@ -20,6 +21,7 @@ from insight_aitest.modules.ui.backend.automation.importer import import_cases, 
 from insight_aitest.modules.ui.backend.automation.models import (
     CaseStatus,
     GenerationKind,
+    GenerationStatus,
     Site,
 )
 from insight_aitest.modules.ui.backend.automation.runner import EnvMissingError, finish_run, run_script, start_run
@@ -71,6 +73,10 @@ def _case_out(case, db: UIAutomationDatabase) -> dict:
         "last_error_message": case.last_error_message,
         "last_run_id": case.last_run_id,
         "last_generated_at": case.last_generated_at.isoformat() if case.last_generated_at else None,
+        # 脚本来处：前端据此展示「本地 Agent 入库」徽标
+        "source": getattr(case, "source", "ai"),
+        "authoring_by": getattr(case, "authoring_by", ""),
+        "authoring_at": case.authoring_at.isoformat() if case.authoring_at else None,
         "progress": progress,
         "created_at": case.created_at.isoformat() if case.created_at else None,
         "updated_at": case.updated_at.isoformat() if case.updated_at else None,
@@ -289,8 +295,13 @@ def _referenced_pages(project_id: int, source: str) -> list[dict]:
 
 def _start_generate(case_id: int, kind: str, db: UIAutomationDatabase) -> dict:
     case = _get_or_404(case_id, db)
+    if kind == GenerationKind.REGENERATE and not case.script_rel_path:
+        raise HTTPException(400, "该用例还没有脚本，无法重新生成，请先生成脚本")
     if kind == GenerationKind.FIX and not case.script_rel_path:
         raise HTTPException(400, "该用例还没有脚本，无法自动修复，请先生成脚本")
+    if kind == GenerationKind.GENERATE and case.script_rel_path:
+        # 旧客户端仍打 /generate：已有脚本时按「重新生成」记账
+        kind = GenerationKind.REGENERATE
     project_id = int(case.project_id)
     if not concurrency.acquire(project_id):
         raise HTTPException(409, "该项目已有任务在执行（生成/修复/运行），请稍后重试")
@@ -313,6 +324,11 @@ def fix(case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)) -> 
     return _start_generate(case_id, GenerationKind.FIX, db)
 
 
+@router.post("/{case_id}/regenerate")
+def regenerate(case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)) -> dict:
+    return _start_generate(case_id, GenerationKind.REGENERATE, db)
+
+
 @router.post("/{case_id}/cancel")
 def cancel_generate(
     case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)
@@ -320,6 +336,9 @@ def cancel_generate(
     """终止正在进行的生成/修复任务（卡在模型响应或浏览器调用时主动停止）。"""
     case = _get_or_404(case_id, db)
     if not cancel_job(case_id):
+        # 本地 Agent 编写期间用例状态不会变 generating，单独收敛其生成记录
+        if svc.abandon_local_generation(db, case, "用户已终止"):
+            return {"accepted": True, "case_id": case_id, "local_abandoned": True}
         # 进程内任务已不存在（典型场景：后端重启后残留 generating/fixing 状态），
         # 直接把用例收敛回终止态，避免前端一直显示生成中、停止按钮报「没有进行中任务」
         if case.status in (CaseStatus.GENERATING, CaseStatus.FIXING):
@@ -477,8 +496,27 @@ def _format_generation_log(text: str, tail: int) -> str:
             items = ev.get("items") or []
             names = "、".join(str(i.get("label") or "") for i in items)
             lines.append(f"[控件清单] 共 {len(items)} 项：{names}")
+        elif kind == "session":
+            lines.append(
+                f"[会话] 本地 Agent 开始编写 · kind={ev.get('kind')} mode={ev.get('mode')}"
+            )
+        elif kind == "session_end":
+            lines.append(f"[会话结束] {ev.get('status')}：{str(ev.get('message') or '')[:300]}")
+        elif kind == "agent":
+            lines.append(f"[调用] {ev.get('tool')}{'（失败）' if ev.get('ok') is False else ''}")
+        elif kind == "dry_run":
+            ok = ev.get("status") == "passed"
+            lines.append(
+                f"[试跑] {'通过' if ok else '失败'}（{ev.get('duration_ms') or '-'}ms）："
+                f"{str(ev.get('message') or '')[:500]}"
+            )
+        elif kind == "submit":
+            lines.append(f"[入库] 脚本已入库 v{ev.get('script_version')}")
+        elif kind == "error":
+            lines.append(f"[失败] {ev.get('code')}：{str(ev.get('message') or '')[:500]}")
         elif kind in ("validate",):
-            lines.append(f"[校验] {kind}：{str(ev.get('message') or ev)[:500]}")
+            ok = ev.get("status") == "passed"
+            lines.append(f"[校验] {'通过' if ok else '失败'}：{str(ev.get('message') or ev)[:500]}")
         elif kind in ("bad_ref", "unknown_tool", "bad_json", "llm_error"):
             lines.append(f"[异常] {kind}：{str(ev)[:500]}")
         else:
@@ -499,11 +537,15 @@ def get_generation_log(
     """生成过程日志（探索/工具调用/校验事件）：生成中轮询可看到实时进展。"""
     _get_or_404(case_id, db)
     gen = next((g for g in db.list_generations(case_id) if g.id == generation_id), None)
-    if gen is None or not gen.log_rel_path:
-        raise HTTPException(404, "生成日志不存在")
+    if gen is None:
+        raise HTTPException(404, "生成记录不存在")
+    if not gen.log_rel_path:
+        if gen.status == GenerationStatus.RUNNING:
+            return Response("（等待生成输出…）", media_type="text/plain; charset=utf-8")
+        return Response("（本次生成记录没有过程日志）", media_type="text/plain; charset=utf-8")
     log = paths.resolve_rel(gen.log_rel_path)
     if not log.exists():
-        return Response("（等待生成输出…）", media_type="text/plain; charset=utf-8")
+        return Response("（日志文件已清理）", media_type="text/plain; charset=utf-8")
     return Response(
         _format_generation_log(log.read_text(encoding="utf-8", errors="replace"), tail),
         media_type="text/plain; charset=utf-8",
@@ -514,7 +556,9 @@ def get_generation_log(
 def list_generations(
     case_id: int, db: UIAutomationDatabase = Depends(get_automation_db)
 ) -> list[dict]:
-    _get_or_404(case_id, db)
+    case = _get_or_404(case_id, db)
+    # 惰性收敛长时间无进展的本地 Agent 会话，避免永久 running
+    svc.sweep_stale_generation(db, case)
     return [
         {
             "id": g.id,
@@ -525,12 +569,19 @@ def list_generations(
             "error_message": g.error_message,
             "tool_calls": g.tool_calls,
             "model": g.model,
+            "origin": "local_agent" if (g.model or "") == "local_agent" else "platform",
             "corpus_chars": g.corpus_chars,
             "prompt_chars": g.prompt_chars,
             "completion_chars": g.completion_chars,
             "fix_rounds": g.fix_rounds,
             "log_rel_path": g.log_rel_path,
+            "has_log": bool(g.log_rel_path),
             "has_screenshot": paths.generation_shot(case_id, g.id).is_file(),
+            "duration_ms": (
+                int((g.finished_at - g.started_at).total_seconds() * 1000)
+                if (g.finished_at and g.started_at)
+                else None
+            ),
             "started_at": g.started_at.isoformat() if g.started_at else None,
             "finished_at": g.finished_at.isoformat() if g.finished_at else None,
         }

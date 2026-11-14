@@ -41,10 +41,15 @@ def _client_base(request: Request) -> str:
     return base
 
 
+AUTHORING_MODES = ("auto", "create", "fix", "regenerate")
+
+
 def build_prompt(case_ids: list[int], token: str, mcp_url: str, mode: str = "create") -> str:
     """兼容旧调用点：按 mode 委托 prompt_builder（文案只在 prompt_builder 维护）。"""
     if mode == "fix":
         return prompt_builder.render_fix_prompt(case_ids, token, mcp_url)
+    if mode == "regenerate":
+        return prompt_builder.render_regenerate_prompt(case_ids, token, mcp_url)
     return prompt_builder.render_create_prompt(case_ids, token, mcp_url)
 
 
@@ -63,8 +68,8 @@ async def create_prompt(request: Request, body: dict):
         raise HTTPException(400, "缺少 project_id")
     if not case_ids:
         raise HTTPException(400, "请至少勾选一个用例")
-    if mode not in ("auto", "create", "fix"):
-        raise HTTPException(400, "不支持的 mode，仅支持 auto / create / fix")
+    if mode not in AUTHORING_MODES:
+        raise HTTPException(400, "不支持的 mode，仅支持 auto / create / fix / regenerate")
 
     # 去重（保序），避免重复 triage / 重复事件；校验必须在建 Token 之前，避免孤儿 Token
     seen: set[int] = set()
@@ -83,8 +88,11 @@ async def create_prompt(request: Request, body: dict):
 
     base = _client_base(request)
     mcp_url = f"{base}/mcp"
-    triage = svc.triage_cases(db, cases)
-    action_required = triage["summary"]["create"] + triage["summary"]["fix"]
+    triage_mode = "regenerate" if mode == "regenerate" else "auto"
+    triage = svc.triage_cases(db, cases, mode=triage_mode)
+    action_required = sum(
+        triage["summary"][key] for key in ("create", "fix", "regenerate")
+    )
 
     result = {
         "ok": True,
@@ -102,11 +110,12 @@ async def create_prompt(request: Request, body: dict):
         "token_id": None,
         "expires_at": None,
     }
-    if mode == "auto" and action_required == 0:
+    if mode in ("auto", "regenerate") and action_required == 0:
         return result
 
     token, row = mcp_tokens.create_token(project_id, name=f"本地 Agent {datetime.now():%m-%d %H:%M}")
-    if mode == "auto":
+    if mode in ("auto", "regenerate"):
+        # 新建、修复、重新生成共用同一套文案
         prompt = build_auto_prompt(cases, token, mcp_url)
     else:
         prompt = build_prompt(valid_ids, token, mcp_url, mode=mode)
@@ -124,12 +133,19 @@ async def create_prompt(request: Request, body: dict):
 
 
 @router.get("/triage")
-def triage(project_id: int = Query(...), case_ids: str = Query("")):
-    """只读预检：勾选用例本轮分别该 create / fix / skip。"""
+def triage(
+    project_id: int = Query(...),
+    case_ids: str = Query(""),
+    mode: str = Query("auto"),
+):
+    """只读预检：勾选用例本轮分别该 create / fix / regenerate / skip。"""
+    mode = str(mode or "auto").strip().lower()
+    if mode not in svc.TRIAGE_MODES:
+        raise HTTPException(400, "不支持的 mode，仅支持 auto / regenerate")
     ids = [int(x) for x in case_ids.split(",") if x.strip().isdigit()]
     db = get_automation_db()
     cases = [c for c in (svc.resolve_case(db, cid, project_id) for cid in ids) if c is not None]
-    result = svc.triage_cases(db, cases)
+    result = svc.triage_cases(db, cases, mode=mode)
     return {"ok": True, **result}
 
 
@@ -183,6 +199,8 @@ def authoring_status(case_ids: str = Query("")):
                 "source": getattr(case, "source", "ai"),
                 "authoring_at": case.authoring_at.isoformat() if case.authoring_at else None,
                 "stage": state.stage if state else "",
+                "mode": (state.authoring_mode if state else "") or "auto",
+                "generation_id": state.generation_id if state else None,
                 "last_error": state.last_error if state else "",
                 "latest_event_id": db.latest_authoring_event_id(cid),
                 "recent_events": [_event_dict(r) for r in events],
@@ -219,6 +237,8 @@ def authoring_active(
                 "title": case.title,
                 "status": case.status,
                 "stage": state.stage,
+                "mode": (state.authoring_mode or "") or "auto",
+                "generation_id": state.generation_id,
                 "script_version": int(case.script_version or 0),
                 "source_hash": (state.source_hash or "")[:12],
                 "last_error": state.last_error or "",
