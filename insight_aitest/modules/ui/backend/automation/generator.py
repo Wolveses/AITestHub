@@ -2813,6 +2813,10 @@ class GenerationJob:
 
 def start_job(case_id: int, kind: str) -> None:
     """在后台线程启动生成/修复（调用方需已通过 acquire 抢到项目锁）。"""
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if not is_ai_assist_enabled():
+        raise RuntimeError("系统设置已关闭 LLM 自动化辅助能力，已阻止启动生成/修复任务")
     # 先清理上一次残留的终止标记，避免新任务一起手就被判定为已终止
     concurrency.clear_cancel(case_id)
     job = GenerationJob(case_id, kind)

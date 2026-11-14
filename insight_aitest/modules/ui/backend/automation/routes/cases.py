@@ -294,6 +294,14 @@ def _referenced_pages(project_id: int, source: str) -> list[dict]:
 
 
 def _start_generate(case_id: int, kind: str, db: UIAutomationDatabase) -> dict:
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if not is_ai_assist_enabled():
+        raise HTTPException(
+            403,
+            "系统设置已关闭「LLM 自动化辅助能力」，无法使用内置模型生成/修复脚本；"
+            "请改用「本地 Agent」或前往系统设置开启",
+        )
     case = _get_or_404(case_id, db)
     if kind == GenerationKind.REGENERATE and not case.script_rel_path:
         raise HTTPException(400, "该用例还没有脚本，无法重新生成，请先生成脚本")

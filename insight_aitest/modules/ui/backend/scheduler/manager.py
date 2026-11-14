@@ -46,6 +46,12 @@ def _run_scheduled_ui_task(task_id: int) -> None:
 
 def _run_scheduled_ui_batch(sched_id: int) -> None:
     """定时任务回调：执行批量 UI 用例并记录结果。"""
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if not is_ai_assist_enabled():
+        logger.info(f"定时任务 {sched_id} 跳过（UI 视觉执行）：系统设置已关闭 LLM 自动化辅助能力")
+        return
+
     import insight_aitest.modules.ui.backend.deps as ui_deps
     from insight_aitest.modules.ui.backend.scheduler.database import ScheduledUIBatchDatabase
 

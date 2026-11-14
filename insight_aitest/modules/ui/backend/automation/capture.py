@@ -314,7 +314,9 @@ def import_captured_api_assets(
     except Exception as exc:
         logger.warning("抓包入库失败：%s", exc)
 
-    if auto_enhance and fingerprints:
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if auto_enhance and fingerprints and is_ai_assist_enabled():
         # 只整理尚无整理结果的资产（含本次新增，以及此前整理失败/中断留下的），
         # 已整理过的接口不重复调用模型；整理放到后台线程，避免生成流程卡在「本地验证」
         try:
@@ -361,6 +363,12 @@ def _auto_enhance_assets(
 ) -> dict:
     """对尚未整理过的抓包资产自动整理并应用（失败不影响生成）。"""
     stats = {"enhanced": 0, "enhance_failed": 0, "enhance_skipped": 0}
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if not is_ai_assist_enabled():
+        logger.info("自动 AI 整理已跳过：系统设置已关闭 LLM 自动化辅助能力")
+        stats["enhance_skipped"] = len(fingerprints)
+        return stats
     try:
         from insight_aitest.modules.ai.backend.deps import get_llm
         from insight_aitest.modules.api.backend.services.asset_enhance import enhance

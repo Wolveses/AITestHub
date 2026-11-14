@@ -107,7 +107,21 @@ async def _run_batch_task(
     failed = 0
     error_count = 0
 
-    # 前置校验视觉模型配置（可能抛 VisionConfigError）
+    # 前置校验开关与视觉模型配置（可能抛 VisionConfigError）
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if not is_ai_assist_enabled():
+        logger.warning(f"批量执行 {batch_id} 已阻止：系统设置已关闭 LLM 自动化辅助能力")
+        batch_db.update(
+            batch_id,
+            status=BatchRunStatus.ERROR,
+            passed=0,
+            failed=0,
+            error=len(case_ids),
+            case_run_ids=[],
+            finished_at=datetime.now(),
+        )
+        return
     try:
         agent_factory = _make_agent_factory()
     except VisionConfigError as e:
@@ -188,6 +202,14 @@ async def execute_batch(
     body: BatchExecuteRequest,
     db: UIBatchRunDatabase = Depends(get_batch_db),
 ) -> dict:
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if not is_ai_assist_enabled():
+        raise HTTPException(
+            403,
+            "系统设置已关闭「LLM 自动化辅助能力」，暂不可使用 UI 视觉模型批量执行；"
+            "请改用 UI 自动化任务调度或前往系统设置开启",
+        )
     if not body.case_ids:
         raise HTTPException(422, "请至少选择一个用例")
 
