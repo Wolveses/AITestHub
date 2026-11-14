@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Play, Sparkles, Wrench, X, Copy, FileCode, Square } from 'lucide-react';
 import { useAutomationStore, type AutomationCase, type GenerationRecord, type ParamSchemaItem, type ScriptRun } from '../../store/automationStore';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 import { Btn, ErrorCategoryTag, Field, StatusBadge, inputStyle, STATUS_META } from './common';
 import { artifactUrl, ImagePreviewOverlay, LogViewer } from './RunArtifacts';
 
@@ -13,6 +14,7 @@ type ScriptPreview = { content: string; version: number; pages: { name: string; 
 
 export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; onClose: () => void }) {
   const { t } = useTranslation();
+  const aiAssistEnabled = useCapabilitiesStore((s) => s.aiAssistEnabled);
   const { getCase, getScript, listRuns, listGenerations, updateCase, generate, regenerate, fix, cancelGenerate, run } = useAutomationStore();
   const [detail, setDetail] = useState<AutomationCase | null>(null);
   const [script, setScript] = useState<ScriptPreview>({ content: '', version: 0, pages: [] });
@@ -290,8 +292,12 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
             <Btn
               size="sm"
               variant="primary"
-              disabled={active || submitting}
-              title={t('ui.auto.regenerateHint', '重新探索页面并生成脚本（会消耗模型额度）')}
+              disabled={active || submitting || !aiAssistEnabled}
+              title={
+                !aiAssistEnabled
+                  ? t('ui.auto.aiAssistDisabledHint', '系统设置已关闭内置 LLM 脚本生成，请改用「本地 Agent」或前往系统设置开启')
+                  : t('ui.auto.regenerateHint', '重新探索页面并生成脚本（会消耗模型额度）')
+              }
               onClick={() =>
                 act(
                   detail.has_script ? regenerate : generate,
@@ -304,7 +310,16 @@ export function CaseDetailDrawer({ caseId, onClose }: { caseId: number | null; o
             <Btn size="sm" disabled={active || submitting || detail.status !== 'implemented'} onClick={() => act(run, t('ui.auto.runQueued', '已提交执行任务'))}>
               <Play size={12} /> {t('ui.auto.runScript', '执行')}
             </Btn>
-            <Btn size="sm" disabled={active || submitting || detail.status !== 'implemented'} onClick={() => act(fix, t('ui.auto.fixQueued', '已提交修复任务'))}>
+            <Btn
+              size="sm"
+              disabled={active || submitting || detail.status !== 'implemented' || !aiAssistEnabled}
+              title={
+                !aiAssistEnabled
+                  ? t('ui.auto.aiAssistDisabledHint', '系统设置已关闭内置 LLM 脚本生成，请改用「本地 Agent」或前往系统设置开启')
+                  : undefined
+              }
+              onClick={() => act(fix, t('ui.auto.fixQueued', '已提交修复任务'))}
+            >
               <Wrench size={12} /> {t('ui.auto.autoFix', '自动修复')}
             </Btn>
             {generating && (

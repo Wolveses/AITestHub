@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { Download, Globe, Play, RefreshCw, Search, Sparkles, Wrench, Eye, Square, Bot, Activity } from 'lucide-react';
 import { useProjectStore } from '../../../../shared/store/projectStore';
 import { useConfirmStore } from '../../../../shared/store/confirmStore';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 import { ModuleHelpButton } from '../../../../shared/components/ModuleHelpButton';
 import { useAutomationStore, type AutomationCase, fetchAuthoringActive, fetchAuthoringTriage, type AuthoringTriageSummary } from '../../store/automationStore';
 import { CategoryTree } from './CategoryTree';
@@ -17,6 +18,7 @@ const ACTIVE_STATUSES = new Set(['generating', 'fixing', 'running']);
 
 export function AutomationPage() {
   const { t } = useTranslation();
+  const aiAssistEnabled = useCapabilitiesStore((s) => s.aiAssistEnabled);
   const { projects, currentProjectId, loadProjects } = useProjectStore();
   const { confirm } = useConfirmStore();
   const {
@@ -488,15 +490,46 @@ export function AutomationPage() {
                     </span>
                     <div style={{ display: 'flex', gap: 4 }} onClick={(e) => e.stopPropagation()}>
                       {!c.has_script ? (
-                        <Btn size="sm" variant="primary" disabled={active} title={t('ui.auto.generateScript', '生成脚本')} onClick={() => withBusy(c.id, () => generate(c.id), t('ui.auto.generateQueued', '已提交生成任务'))}>
+                        <Btn
+                          size="sm"
+                          variant="primary"
+                          disabled={active || !aiAssistEnabled}
+                          title={
+                            !aiAssistEnabled
+                              ? t('ui.auto.aiAssistDisabledHint', '系统设置已关闭内置 LLM 脚本生成，请改用「本地 Agent」或前往系统设置开启')
+                              : t('ui.auto.generateScript', '生成脚本')
+                          }
+                          onClick={() => withBusy(c.id, () => generate(c.id), t('ui.auto.generateQueued', '已提交生成任务'))}
+                        >
                           <Sparkles size={12} />
                         </Btn>
                       ) : (
-                        <Btn size="sm" disabled={active} title={c.status === 'implemented' ? t('ui.auto.runScript', '执行') : t('ui.auto.generateScript', '生成脚本')} onClick={() => c.status === 'implemented' ? withBusy(c.id, () => run(c.id), t('ui.auto.runQueued', '已提交执行任务')) : withBusy(c.id, () => generate(c.id), t('ui.auto.generateQueued', '已提交生成任务'))}>
+                        <Btn
+                          size="sm"
+                          disabled={active || (c.status !== 'implemented' && !aiAssistEnabled)}
+                          title={
+                            c.status === 'implemented'
+                              ? t('ui.auto.runScript', '执行')
+                              : !aiAssistEnabled
+                                ? t('ui.auto.aiAssistDisabledHint', '系统设置已关闭内置 LLM 脚本生成，请改用「本地 Agent」或前往系统设置开启')
+                                : t('ui.auto.generateScript', '生成脚本')
+                          }
+                          onClick={() => c.status === 'implemented' ? withBusy(c.id, () => run(c.id), t('ui.auto.runQueued', '已提交执行任务')) : withBusy(c.id, () => generate(c.id), t('ui.auto.generateQueued', '已提交生成任务'))}
+                        >
                           {c.status === 'implemented' ? <Play size={12} /> : <RefreshCw size={12} />}
                         </Btn>
                       )}
-                      <Btn size="sm" variant="ghost" disabled={active || c.status !== 'implemented'} title={t('ui.auto.autoFix', '自动修复')} onClick={() => withBusy(c.id, () => fix(c.id), t('ui.auto.fixQueued', '已提交修复任务'))}>
+                      <Btn
+                        size="sm"
+                        variant="ghost"
+                        disabled={active || c.status !== 'implemented' || !aiAssistEnabled}
+                        title={
+                          !aiAssistEnabled
+                            ? t('ui.auto.aiAssistDisabledHint', '系统设置已关闭内置 LLM 脚本生成，请改用「本地 Agent」或前往系统设置开启')
+                            : t('ui.auto.autoFix', '自动修复')
+                        }
+                        onClick={() => withBusy(c.id, () => fix(c.id), t('ui.auto.fixQueued', '已提交修复任务'))}
+                      >
                         <Wrench size={12} />
                       </Btn>
                       {generating && (
