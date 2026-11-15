@@ -58,6 +58,17 @@ def _ensure_session_project_column(db_path: str) -> None:
         conn.commit()
 
 
+def _ensure_session_memory_total_column(db_path: str) -> None:
+    """增量迁移：给旧 sessions 表补 memory_total_mb 列（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if "memory_total_mb" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN memory_total_mb REAL")
+        conn.commit()
+
+
 class DatabaseManager:
     """数据库管理器 - 线程安全的数据库操作（单例）。
 
@@ -96,7 +107,14 @@ class DatabaseManager:
             get_engine(db_path),
             tables=[SessionRow.__table__, MetricsRow.__table__, AlertRow.__table__],
         )
-        ensure_schema(db_path, [_ensure_app_name, _ensure_session_project_column])
+        ensure_schema(
+            db_path,
+            [
+                _ensure_app_name,
+                _ensure_session_project_column,
+                _ensure_session_memory_total_column,
+            ],
+        )
 
     # ==================== 会话管理 ====================
 
@@ -177,7 +195,7 @@ class DatabaseManager:
         )
 
     def update_session(self, session_id: int, **kwargs: Any) -> None:
-        """更新会话信息（可更新字段：status/end_time/duration）。
+        """更新会话信息（可更新字段：status/end_time/duration/memory_total_mb）。
 
         end_time 兼容旧调用方传 isoformat 字符串（device_manager 传字符串），
         这里统一转 datetime（DateTime 列不接受字符串）。
@@ -186,7 +204,7 @@ class DatabaseManager:
             row = s.get(SessionRow, session_id)
             if row is None:
                 return
-            for key in ("status", "end_time", "duration"):
+            for key in ("status", "end_time", "duration", "memory_total_mb"):
                 if key in kwargs:
                     val = kwargs[key]
                     if key == "end_time" and isinstance(val, str):
@@ -204,6 +222,7 @@ class DatabaseManager:
                 id=row.id,
                 device_id=row.device_id,
                 app_package=row.app_package,
+                app_name=row.app_name,
                 platform=row.platform,
                 start_time=row.start_time,
                 end_time=row.end_time,
@@ -211,6 +230,7 @@ class DatabaseManager:
                 duration=row.duration,
                 sampling_interval=row.sampling_interval,
                 project_id=row.project_id,
+                memory_total_mb=row.memory_total_mb,
             )
 
     def list_sessions(
@@ -236,6 +256,7 @@ class DatabaseManager:
                 id=r.id,
                 device_id=r.device_id,
                 app_package=r.app_package,
+                app_name=r.app_name,
                 platform=r.platform,
                 start_time=r.start_time,
                 end_time=r.end_time,
@@ -243,6 +264,7 @@ class DatabaseManager:
                 duration=r.duration,
                 sampling_interval=r.sampling_interval,
                 project_id=r.project_id,
+                memory_total_mb=r.memory_total_mb,
             )
             for r in rows
         ]
@@ -330,6 +352,39 @@ class DatabaseManager:
             s.flush()
             return row.id
 
+    def resolve_alerts(
+        self,
+        session_id: int,
+        alert_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """将指定会话（及可选告警类型）下未解除的告警标记为已解除，并返回被解除的告警列表。"""
+        stmt = select(AlertRow).where(
+            AlertRow.session_id == session_id,
+            AlertRow.resolved == 0,
+        )
+        if alert_type:
+            stmt = stmt.where(AlertRow.alert_type == alert_type)
+        resolved_items: list[dict[str, Any]] = []
+        with session_scope(self.db_path) as s:
+            rows = list(s.scalars(stmt))
+            for r in rows:
+                r.resolved = 1
+                resolved_items.append(
+                    {
+                        "id": r.id,
+                        "session_id": r.session_id,
+                        "timestamp": r.timestamp,
+                        "alert_type": r.alert_type,
+                        "metric_name": r.metric_name,
+                        "current_value": r.current_value,
+                        "threshold_value": r.threshold_value,
+                        "severity": r.severity,
+                        "description": r.description,
+                        "resolved": True,
+                    }
+                )
+        return resolved_items
+
     def get_alerts(
         self,
         session_id: int = None,
@@ -347,7 +402,7 @@ class DatabaseManager:
             stmt = stmt.where(AlertRow.severity == severity)
         if resolved is not None:
             stmt = stmt.where(AlertRow.resolved == (1 if resolved else 0))
-        stmt = stmt.order_by(AlertRow.timestamp.desc())
+        stmt = stmt.order_by(AlertRow.timestamp.desc(), AlertRow.id.desc())
         if limit:
             stmt = stmt.limit(limit)
         with session_scope(self.db_path) as s:

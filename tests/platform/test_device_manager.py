@@ -161,15 +161,66 @@ def test_alert_low_fps_critical(tmp_path):
     assert alerts[0]["level"] == "严重"  # critical → 严重
 
 
-def test_alert_cooldown_suppresses_within_window(tmp_path):
-    """冷却期内（默认 30s）同 session 同类型告警被抑制。"""
+def test_alert_single_rule_no_repeat_and_auto_resolve(tmp_path):
+    """单条规则持续满足条件时仅生成一条告警；恢复正常时自动解除；再次异常时重新生成一条。"""
     db = _db(tmp_path)
     sid = _make_session_with_thresholds(db)
-    m = _metrics(fps=25.0)
-    first = DeviceManager._check_and_save_alerts(db, sid, "dev1", "com.app", m)
-    second = DeviceManager._check_and_save_alerts(db, sid, "dev1", "com.app", m)
+
+    # 1. 首次触发
+    first = DeviceManager._check_and_save_alerts(db, sid, "dev1", "com.app", _metrics(fps=25.0))
     assert len(first) == 1
-    assert len(second) == 0  # 冷却期，抑制
+    assert first[0]["action"] == "trigger"
+    assert first[0]["resolved"] is False
+
+    # 2. 持续不满足条件，不重复告警
+    second = DeviceManager._check_and_save_alerts(db, sid, "dev1", "com.app", _metrics(fps=24.0))
+    third = DeviceManager._check_and_save_alerts(db, sid, "dev1", "com.app", _metrics(fps=23.0))
+    assert len(second) == 0
+    assert len(third) == 0
+    assert len(db.get_alerts(session_id=sid)) == 1
+
+    # 3. 恢复正常，自动解除告警
+    recovered = DeviceManager._check_and_save_alerts(db, sid, "dev1", "com.app", _metrics(fps=60.0))
+    assert len(recovered) == 1
+    assert recovered[0]["action"] == "resolve"
+    assert recovered[0]["resolved"] is True
+    all_alerts = db.get_alerts(session_id=sid)
+    assert len(all_alerts) == 1
+    assert all_alerts[0]["resolved"] is True
+
+    # 4. 解除后保持正常，不产生事件
+    still_ok = DeviceManager._check_and_save_alerts(db, sid, "dev1", "com.app", _metrics(fps=60.0))
+    assert len(still_ok) == 0
+
+    # 5. 再次异常时生成新一轮告警，且查询按时间/ID降序
+    again = DeviceManager._check_and_save_alerts(db, sid, "dev1", "com.app", _metrics(fps=22.0))
+    assert len(again) == 1
+    assert again[0]["action"] == "trigger"
+    rows = db.get_alerts(session_id=sid)
+    assert len(rows) == 2
+    assert rows[0]["id"] == again[0]["id"]
+    assert rows[0]["resolved"] is False
+    assert rows[1]["resolved"] is True
+
+
+def test_update_session_alert_thresholds_affects_trigger_and_resolve(tmp_path):
+    """动态修改阈值后，下一次检测应按新阈值触发或自动解除。"""
+    db = _db(tmp_path)
+    sid = _make_session_with_thresholds(db)
+
+    # 初始 CPU 阈值 50%，当前 65% → 触发告警
+    ev1 = DeviceManager._check_and_save_alerts(db, sid, "dev1", "com.app", _metrics(cpu=65.0))
+    assert len(ev1) == 1
+    assert ev1[0]["action"] == "trigger"
+
+    # 动态提高 CPU 阈值至 80%，当前 65% 已不满足条件 → 自动解除
+    DeviceManager.update_session_alert_thresholds(
+        sid, {"fps": 50.0, "memory": 100.0, "cpu": 80.0, "temperature": 35.0}
+    )
+    ev2 = DeviceManager._check_and_save_alerts(db, sid, "dev1", "com.app", _metrics(cpu=65.0))
+    assert len(ev2) == 1
+    assert ev2[0]["action"] == "resolve"
+    assert ev2[0]["resolved"] is True
 
 
 def test_alert_high_memory_cpu_temp(tmp_path):

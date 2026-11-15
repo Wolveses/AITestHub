@@ -224,6 +224,8 @@ export default {
       severityInfo: 'Info',
       time: 'Time',
       message: 'Message',
+      statusActive: 'Active',
+      statusResolved: 'Resolved',
     },
 
     // === Help Dialog ===

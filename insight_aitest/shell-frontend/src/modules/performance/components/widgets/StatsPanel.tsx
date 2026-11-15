@@ -47,7 +47,8 @@ const alertsContainerStyle: React.CSSProperties = {
 };
 
 export default function StatsPanel({ sessionId }: StatsPanelProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const timeLocale = i18n.language === 'en-US' ? 'en-US' : 'zh-CN';
   const [statistics, setStatistics] = useState<Statistics | null>(null);
   const [alerts, setAlerts] = useState<AlertInfo[]>([]);
   const [loading, setLoading] = useState(false);
@@ -66,8 +67,12 @@ export default function StatsPanel({ sessionId }: StatsPanelProps) {
           api.getSessionStatistics(sessionId),
           api.getSessionAlerts(sessionId),
         ]);
+        const sortedAlerts = [...alertsData].sort((a, b) => {
+          const diff = new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+          return diff !== 0 ? diff : b.id - a.id;
+        });
         setStatistics(statsData);
-        setAlerts(alertsData);
+        setAlerts(sortedAlerts);
       } catch (error) {
         console.error('Failed to load statistics:', error);
       } finally {
@@ -183,15 +188,28 @@ export default function StatsPanel({ sessionId }: StatsPanelProps) {
               {t('stats.alerts')} ({alerts.length})
             </div>
             <div className="space-y-2">
-              {alerts.slice(0, 20).map((alert) => (
-                <div
-                  key={alert.id}
-                  className="text-xs"
-                  style={{ color: "var(--text-primary)", fontSize: '9pt' }}
-                >
-                  {alert.timestamp}  {alert.description}
-                </div>
-              ))}
+              {alerts.slice(0, 20).map((alert) => {
+                const parsedDate = new Date(alert.timestamp);
+                const formattedTime = Number.isNaN(parsedDate.getTime())
+                  ? alert.timestamp
+                  : parsedDate.toLocaleTimeString(timeLocale, { hour12: false });
+                return (
+                  <div
+                    key={alert.id}
+                    className="text-xs"
+                    style={{
+                      color: alert.resolved ? "var(--text-muted)" : "var(--text-primary)",
+                      fontSize: '9pt',
+                    }}
+                  >
+                    <span>[{formattedTime}]</span>{' '}
+                    <span style={{ color: alert.resolved ? "var(--success)" : "var(--warning)" }}>
+                      [{alert.resolved ? t('alerts.statusResolved') : t('alerts.statusActive')}]
+                    </span>{' '}
+                    <span>{alert.description}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

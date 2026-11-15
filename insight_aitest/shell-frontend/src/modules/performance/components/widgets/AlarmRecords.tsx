@@ -9,6 +9,14 @@ export default function AlarmRecords() {
   const { t } = useTranslation();
   const { alarms } = useMonitoringStore();
 
+  // 按告警时间降序排列
+  const sortedAlarms = [...(alarms || [])].sort((a, b) => {
+    if (b.createdAt !== a.createdAt) {
+      return b.createdAt - a.createdAt;
+    }
+    return (Number(b.id) || 0) - (Number(a.id) || 0);
+  });
+
   // 获取告警严重程度的翻译
   const getSeverityLabel = (level: string): string => {
     const severityMap: Record<string, string> = {
@@ -37,7 +45,7 @@ export default function AlarmRecords() {
         overflowY: 'auto',
         padding: '8px',
       }}>
-        {!alarms || alarms.length === 0 ? (
+        {sortedAlarms.length === 0 ? (
           <div style={{
             fontSize: '11px',
             color: "var(--text-muted)",
@@ -47,12 +55,12 @@ export default function AlarmRecords() {
             {t('alerts.noAlerts')}
           </div>
         ) : (
-          alarms.map((alarm) => (
+          sortedAlarms.map((alarm) => (
             <div
               key={alarm.id}
               style={{
                 fontSize: '12px',
-                color: "var(--text-secondary)",
+                color: alarm.resolved ? "var(--text-muted)" : "var(--text-secondary)",
                 padding: '6px 8px',
                 borderBottom: '1px solid var(--hairline-soft)',
                 fontFamily: "'Consolas', 'Monaco', monospace",
@@ -60,10 +68,12 @@ export default function AlarmRecords() {
             >
               <span style={{ color: "var(--text-secondary)" }}>[{alarm.time}]</span>
               <span style={{
-                color: alarm.level === '严重' ? "var(--error)" : "var(--warning)",
+                color: alarm.resolved
+                  ? "var(--success)"
+                  : (alarm.level === '严重' ? "var(--error)" : "var(--warning)"),
                 marginLeft: '8px',
               }}>
-                [{getSeverityLabel(alarm.level)}]
+                [{alarm.resolved ? t('alerts.statusResolved') : getSeverityLabel(alarm.level)}]
               </span>
               <span style={{ marginLeft: '8px' }}>{alarm.content}</span>
             </div>

@@ -99,10 +99,31 @@ def test_alerts(tmp_path):
         },
     )
     assert aid is not None
+    aid2 = db.save_alert(
+        s.id,
+        {
+            "alert_type": "high_cpu",
+            "metric_name": "cpu",
+            "current_value": 90.0,
+            "threshold_value": 80.0,
+            "severity": "critical",
+            "description": "CPU 过高",
+        },
+    )
     alerts = db.get_alerts(session_id=s.id)
-    assert len(alerts) == 1
-    assert alerts[0]["alert_type"] == "fps_low"
-    assert alerts[0]["severity"] == "warning"
+    assert len(alerts) == 2
+    # 按告警时间/ID降序返回，最新的在前
+    assert alerts[0]["id"] == aid2
+    assert alerts[1]["id"] == aid
+    assert alerts[1]["alert_type"] == "fps_low"
+    assert alerts[1]["severity"] == "warning"
+
+    # 按类型自动解除
+    resolved = db.resolve_alerts(s.id, alert_type="fps_low")
+    assert len(resolved) == 1
+    assert resolved[0]["id"] == aid
+    unresolved = db.get_alerts(session_id=s.id, resolved=False)
+    assert [a["id"] for a in unresolved] == [aid2]
 
 
 def test_singleton(tmp_path):
@@ -186,3 +207,16 @@ def test_monitoring_legacy_db_compat(tmp_path):
     # 新增正常
     new_s = db.create_session("new_dev", "com.new")
     assert new_s.id is not None
+
+    # memory_total_mb 列也已补上且可更新读取
+    with sqlite3.connect(legacy) as raw:
+        cols = {r[1] for r in raw.execute("PRAGMA table_info(sessions)")}
+        assert "memory_total_mb" in cols
+
+    db.update_session(new_s.id, memory_total_mb=8192.0)
+    fetched = db.get_session(new_s.id)
+    assert fetched is not None
+    assert fetched.memory_total_mb == 8192.0
+    listed = [item for item in db.list_sessions() if item.id == new_s.id]
+    assert len(listed) == 1
+    assert listed[0].memory_total_mb == 8192.0

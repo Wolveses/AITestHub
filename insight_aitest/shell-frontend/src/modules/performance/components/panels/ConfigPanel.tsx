@@ -1,15 +1,32 @@
 import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { useMonitoringStore } from '@/modules/performance/store/monitoringStore';
+import { useMonitoringStore, type AlertThresholdValues } from '@/modules/performance/store/monitoringStore';
 import AlarmRecords from '@/modules/performance/components/widgets/AlarmRecords';
 import { configManager } from '@/shared/utils/configManager';
 import { useIsMobile } from '@/shared/hooks/useIsMobile';
 
+type ThresholdKey = keyof AlertThresholdValues;
+
+const THRESHOLD_FIELDS: ReadonlyArray<{
+  key: ThresholdKey;
+  labelKey: string;
+  unit: string;
+  min: number;
+  max: number;
+  step: number;
+  integer?: boolean;
+}> = [
+  { key: 'fps', labelKey: 'config.alerts.fpsBelow', unit: 'fps', min: 1, max: 240, step: 1, integer: true },
+  { key: 'memory', labelKey: 'config.alerts.memoryAbove', unit: 'MB', min: 1, max: 65536, step: 1, integer: true },
+  { key: 'cpu', labelKey: 'config.alerts.cpuAbove', unit: '%', min: 0, max: 100, step: 1, integer: true },
+  { key: 'temperature', labelKey: 'config.alerts.temperatureAbove', unit: '°C', min: 0, max: 120, step: 0.1 },
+];
+
 export default function ConfigPanel() {
   const { t } = useTranslation();
   const isMobile = useIsMobile();
-  const { isMonitoring, selectedDevice, setEnabledMetrics, devices, setSamplingInterval: setStoreSamplingInterval, samplingInterval: storeSamplingInterval } = useMonitoringStore();
+  const { isMonitoring, selectedDevice, setEnabledMetrics, devices, setSamplingInterval: setStoreSamplingInterval, samplingInterval: storeSamplingInterval, updateAlertThresholds } = useMonitoringStore();
   const [samplingInterval, setSamplingInterval] = useState('1s');
   const [showGpuWarning, setShowGpuWarning] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -57,18 +74,74 @@ export default function ConfigPanel() {
     { key: 'gpu', label: t('config.metrics.gpu'), color: "var(--chart-6)", enabled: false },
   ]);
 
-  // 告警阈值配置 - 匹配桌面版
-  const [thresholds, setThresholds] = useState(() => {
-    // 从 localStorage 加载保存的阈值
-    return configManager.getAlertThresholds();
+  // 告警阈值配置 - 支持监控前与监控中动态修改
+  const [thresholds, setThresholds] = useState<AlertThresholdValues>(() => configManager.getAlertThresholds());
+  const [thresholdDrafts, setThresholdDrafts] = useState<Record<ThresholdKey, string>>(() => {
+    const initial = configManager.getAlertThresholds();
+    return {
+      fps: String(initial.fps),
+      memory: String(initial.memory),
+      cpu: String(initial.cpu),
+      temperature: String(initial.temperature),
+    };
   });
+  const thresholdSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 处理阈值变化
-  const handleThresholdChange = (key: string, value: number) => {
-    const newThresholds = { ...thresholds, [key]: value };
-    setThresholds(newThresholds);
-    // 保存到 localStorage
-    configManager.saveAlertThresholds(newThresholds);
+  useEffect(() => {
+    return () => {
+      if (thresholdSyncTimerRef.current) {
+        clearTimeout(thresholdSyncTimerRef.current);
+      }
+    };
+  }, []);
+
+  const syncThresholds = (nextThresholds: AlertThresholdValues, immediate = false) => {
+    if (thresholdSyncTimerRef.current) {
+      clearTimeout(thresholdSyncTimerRef.current);
+      thresholdSyncTimerRef.current = null;
+    }
+    const persistAndPush = () => {
+      updateAlertThresholds(nextThresholds).catch((error) => {
+        console.error('Failed to update alert thresholds:', error);
+        toast.error(t('dialogs.operationFailed'));
+      });
+    };
+    if (immediate) {
+      persistAndPush();
+    } else {
+      thresholdSyncTimerRef.current = setTimeout(persistAndPush, 300);
+    }
+  };
+
+  // 处理阈值输入变化（保留草稿文本，允许清空重输）
+  const handleThresholdDraftChange = (key: ThresholdKey, rawValue: string) => {
+    setThresholdDrafts((prev) => ({ ...prev, [key]: rawValue }));
+    const field = THRESHOLD_FIELDS.find((f) => f.key === key);
+    if (!field || rawValue.trim() === '') return;
+
+    const parsed = field.integer ? parseInt(rawValue, 10) : parseFloat(rawValue);
+    if (!Number.isFinite(parsed) || parsed < field.min || parsed > field.max) return;
+
+    const nextThresholds = { ...thresholds, [key]: parsed };
+    setThresholds(nextThresholds);
+    syncThresholds(nextThresholds, false);
+  };
+
+  // 失焦或回车时校验并立即同步阈值
+  const commitThresholdDraft = (key: ThresholdKey) => {
+    const field = THRESHOLD_FIELDS.find((f) => f.key === key);
+    if (!field) return;
+
+    const rawValue = thresholdDrafts[key].trim();
+    const parsed = field.integer ? parseInt(rawValue, 10) : parseFloat(rawValue);
+    const validValue = Number.isFinite(parsed)
+      ? Math.min(field.max, Math.max(field.min, parsed))
+      : thresholds[key];
+
+    const nextThresholds = { ...thresholds, [key]: validValue };
+    setThresholds(nextThresholds);
+    setThresholdDrafts((prev) => ({ ...prev, [key]: String(validValue) }));
+    syncThresholds(nextThresholds, true);
   };
 
   // 检测是否为iOS设备（匹配桌面版逻辑）
@@ -183,8 +256,23 @@ export default function ConfigPanel() {
           configManager.saveEnabledMetrics(config.enabledMetrics);
         }
 
-        if (config.thresholds) {
-          setThresholds(config.thresholds);
+        if (config.thresholds && typeof config.thresholds === 'object') {
+          const imported: AlertThresholdValues = { ...thresholds };
+          for (const field of THRESHOLD_FIELDS) {
+            const rawVal = Number(config.thresholds[field.key]);
+            if (Number.isFinite(rawVal)) {
+              const clamped = Math.min(field.max, Math.max(field.min, rawVal));
+              imported[field.key] = field.integer ? Math.round(clamped) : clamped;
+            }
+          }
+          setThresholds(imported);
+          setThresholdDrafts({
+            fps: String(imported.fps),
+            memory: String(imported.memory),
+            cpu: String(imported.cpu),
+            temperature: String(imported.temperature),
+          });
+          syncThresholds(imported, true);
         }
 
         toast.success(t('dialogs.operationSuccess'));
@@ -354,128 +442,47 @@ export default function ConfigPanel() {
           {t('config.alertThresholds')}
         </div>
 
-        {/* 阈值输入 - 匹配桌面版 */}
+        {/* 阈值输入 - 统一渲染，支持随时修改 */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          {/* FPS */}
-          <div style={{
-            fontSize: '10pt',
-            color: "var(--text-secondary)",
-            padding: '4px 8px',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}>
-            <span>{t('config.alerts.fpsBelow')}</span>
-            <input
-              type="number"
-              value={thresholds.fps}
-              onChange={(e) => handleThresholdChange('fps', parseInt(e.target.value))}
-              disabled={isMonitoring}
-              min={10}
-              max={60}
+          {THRESHOLD_FIELDS.map((field) => (
+            <div
+              key={field.key}
               style={{
-                backgroundColor: "var(--bg-card)",
-                color: "var(--text-primary)",
-                border: '1px solid var(--bg-card)',
-                borderRadius: '6px',
-                padding: '4px 8px',
-                width: '80px',
                 fontSize: '10pt',
-              }}
-            />
-            <span>fps</span>
-          </div>
-
-          {/* 内存 */}
-          <div style={{
-            fontSize: '10pt',
-            color: "var(--text-secondary)",
-            padding: '4px 8px',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}>
-            <span>{t('config.alerts.memoryAbove')}</span>
-            <input
-              type="number"
-              value={thresholds.memory}
-              onChange={(e) => handleThresholdChange('memory', parseInt(e.target.value))}
-              disabled={isMonitoring}
-              min={100}
-              max={2000}
-              style={{
-                backgroundColor: "var(--bg-card)",
-                color: "var(--text-primary)",
-                border: '1px solid var(--bg-card)',
-                borderRadius: '6px',
+                color: "var(--text-secondary)",
                 padding: '4px 8px',
-                width: '80px',
-                fontSize: '10pt',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
               }}
-            />
-            <span>MB</span>
-          </div>
-
-          {/* CPU */}
-          <div style={{
-            fontSize: '10pt',
-            color: "var(--text-secondary)",
-            padding: '4px 8px',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}>
-            <span>{t('config.alerts.cpuAbove')}</span>
-            <input
-              type="number"
-              value={thresholds.cpu}
-              onChange={(e) => handleThresholdChange('cpu', parseInt(e.target.value))}
-              disabled={isMonitoring}
-              min={50}
-              max={100}
-              style={{
-                backgroundColor: "var(--bg-card)",
-                color: "var(--text-primary)",
-                border: '1px solid var(--bg-card)',
-                borderRadius: '6px',
-                padding: '4px 8px',
-                width: '80px',
-                fontSize: '10pt',
-              }}
-            />
-            <span>%</span>
-          </div>
-
-          {/* 温度 */}
-          <div style={{
-            fontSize: '10pt',
-            color: "var(--text-secondary)",
-            padding: '4px 8px',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}>
-            <span>{t('config.alerts.temperatureAbove')}</span>
-            <input
-              type="number"
-              value={thresholds.temperature}
-              onChange={(e) => handleThresholdChange('temperature', parseFloat(e.target.value))}
-              disabled={isMonitoring}
-              min={30}
-              max={60}
-              step={0.01}
-              style={{
-                backgroundColor: "var(--bg-card)",
-                color: "var(--text-primary)",
-                border: '1px solid var(--bg-card)',
-                borderRadius: '6px',
-                padding: '4px 8px',
-                width: '80px',
-                fontSize: '10pt',
-              }}
-            />
-            <span>°C</span>
-          </div>
+            >
+              <span>{t(field.labelKey)}</span>
+              <input
+                type="number"
+                value={thresholdDrafts[field.key]}
+                onChange={(e) => handleThresholdDraftChange(field.key, e.target.value)}
+                onBlur={() => commitThresholdDraft(field.key)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    commitThresholdDraft(field.key);
+                  }
+                }}
+                min={field.min}
+                max={field.max}
+                step={field.step}
+                style={{
+                  backgroundColor: "var(--bg-card)",
+                  color: "var(--text-primary)",
+                  border: '1px solid var(--bg-card)',
+                  borderRadius: '6px',
+                  padding: '4px 8px',
+                  width: '80px',
+                  fontSize: '10pt',
+                }}
+              />
+              <span>{field.unit}</span>
+            </div>
+          ))}
         </div>
       </div>
 

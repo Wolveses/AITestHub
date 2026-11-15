@@ -56,6 +56,7 @@ class SessionRow(MappedAsDataclass, Base, kw_only=True):
     tags: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     sampling_interval: Mapped[int] = mapped_column(Integer, default=1000)
     project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    memory_total_mb: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
 
 
 class MetricsRow(MappedAsDataclass, Base, kw_only=True):

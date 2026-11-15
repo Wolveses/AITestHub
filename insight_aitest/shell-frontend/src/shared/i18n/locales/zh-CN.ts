@@ -224,6 +224,8 @@ export default {
       severityInfo: '信息',
       time: '时间',
       message: '告警信息',
+      statusActive: '告警中',
+      statusResolved: '已解除',
     },
 
     // === 帮助对话框 ===

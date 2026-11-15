@@ -8,11 +8,21 @@ interface BatteryInfo {
   capacity: string;
 }
 
-interface AlarmRecord {
+export interface AlertThresholdValues {
+  fps: number;
+  memory: number;
+  cpu: number;
+  temperature: number;
+}
+
+export interface AlarmRecord {
   id: string;
+  alert_type?: string;
   time: string;
+  createdAt: number;
   level: '严重' | '警告';
   content: string;
+  resolved?: boolean;
 }
 
 interface MonitoringState {
@@ -42,7 +52,9 @@ interface MonitoringState {
   clearMetrics: () => void;
   setBatteryInfo: (info: BatteryInfo) => void;
   addAlarm: (alarm: AlarmRecord) => void;
+  resolveAlarm: (id: string, alertType?: string) => void;
   clearAlarms: () => void;
+  updateAlertThresholds: (thresholds: AlertThresholdValues) => Promise<void>;
   setEnabledMetrics: (metricIds: string[]) => void;  // 新增
   setSamplingInterval: (interval: number) => void;  // 新增
   setActiveTab: (tab: 'monitor' | 'report') => void;  // 新增
@@ -122,14 +134,21 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
           if (message.type === 'metrics' && message.data) {
             // 检查是否为告警数据
             if (message.data.is_alert && message.data.alert_data) {
-              // 添加告警到列表
               const alert = message.data.alert_data;
-              get().addAlarm({
-                id: String(alert.id),
-                time: alert.time,
-                level: alert.level,
-                content: alert.content,
-              });
+              if (alert.action === 'resolve' || alert.resolved === true) {
+                get().resolveAlarm(String(alert.id), alert.alert_type);
+              } else {
+                const parsedTs = alert.timestamp ? new Date(alert.timestamp).getTime() : NaN;
+                get().addAlarm({
+                  id: String(alert.id),
+                  alert_type: alert.alert_type,
+                  time: alert.time,
+                  createdAt: Number.isFinite(parsedTs) ? parsedTs : Date.now(),
+                  level: alert.level,
+                  content: alert.content,
+                  resolved: false,
+                });
+              }
             } else {
               // 正常指标数据
               get().updateMetrics(message.data);
@@ -163,6 +182,7 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
         timestamps: [],
         memoryTotalMb: null,
         memoryPercent: null,
+        alarms: [],
       });
     } catch (error) {
       console.error('Error starting monitoring:', error);
@@ -286,13 +306,40 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
   // 设置电池信息
   setBatteryInfo: (info) => set({ batteryInfo: info }),
 
-  // 添加告警
-  addAlarm: (alarm) => set((state) => ({
-    alarms: [...state.alarms, alarm],
+  // 添加告警（按告警时间降序排序）
+  addAlarm: (alarm) => set((state) => {
+    const filtered = state.alarms.filter((item) => item.id !== alarm.id);
+    const next = [alarm, ...filtered].sort((a, b) => {
+      if (b.createdAt !== a.createdAt) {
+        return b.createdAt - a.createdAt;
+      }
+      return (Number(b.id) || 0) - (Number(a.id) || 0);
+    });
+    return { alarms: next };
+  }),
+
+  // 自动解除告警
+  resolveAlarm: (id, alertType) => set((state) => ({
+    alarms: state.alarms.map((item) => {
+      if (item.id === id || (alertType && item.alert_type === alertType && !item.resolved)) {
+        return { ...item, resolved: true };
+      }
+      return item;
+    }),
   })),
 
   // 清除所有告警
   clearAlarms: () => set({ alarms: [] }),
+
+  // 更新告警阈值（同步本地持久化与运行中的会话）
+  updateAlertThresholds: async (thresholds) => {
+    const { configManager } = await import('@/shared/utils/configManager');
+    configManager.saveAlertThresholds(thresholds);
+    const { isMonitoring, currentSession } = get();
+    if (isMonitoring && currentSession) {
+      await api.updateAlertThresholds(currentSession.id, thresholds);
+    }
+  },
 
   // 设置启用的指标列表
   setEnabledMetrics: (metricIds) => set({ enabledMetricIds: metricIds }),

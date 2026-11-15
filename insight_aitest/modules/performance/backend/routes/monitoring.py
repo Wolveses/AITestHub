@@ -9,6 +9,7 @@ from logzero import logger
 from insight_aitest.platform.services.device_manager import DeviceManager
 from insight_aitest.platform.persistence.database import DatabaseManager
 from performance.backend.routes.schemas import (
+    AlertThresholds,
     StartMonitoringRequest,
     StopMonitoringRequest,
     SessionResponse,
@@ -61,6 +62,7 @@ async def start_monitoring(request: StartMonitoringRequest):
             end_time=session.end_time.isoformat() if session.end_time else None,
             duration=session.duration,
             project_id=session.project_id,
+            memory_total_mb=getattr(session, "memory_total_mb", None),
         )
     except Exception as e:
         logger.error(f"启动监控失败: {e}")
@@ -100,6 +102,7 @@ def list_sessions(limit: int = 100, project_id: int | None = None):
                 start_time=s.start_time.isoformat(),
                 end_time=s.end_time.isoformat() if s.end_time else None,
                 duration=s.duration,
+                memory_total_mb=getattr(s, "memory_total_mb", None),
                 project_id=s.project_id,
             )
             for s in sessions
@@ -132,6 +135,8 @@ def get_session(session_id: int):
             start_time=session.start_time.isoformat(),
             end_time=session.end_time.isoformat() if session.end_time else None,
             duration=session.duration,
+            memory_total_mb=getattr(session, "memory_total_mb", None),
+            project_id=session.project_id,
         )
     except HTTPException:
         raise
@@ -233,12 +238,39 @@ def get_session_alerts(session_id: int):
                     "description": alert.get("description", ""),
                     "threshold": alert.get("threshold_value"),
                     "current_value": alert.get("current_value"),
+                    "resolved": bool(alert.get("resolved", False)),
                 }
             )
 
         return formatted_alerts
     except Exception as e:
         logger.error(f"获取会话告警失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/sessions/{session_id}/alert-thresholds")
+def update_session_alert_thresholds(session_id: int, thresholds: AlertThresholds):
+    """更新会话告警阈值（支持监控过程中动态调整）"""
+    try:
+        import os
+
+        db_path = os.path.join(os.path.expanduser("~"), ".insight_eye", "monitoring.db")
+        db = DatabaseManager(db_path)
+        session = db.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        payload = thresholds.model_dump()
+        DeviceManager.update_session_alert_thresholds(session_id, payload)
+        return {
+            "status": "updated",
+            "session_id": session_id,
+            "alert_thresholds": payload,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新告警阈值失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -82,44 +82,45 @@ export default function RealTimeChart({ data, timestamps, config, totalMemoryMb 
     return new Date(ts);
   }, []);
 
-  // 计算Y轴自适应范围（根据实际数据范围调整，便于观察小波动）
+  // 计算Y轴范围：CPU/GPU 固定 0-100%，内存以设备总内存为上限（直观反映趋势和占比）
   const yAxisRange = useMemo(() => {
-    if (data.length === 0) {
-      return { min: 0, max: 100 };
+    if (config.yMin !== undefined && config.yMax !== undefined) {
+      return { min: config.yMin, max: config.yMax };
     }
 
     const valid = data.filter(v => v != null && !isNaN(v));
-    if (valid.length === 0) {
-      return { min: 0, max: 100 };
-    }
+    const min = valid.length > 0 ? Math.min(...valid) : 0;
+    const max = valid.length > 0 ? Math.max(...valid) : 0;
 
-    const min = Math.min(...valid);
-    const max = Math.max(...valid);
-
-    // 如果配置了固定范围，使用配置值
-    if (config.yMin !== undefined && config.yMax !== undefined) {
-      // 对于固定范围（如CPU 0-100），检查是否需要自适应
-      // 如果数据范围小于配置范围的20%，启用自适应模式以便观察小波动
-      const range = config.yMax - config.yMin;
-      const dataRange = max - min;
-
-      if (dataRange < range * 0.2) {
-        // 数据范围太小，启用自适应（保留10%的边距）
-        const padding = dataRange * 0.1 || (max * 0.1);
+    if (config.metricId === 'memory') {
+      const baseMin = config.yMin ?? 0;
+      if (totalMemoryMb && totalMemoryMb > 0) {
         return {
-          min: Math.max(0, Math.floor((min - padding) / 10) * 10), // 向下取整到10的倍数
-          max: Math.ceil((max + padding) / 10) * 10,  // 向上取整到10的倍数
+          min: baseMin,
+          max: Math.max(Math.ceil(totalMemoryMb), Math.ceil(max)),
         };
       }
+      // 尚未获取到设备总内存时，从 0 起算并预留余量，避免纵坐标粒度过小导致曲线过度陡峭
+      const fallbackMax = valid.length === 0
+        ? 1024
+        : Math.max(100, Math.ceil((max * 1.25) / 50) * 50);
+      return {
+        min: baseMin,
+        max: fallbackMax,
+      };
     }
 
-    // 没有固定范围，完全自适应（保留10%的边距）
+    if (valid.length === 0) {
+      return { min: config.yMin ?? 0, max: 100 };
+    }
+
+    // 其余未配置固定上限的指标（如 FPS、网络）：保留 10% 边距
     const padding = (max - min) * 0.1 || 1;
     return {
-      min: Math.floor((min - padding) / 10) * 10,
-      max: Math.ceil((max + padding) / 10) * 10,
+      min: config.yMin !== undefined ? config.yMin : Math.floor((min - padding) / 10) * 10,
+      max: Math.max(10, Math.ceil((max + padding) / 10) * 10),
     };
-  }, [data, config.yMin, config.yMax]);
+  }, [data, config.metricId, config.yMin, config.yMax, totalMemoryMb]);
 
   // 优化：使用 throttle 避免频繁更新
   useEffect(() => {
@@ -144,10 +145,10 @@ export default function RealTimeChart({ data, timestamps, config, totalMemoryMb 
       };
 
       const option: echarts.EChartsOption = {
-      // 网格布局（完全复刻桌面版）
+      // 网格布局（预留充足左边距，确保 8192MB / 100% 等刻度不被裁切）
       grid: {
         top: 35,
-        left: 55,
+        left: 66,
         right: 20,
         bottom: 30,
       },
@@ -187,7 +188,12 @@ export default function RealTimeChart({ data, timestamps, config, totalMemoryMb 
           color: chartNeutral.axisLabel,
           fontSize: 11,
           fontFamily: 'Arial, sans-serif',
-          formatter: (value: number) => value.toFixed(config.decimals) + config.unit,
+          formatter: (value: number) => {
+            if (yAxisRange.max >= 100 || config.metricId === 'cpu' || config.metricId === 'gpu') {
+              return `${Number.isInteger(value) ? value : value.toFixed(1)}${config.unit}`;
+            }
+            return `${value.toFixed(config.decimals)}${config.unit}`;
+          },
         },
         axisLine: {
           lineStyle: { color: chartNeutral.axisLine }
@@ -329,7 +335,7 @@ export default function RealTimeChart({ data, timestamps, config, totalMemoryMb 
       chartInstance.current.setOption(option, { notMerge: false, lazyUpdate: true });
     }, 50); // 50ms throttle，避免过于频繁的更新
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, timestamps, xAxisInterval, config, formatTime, parseTimestamp, chartNeutral, totalMemoryMb]);
+  }, [data, timestamps, xAxisInterval, config, formatTime, parseTimestamp, chartNeutral, totalMemoryMb, yAxisRange]);
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>

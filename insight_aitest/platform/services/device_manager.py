@@ -5,12 +5,12 @@
 
 实现设备扫描（Android + iOS）、监控会话生命周期、并行指标采集
 （FPS/内存/CPU/网络/电池，asyncio.gather + 线程池桥接）、
-阈值告警检测（含 30s 冷却）与持久化。
+阈值告警检测（边沿触发与自动解除）与持久化。
 iOS 设备连接依赖 pymobiledevice3（详见 device_adapters）。
 """
 
 import time
-from typing import List, AsyncIterator
+from typing import Any, List, AsyncIterator
 from datetime import datetime
 from logzero import logger
 import asyncio
@@ -43,9 +43,8 @@ class DeviceManager:
         "battery_threshold_temp": 35.0,  # 电池温度阈值(°C)（降低以便更容易触发）
     }
 
-    # 告警冷却期记录（避免重复告警）{alert_key: last_trigger_time}
-    _alert_cooldown: dict[str, float] = {}  # 存储上次触发时间戳
-    _alert_cooldown_seconds: int = 30  # 冷却期30秒 {}
+    # 保留类级属性以兼容旧测试清理逻辑（当前已改用基于 DB 未解除状态的边沿触发）
+    _alert_cooldown: dict[str, float] = {}
 
     # 每个会话的告警阈值配置 {session_id: {threshold_key: value}}
     _session_alert_thresholds: dict[int, dict[str, float]] = {}
@@ -173,23 +172,12 @@ class DeviceManager:
 
         # 存储会话的告警阈值配置
         if alert_thresholds:
-            DeviceManager._session_alert_thresholds[session.id] = {
-                "fps_threshold": alert_thresholds.get("fps", 50.0),
-                "memory_threshold_mb": alert_thresholds.get("memory", 500.0),
-                "cpu_threshold_percent": alert_thresholds.get("cpu", 80.0),
-                "battery_threshold_temp": alert_thresholds.get("temperature", 45.0),
-            }
-            logger.info(
-                f"会话 {session.id} 使用自定义告警阈值: {DeviceManager._session_alert_thresholds[session.id]}"
-            )
+            DeviceManager.update_session_alert_thresholds(session.id, alert_thresholds)
         else:
             # 使用默认阈值
-            DeviceManager._session_alert_thresholds[session.id] = {
-                "fps_threshold": 50.0,
-                "memory_threshold_mb": 100.0,
-                "cpu_threshold_percent": 50.0,
-                "battery_threshold_temp": 35.0,
-            }
+            DeviceManager._session_alert_thresholds[session.id] = dict(
+                DeviceManager._alert_thresholds
+            )
             logger.info(
                 f"会话 {session.id} 使用默认告警阈值: {DeviceManager._session_alert_thresholds[session.id]}"
             )
@@ -462,6 +450,16 @@ class DeviceManager:
 
                             # 保存到数据库（修复测试报告无数据问题）
                             try:
+                                if (
+                                    metrics_data.memory_total_mb
+                                    and metrics_data.memory_total_mb > 0
+                                    and not getattr(session, "memory_total_mb", None)
+                                ):
+                                    session.memory_total_mb = float(metrics_data.memory_total_mb)
+                                    db.update_session(
+                                        session_id,
+                                        memory_total_mb=session.memory_total_mb,
+                                    )
                                 db.save_metrics(session_id, metrics_data)
                             except Exception as e:
                                 logger.error(f"保存指标数据失败: {e}")
@@ -537,13 +535,39 @@ class DeviceManager:
             raise
 
     @staticmethod
+    def update_session_alert_thresholds(
+        session_id: int, alert_thresholds: dict[str, Any]
+    ) -> dict[str, float]:
+        """更新指定会话的告警阈值（支持监控启动前与运行中动态修改）。"""
+        existing = DeviceManager._session_alert_thresholds.get(session_id)
+        normalized = {
+            "fps_threshold": float(
+                alert_thresholds.get("fps", existing["fps_threshold"] if existing else 50.0)
+            ),
+            "memory_threshold_mb": float(
+                alert_thresholds.get(
+                    "memory", existing["memory_threshold_mb"] if existing else 500.0
+                )
+            ),
+            "cpu_threshold_percent": float(
+                alert_thresholds.get("cpu", existing["cpu_threshold_percent"] if existing else 80.0)
+            ),
+            "battery_threshold_temp": float(
+                alert_thresholds.get(
+                    "temperature",
+                    existing["battery_threshold_temp"] if existing else 45.0,
+                )
+            ),
+        }
+        DeviceManager._session_alert_thresholds[session_id] = normalized
+        logger.info(f"会话 {session_id} 更新告警阈值: {normalized}")
+        return normalized
+
+    @staticmethod
     def _check_and_save_alerts(
         db: DatabaseManager, session_id: int, device_id: str, app_package: str, metrics: MetricsData
     ) -> list:
-        """检查并保存告警
-
-        根据阈值配置检测性能异常，并保存告警到数据库。
-        使用会话级别的告警阈值配置，而不是全局默认值。
+        """检查并维护告警状态（单条规则仅在进入异常时生成一条告警，恢复正常时自动解除）。
 
         Args:
             db: 数据库管理器
@@ -553,17 +577,12 @@ class DeviceManager:
             metrics: 指标数据
 
         Returns:
-            触发的告警列表，每个告警包含：id, time, level, content
+            本次触发或自动解除的告警事件列表
         """
-        current_time = time.time()
-        cooldown_seconds = DeviceManager._alert_cooldown_seconds
-
-        # 获取会话级别的告警阈值（优先使用自定义阈值，否则使用默认值）
         thresholds = DeviceManager._session_alert_thresholds.get(
             session_id, DeviceManager._alert_thresholds
         )
 
-        # 调试日志：记录当前指标值和阈值
         logger.debug(
             f"[告警检测] Session {session_id}: FPS={metrics.fps}, Memory={metrics.memory}MB, CPU={metrics.cpu}%, Temp={metrics.temperature}°C"
         )
@@ -571,112 +590,156 @@ class DeviceManager:
             f"[告警检测] 阈值: FPS<{thresholds['fps_threshold']}, Memory>{thresholds['memory_threshold_mb']}MB, CPU>{thresholds['cpu_threshold_percent']}%, Temp>{thresholds['battery_threshold_temp']}°C"
         )
 
-        alerts_to_save = []
+        rules = (
+            {
+                "alert_type": "low_fps",
+                "metric_name": "FPS",
+                "value": metrics.fps,
+                "threshold": thresholds["fps_threshold"],
+                "triggered": (
+                    metrics.fps < thresholds["fps_threshold"] if metrics.fps is not None else None
+                ),
+                "severity": (
+                    ("warning" if metrics.fps >= 20 else "critical")
+                    if metrics.fps is not None
+                    else "warning"
+                ),
+                "description": (
+                    f'FPS过低: {metrics.fps:.1f} < {thresholds["fps_threshold"]}'
+                    if metrics.fps is not None
+                    else ""
+                ),
+            },
+            {
+                "alert_type": "high_memory",
+                "metric_name": "Memory",
+                "value": metrics.memory,
+                "threshold": thresholds["memory_threshold_mb"],
+                "triggered": (
+                    metrics.memory > thresholds["memory_threshold_mb"]
+                    if metrics.memory is not None
+                    else None
+                ),
+                "severity": "warning",
+                "description": (
+                    f'内存过高: {metrics.memory:.1f}MB > {thresholds["memory_threshold_mb"]}MB'
+                    if metrics.memory is not None
+                    else ""
+                ),
+            },
+            {
+                "alert_type": "high_cpu",
+                "metric_name": "CPU",
+                "value": metrics.cpu,
+                "threshold": thresholds["cpu_threshold_percent"],
+                "triggered": (
+                    metrics.cpu > thresholds["cpu_threshold_percent"]
+                    if metrics.cpu is not None
+                    else None
+                ),
+                "severity": (
+                    ("warning" if metrics.cpu < 90 else "critical")
+                    if metrics.cpu is not None
+                    else "warning"
+                ),
+                "description": (
+                    f'CPU过高: {metrics.cpu:.1f}% > {thresholds["cpu_threshold_percent"]}%'
+                    if metrics.cpu is not None
+                    else ""
+                ),
+            },
+            {
+                "alert_type": "high_temperature",
+                "metric_name": "Temperature",
+                "value": metrics.temperature,
+                "threshold": thresholds["battery_threshold_temp"],
+                "triggered": (
+                    metrics.temperature > thresholds["battery_threshold_temp"]
+                    if metrics.temperature is not None
+                    else None
+                ),
+                "severity": "warning",
+                "description": (
+                    f'电池温度过高: {metrics.temperature:.1f}°C > {thresholds["battery_threshold_temp"]}°C'
+                    if metrics.temperature is not None
+                    else ""
+                ),
+            },
+        )
 
-        # 检测 FPS 低
-        if metrics.fps is not None and metrics.fps < thresholds["fps_threshold"]:
-            alert_key = f"low_fps_{session_id}"
-            last_trigger = DeviceManager._alert_cooldown.get(alert_key, 0)
+        # 以数据库中的未解除告警为准，避免同一规则持续重复告警
+        unresolved_types = {
+            a["alert_type"]
+            for a in db.get_alerts(session_id=session_id, resolved=False)
+            if a.get("alert_type")
+        }
 
-            if current_time - last_trigger >= cooldown_seconds:
-                alerts_to_save.append(
-                    {
-                        "alert_type": "low_fps",
-                        "metric_name": "FPS",
-                        "current_value": metrics.fps,
-                        "threshold_value": thresholds["fps_threshold"],
-                        "severity": "warning" if metrics.fps >= 20 else "critical",
-                        "description": f'FPS过低: {metrics.fps:.1f} < {thresholds["fps_threshold"]}',
-                    }
-                )
-                DeviceManager._alert_cooldown[alert_key] = current_time
-                logger.info(f"触发告警: FPS过低 {metrics.fps:.1f}")
+        alert_events: list[dict[str, Any]] = []
+        now = datetime.now()
+        now_time = now.strftime("%H:%M:%S")
+        now_iso = now.isoformat()
 
-        # 检测内存高
-        if metrics.memory is not None and metrics.memory > thresholds["memory_threshold_mb"]:
-            alert_key = f"high_memory_{session_id}"
-            last_trigger = DeviceManager._alert_cooldown.get(alert_key, 0)
+        for rule in rules:
+            triggered = rule["triggered"]
+            if triggered is None:
+                continue
 
-            if current_time - last_trigger >= cooldown_seconds:
-                alerts_to_save.append(
-                    {
-                        "alert_type": "high_memory",
-                        "metric_name": "Memory",
-                        "current_value": metrics.memory,
-                        "threshold_value": thresholds["memory_threshold_mb"],
-                        "severity": "warning",
-                        "description": f'内存过高: {metrics.memory:.1f}MB > {thresholds["memory_threshold_mb"]}MB',
-                    }
-                )
-                DeviceManager._alert_cooldown[alert_key] = current_time
-                logger.info(f"触发告警: 内存过高 {metrics.memory:.1f}MB")
+            alert_type = rule["alert_type"]
+            if triggered:
+                if alert_type in unresolved_types:
+                    continue
+                alert_payload = {
+                    "alert_type": alert_type,
+                    "metric_name": rule["metric_name"],
+                    "current_value": rule["value"],
+                    "threshold_value": rule["threshold"],
+                    "severity": rule["severity"],
+                    "description": rule["description"],
+                }
+                try:
+                    alert_id = db.save_alert(session_id, alert_payload)
+                    unresolved_types.add(alert_type)
+                    logger.info(f"[告警触发] 保存告警 ID={alert_id}: {rule['description']}")
+                    level = "严重" if rule["severity"] == "critical" else "警告"
+                    alert_events.append(
+                        {
+                            "id": alert_id,
+                            "alert_type": alert_type,
+                            "action": "trigger",
+                            "resolved": False,
+                            "time": now_time,
+                            "timestamp": now_iso,
+                            "level": level,
+                            "content": rule["description"],
+                        }
+                    )
+                except Exception as e:
+                    logger.error(f"[告警保存] 失败: {e}, 告警内容: {alert_payload}")
+            else:
+                if alert_type not in unresolved_types:
+                    continue
+                try:
+                    resolved_rows = db.resolve_alerts(session_id, alert_type=alert_type)
+                    unresolved_types.discard(alert_type)
+                    for row in resolved_rows:
+                        logger.info(f"[告警解除] 自动解除告警 ID={row['id']} ({alert_type})")
+                        level = "严重" if row.get("severity") == "critical" else "警告"
+                        alert_events.append(
+                            {
+                                "id": row["id"],
+                                "alert_type": alert_type,
+                                "action": "resolve",
+                                "resolved": True,
+                                "time": now_time,
+                                "timestamp": now_iso,
+                                "level": level,
+                                "content": row.get("description") or rule["description"],
+                            }
+                        )
+                except Exception as e:
+                    logger.error(f"[告警解除] 失败: {e}, alert_type={alert_type}")
 
-        # 检测CPU高
-        if metrics.cpu is not None and metrics.cpu > thresholds["cpu_threshold_percent"]:
-            alert_key = f"high_cpu_{session_id}"
-            last_trigger = DeviceManager._alert_cooldown.get(alert_key, 0)
+        if not alert_events:
+            logger.debug("[告警检测] 告警状态无变化")
 
-            if current_time - last_trigger >= cooldown_seconds:
-                alerts_to_save.append(
-                    {
-                        "alert_type": "high_cpu",
-                        "metric_name": "CPU",
-                        "current_value": metrics.cpu,
-                        "threshold_value": thresholds["cpu_threshold_percent"],
-                        "severity": "warning" if metrics.cpu < 90 else "critical",
-                        "description": f'CPU过高: {metrics.cpu:.1f}% > {thresholds["cpu_threshold_percent"]}%',
-                    }
-                )
-                DeviceManager._alert_cooldown[alert_key] = current_time
-                logger.info(f"触发告警: CPU过高 {metrics.cpu:.1f}%")
-
-        # 检测电池温度高
-        if (
-            metrics.temperature is not None
-            and metrics.temperature > thresholds["battery_threshold_temp"]
-        ):
-            alert_key = f"high_temp_{session_id}"
-            last_trigger = DeviceManager._alert_cooldown.get(alert_key, 0)
-
-            if current_time - last_trigger >= cooldown_seconds:
-                alerts_to_save.append(
-                    {
-                        "alert_type": "high_temperature",
-                        "metric_name": "Temperature",
-                        "current_value": metrics.temperature,
-                        "threshold_value": thresholds["battery_threshold_temp"],
-                        "severity": "warning",
-                        "description": f'电池温度过高: {metrics.temperature:.1f}°C > {thresholds["battery_threshold_temp"]}°C',
-                    }
-                )
-                DeviceManager._alert_cooldown[alert_key] = current_time
-                logger.info(f"触发告警: 电池温度过高 {metrics.temperature:.1f}°C")
-
-        # 保存所有触发的告警
-        logger.debug(f"[告警检测] 本次检测到 {len(alerts_to_save)} 个告警需要保存")
-
-        # 构建返回给前端的告警列表
-        triggered_alerts = []
-
-        for alert in alerts_to_save:
-            try:
-                alert_id = db.save_alert(session_id, alert)
-                logger.info(f"[告警保存] 成功保存告警 ID={alert_id}: {alert['description']}")
-
-                # 添加到返回列表，格式化为前端需要的格式
-                level = "严重" if alert["severity"] == "critical" else "警告"
-                triggered_alerts.append(
-                    {
-                        "id": alert_id,
-                        "time": datetime.now().strftime("%H:%M:%S"),
-                        "level": level,
-                        "content": alert["description"],
-                    }
-                )
-            except Exception as e:
-                logger.error(f"[告警保存] 失败: {e}, 告警内容: {alert}")
-
-        if len(alerts_to_save) == 0:
-            logger.debug("[告警检测] 未触发任何告警")
-
-        return triggered_alerts
+        return alert_events

@@ -24,6 +24,7 @@ export interface Session {
   start_time: string;
   end_time?: string;
   duration?: number;
+  memory_total_mb?: number | null;
 }
 
 export interface AppInfo {

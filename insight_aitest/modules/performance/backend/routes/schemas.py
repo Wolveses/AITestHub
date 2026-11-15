@@ -10,10 +10,10 @@ from typing import Optional
 class AlertThresholds(BaseModel):
     """告警阈值配置"""
 
-    fps: float = Field(default=30, ge=10, le=60, description="FPS阈值")
-    memory: float = Field(default=500, ge=100, description="内存阈值(MB)")
+    fps: float = Field(default=30, ge=1, le=240, description="FPS阈值")
+    memory: float = Field(default=500, ge=1, description="内存阈值(MB)")
     cpu: float = Field(default=80, ge=0, le=100, description="CPU阈值(%)")
-    temperature: float = Field(default=45, ge=0, description="电池温度阈值(°C)")
+    temperature: float = Field(default=45, ge=0, le=120, description="电池温度阈值(°C)")
 
 
 class StartMonitoringRequest(BaseModel):
@@ -40,3 +40,4 @@ class SessionResponse(BaseModel):
     end_time: Optional[str] = None
     duration: Optional[int] = None
     project_id: Optional[int] = None
+    memory_total_mb: Optional[float] = None

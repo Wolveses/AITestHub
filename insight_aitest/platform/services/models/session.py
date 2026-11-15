@@ -51,6 +51,7 @@ class Session:
     duration: Optional[int] = None  # 秒
     sampling_interval: int = 1000  # 毫秒，默认1秒
     project_id: Optional[int] = None  # 项目归属（跨 DB 逻辑外键）
+    memory_total_mb: Optional[float] = None  # 设备总内存 (MB)
 
     def to_dict(self) -> Dict[str, Any]:
         """将会话对象转换为字典
@@ -70,6 +71,7 @@ class Session:
             "duration": self.duration,
             "sampling_interval": self.sampling_interval,
             "project_id": self.project_id,
+            "memory_total_mb": self.memory_total_mb,
         }
 
     @classmethod
@@ -94,4 +96,5 @@ class Session:
             duration=data.get("duration"),
             sampling_interval=data.get("sampling_interval", 1000),
             project_id=data.get("project_id"),
+            memory_total_mb=data.get("memory_total_mb"),
         )

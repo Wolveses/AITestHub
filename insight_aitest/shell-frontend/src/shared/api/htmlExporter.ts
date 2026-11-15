@@ -69,6 +69,7 @@ interface AlertInfo {
   description: string;
   threshold?: number;
   current_value?: number;
+  resolved?: boolean;
 }
 
 /**
@@ -355,15 +356,18 @@ export async function exportHtmlReport(
     sample_interval: 1000, // TODO: 从 API 获取
   };
 
-  // 4. 格式化告警
-  const formattedAlerts: AlertInfo[] = alerts.map(a => ({
-    timestamp: formatTimestamp(a.timestamp),
-    metric_type: a.metric_type || 'unknown',
-    severity: a.severity || 'warning',
-    description: a.description || '',
-    threshold: a.threshold,
-    current_value: a.current_value,
-  }));
+  // 4. 格式化告警（按告警时间降序）
+  const formattedAlerts: AlertInfo[] = [...alerts]
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    .map(a => ({
+      timestamp: formatTimestamp(a.timestamp),
+      metric_type: a.metric_type || 'unknown',
+      severity: a.severity || 'warning',
+      description: a.description || '',
+      threshold: a.threshold,
+      current_value: a.current_value,
+      resolved: a.resolved,
+    }));
 
   // 5. 准备模板上下文
   const t = i18n.t;
@@ -596,6 +600,7 @@ function renderAlertsSection(alerts: AlertInfo[]): string {
             ${alerts.map(alert => `
                 <div class="alert-item">
                     <strong>${alert.timestamp}</strong>
+                    [${alert.resolved ? t('alerts.statusResolved') : t('alerts.statusActive')}]
                     ${alert.description}
                     ${alert.threshold ? ` (${t('alerts.severity')}: ${alert.threshold}, ${t('stats.current')}: ${alert.current_value})` : ''}
                 </div>

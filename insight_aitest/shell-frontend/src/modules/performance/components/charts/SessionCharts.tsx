@@ -3,12 +3,12 @@
  * 2×3 网格布局，最多显示 6 个图表
  * 按优先级排序: cpu > fps > memory > network_down > network_up > gpu
  */
-import { useEffect, useState, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import * as echarts from 'echarts';
 import { api } from '@/shared/api/api';
 import type { MetricsData } from '@/shared/api/api';
-import { chartColors, getChartNeutral, getTimeAxisInterval } from '@/shared/theme/chart-tokens';
+import { chartColors, getChartNeutral, getTimeAxisInterval, formatMemoryMb } from '@/shared/theme/chart-tokens';
 import { useIsMobile } from '@/shared/hooks/useIsMobile';
 import { useThemeStore } from '@/shared/store/themeStore';
 
@@ -49,6 +49,7 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
   const theme = useThemeStore((s) => s.theme);
   const chartNeutral = getChartNeutral(theme);
   const [metrics, setMetrics] = useState<MetricsData[]>([]);
+  const [sessionMemoryTotalMb, setSessionMemoryTotalMb] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
 
   // 图表容器引用 - 使用 useRef 而不是 useState
@@ -59,6 +60,7 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
   useEffect(() => {
     if (!sessionId) {
       setMetrics([]);
+      setSessionMemoryTotalMb(null);
       return;
     }
 
@@ -70,6 +72,7 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
           api.getSession(sessionId),
           api.getSessionMetrics(sessionId, 10000)
         ]);
+        setSessionMemoryTotalMb(session.memory_total_mb ?? null);
 
 
         // 后端已经返回正确的字段名（cpu_app, memory_pss, network_up_speed, network_down_speed）
@@ -166,14 +169,14 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
   }, [metrics, displayMetrics]);
 
   // 格式化时间戳（HH:mm:ss）
-  const formatTime = (date: Date): string => {
+  const formatTime = useCallback((date: Date): string => {
     return date.toLocaleTimeString(timeLocale, {
       hour12: false,
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit'
     });
-  };
+  }, [timeLocale]);
 
   // 初始化和更新图表
   useEffect(() => {
@@ -232,11 +235,18 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
           observer?.observe(container);
         }
 
+        const maxDataValue = Math.max(...cleanData);
+        const yMin = config.yMin;
+        const yMax =
+          metricKey === 'memory_pss' && sessionMemoryTotalMb && sessionMemoryTotalMb > 0
+            ? Math.max(Math.ceil(sessionMemoryTotalMb), Math.ceil(maxDataValue))
+            : config.yMax;
+
         // 标题与 Max/Min/Avg 均在上方 DOM 标题栏渲染，避免与 canvas 重叠
         const option: echarts.EChartsOption = {
           grid: {
             top: 16,
-            left: 58,
+            left: 68,
             right: 20,
             bottom: 28,
           },
@@ -261,11 +271,16 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
           },
           yAxis: {
             type: 'value',
-            min: config.yMin,
-            max: config.yMax,
+            min: yMin,
+            max: yMax,
             axisLabel: {
               color: chartNeutral.axisLabel,
-              formatter: `{value} ${config.unit}`,
+              formatter: (value: number) => {
+                if (metricKey === 'memory_pss' || metricKey === 'cpu_app') {
+                  return `${Number.isInteger(value) ? value : value.toFixed(1)} ${config.unit}`;
+                }
+                return `${value} ${config.unit}`;
+              },
             },
             splitLine: {
               lineStyle: { color: chartNeutral.splitLine },
@@ -297,7 +312,7 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
     }, 100); // 延迟100ms确保DOM渲染完成
 
     return () => clearTimeout(timer);
-  }, [metrics, displayMetrics, chartNeutral]); // 移除 chartRefs 和 chartInstances 依赖
+  }, [metrics, displayMetrics, chartNeutral, sessionMemoryTotalMb, formatTime]); // 移除 chartRefs 和 chartInstances 依赖
 
   // 辅助函数：十六进制颜色转 rgba
   function hexToRgba(hex: string, alpha: number): string {
@@ -419,6 +434,11 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
                       <span style={{ whiteSpace: 'nowrap' }}>
                         Avg: {metricsStatistics[metricKey]!.avg.toFixed(config.decimals)}{config.unit}
                       </span>
+                      {metricKey === 'memory_pss' && sessionMemoryTotalMb && sessionMemoryTotalMb > 0 && (
+                        <span style={{ whiteSpace: 'nowrap' }}>
+                          ({((metricsStatistics[metricKey]!.avg / sessionMemoryTotalMb) * 100).toFixed(1)}% / {formatMemoryMb(sessionMemoryTotalMb)})
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>

@@ -78,6 +78,7 @@ export interface AlertInfo {
   description: string;
   threshold?: number;
   current_value?: number;
+  resolved?: boolean;
 }
 
 // Statistics 接口定义
@@ -166,6 +167,22 @@ export const api = {
   // 获取会话的告警记录
   async getSessionAlerts(sessionId: number): Promise<AlertInfo[]> {
     const response = await axios.get(`${API_BASE_URL}/monitoring/sessions/${sessionId}/alerts`);
+    return response.data;
+  },
+
+  // 更新会话告警阈值（支持监控中动态修改）
+  async updateAlertThresholds(
+    sessionId: number,
+    alertThresholds: { fps: number; memory: number; cpu: number; temperature: number }
+  ): Promise<{
+    status: string;
+    session_id: number;
+    alert_thresholds: { fps: number; memory: number; cpu: number; temperature: number };
+  }> {
+    const response = await axios.put(
+      `${API_BASE_URL}/monitoring/sessions/${sessionId}/alert-thresholds`,
+      alertThresholds
+    );
     return response.data;
   },
 
