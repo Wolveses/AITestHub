@@ -1,0 +1,22 @@
+id: mobile
+name:
+  zh: App 自动化
+  en: Mobile Automation
+version: 1.0.0
+category: testing
+icon: Smartphone
+order: 6
+description:
+  zh: 用例快照 → 本地 Agent/LLM 探索生成 Appium 脚本 → 平台主机试跑与固化回放
+  en: Case snapshots → Agent/LLM exploration → Appium pytest runs
+backend:
+  router: mobile.backend.routes:router
+  dependencies: []
+frontend:
+  route: /mobile-runner
+  entry: mobile:MobileApp
+  nav:
+    label: {zh: App 自动化, en: Mobile Automation}
+    icon: Smartphone
+    show_in_dashboard: true
+default_enabled: true

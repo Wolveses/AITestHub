@@ -1,7 +1,7 @@
 import {
   // 模块 / 平台导航
   Gauge, Bot, TestTube, Network, Settings, Home, BarChart3,
-  BookOpen, FolderKanban, MonitorSmartphone,
+  BookOpen, FolderKanban, MonitorSmartphone, Smartphone,
   // 状态（替换勾/叉/警示/暂停/等待 等 emoji，Stage 4 启用）
   Check, X, AlertTriangle, Clock, Pause, Play, Loader,
   CircleCheck, CircleX, Info,
@@ -23,6 +23,7 @@ export const moduleIcons: Record<string, LucideIcon> = {
   BookOpen,
   FolderKanban,
   MonitorSmartphone,
+  Smartphone,
 };
 
 export const platformIcons = { Settings, Home, Overview: BarChart3, FolderKanban };

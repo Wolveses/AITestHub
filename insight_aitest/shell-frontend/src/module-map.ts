@@ -18,6 +18,9 @@ const ApiApp = lazy(() =>
 const UIApp = lazy(() =>
   import('./modules/ui').then((m) => ({ default: m.UIApp })),
 );
+const MobileApp = lazy(() =>
+  import('./modules/mobile').then((m) => ({ default: m.MobileApp })),
+);
 
 // 静态模块映射表。每加一个模块在此加一行。
 // key 格式：<模块id>:<导出名>，与 manifest 的 frontend.entry 一致。
@@ -28,6 +31,7 @@ export const moduleMap: Record<string, ComponentType> = {
   'testcase:TestCaseApp': TestCaseApp,
   'api:ApiApp': ApiApp,
   'ui:UIApp': UIApp,
+  'mobile:MobileApp': MobileApp,
 };
 
 // 子路由映射。key = moduleId（与 manifest m.id 一致），value = { subPath: lazy 组件 }。

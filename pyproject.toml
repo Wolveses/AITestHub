@@ -72,6 +72,10 @@ ui = [
     "pymidscene>=0.1.0",
     "Pillow>=10.0",  # 截图时间水印（scaffold 运行脚手架）
 ]
+mobile = [
+    "Appium-Python-Client>=4.0.0",
+    "Pillow>=10.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
