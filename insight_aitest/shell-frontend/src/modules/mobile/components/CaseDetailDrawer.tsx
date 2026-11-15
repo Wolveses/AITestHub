@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Play, Save, Square, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Btn, ErrorCategoryTag, Field, StatusBadge, inputStyle } from './common';
@@ -55,23 +55,68 @@ export function CaseDetailDrawer({
   const [runLog, setRunLog] = useState('');
   const [deviceLog, setDeviceLog] = useState('');
   const [logMode, setLogMode] = useState<'stdout' | 'logcat'>('stdout');
+  const logBoxRef = useRef<HTMLPreElement>(null);
 
+  const caseId = targetCase?.id ?? null;
+  const anyRunRunning = runs.some((r) => r.status === 'running') || targetCase?.status === 'running';
+  const selectedRunId = selectedRun?.id ?? null;
+  const selectedRunStatus = selectedRun?.status ?? null;
+  const listRunStatus =
+    selectedRunId !== null ? runs.find((r) => r.id === selectedRunId)?.status ?? null : null;
+
+  const inspectRun = useCallback(
+    async (runId: number, opts?: { silent?: boolean }) => {
+      try {
+        const [detail, stdoutText, logcatText] = await Promise.all([
+          getRunDetail(runId),
+          getRunLog(runId).catch(() => ''),
+          getRunDeviceLog(runId).catch(() => ''),
+        ]);
+        setSelectedRun(detail);
+        setRunLog(stdoutText);
+        setDeviceLog(logcatText);
+      } catch (e) {
+        if (!opts?.silent) {
+          toast.error(`读取运行详情失败: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    },
+    [getRunDetail, getRunLog, getRunDeviceLog]
+  );
+
+  // 仅当打开新用例或关闭抽屉（caseId 变化）时重置 Tab 与选中执行记录，避免列表轮询刷新对象引用时跳回「用例快照」
   useEffect(() => {
-    if (!targetCase) return;
     setEditing(false);
     setTab('snapshot');
+    setSelectedRun(null);
+    setRunLog('');
+    setDeviceLog('');
+    setRunAppId('');
+    if (caseId === null) {
+      setRuns([]);
+      setScriptContent('');
+      setScriptVersion(0);
+      return;
+    }
+    void loadDevices();
+    void loadApps();
+    void getCaseRuns(caseId).then(setRuns).catch(() => setRuns([]));
+  }, [caseId, getCaseRuns, loadDevices, loadApps]);
+
+  // 同一用例对象刷新时仅同步快照字段（编辑态下不覆盖用户输入）
+  useEffect(() => {
+    if (!targetCase || editing) return;
     setTitle(targetCase.title || '');
     setPrecondition(targetCase.precondition || '');
     setStepsText((targetCase.steps || []).join('\n'));
     setExpected(targetCase.expected || '');
-    setSelectedRun(null);
-    setRunLog('');
-    setDeviceLog('');
-    void loadDevices();
-    void loadApps();
-    void getCaseRuns(targetCase.id).then(setRuns).catch(() => setRuns([]));
-    if (targetCase.has_script) {
-      void getScript(targetCase.id)
+  }, [targetCase, editing]);
+
+  // 同一用例脚本生成/保存后同步脚本内容
+  useEffect(() => {
+    if (caseId === null) return;
+    if (targetCase?.has_script) {
+      void getScript(caseId)
         .then((res) => {
           setScriptContent(res.content);
           setScriptVersion(res.version);
@@ -84,7 +129,47 @@ export function CaseDetailDrawer({
       setScriptContent('');
       setScriptVersion(0);
     }
-  }, [targetCase, getCaseRuns, getScript, loadDevices, loadApps]);
+  }, [caseId, targetCase?.has_script, targetCase?.script_version, getScript]);
+
+  // 状态或最近执行变更时刷新执行记录列表；执行中每 2.5 秒轮询同步状态
+  useEffect(() => {
+    if (caseId === null) return;
+    void getCaseRuns(caseId).then(setRuns).catch(() => undefined);
+    if (!anyRunRunning) return;
+    const timer = window.setInterval(() => {
+      void getCaseRuns(caseId).then(setRuns).catch(() => undefined);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [caseId, targetCase?.status, targetCase?.last_run_id, anyRunRunning, getCaseRuns]);
+
+  // 切换到「执行记录」且未选中任何记录时，自动加载最近一条执行详情与标准日志
+  useEffect(() => {
+    if (tab !== 'runs' || selectedRunId !== null || runs.length === 0) return;
+    void inspectRun(runs[0].id, { silent: true });
+  }, [tab, selectedRunId, runs, inspectRun]);
+
+  // 查看运行中的执行记录时，每 2 秒轮询最新标准输出与设备日志；结束瞬间同步终态与截图
+  useEffect(() => {
+    if (tab !== 'runs' || selectedRunId === null) return;
+    const stillRunning = selectedRunStatus === 'running' || listRunStatus === 'running';
+    if (!stillRunning) {
+      if (selectedRunStatus === 'running') {
+        void inspectRun(selectedRunId, { silent: true });
+      }
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void inspectRun(selectedRunId, { silent: true });
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [tab, selectedRunId, selectedRunStatus, listRunStatus, inspectRun]);
+
+  // 实时日志输出自动滚动到底部
+  useEffect(() => {
+    if (selectedRunStatus === 'running' && logMode === 'stdout' && logBoxRef.current) {
+      logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
+    }
+  }, [runLog, selectedRunStatus, logMode]);
 
   useEffect(() => {
     if (!targetCase) return;
@@ -169,21 +254,6 @@ export function CaseDetailDrawer({
       toast.error(`执行失败: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setRunning(false);
-    }
-  };
-
-  const inspectRun = async (runId: number) => {
-    try {
-      const [detail, stdoutText, logcatText] = await Promise.all([
-        getRunDetail(runId),
-        getRunLog(runId).catch(() => ''),
-        getRunDeviceLog(runId).catch(() => ''),
-      ]);
-      setSelectedRun(detail);
-      setRunLog(stdoutText);
-      setDeviceLog(logcatText);
-    } catch (e) {
-      toast.error(`读取运行详情失败: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -511,13 +581,13 @@ export function CaseDetailDrawer({
                     </div>
                   )}
 
-                  <div style={{ display: 'flex', gap: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <Btn
                       size="sm"
                       variant={logMode === 'stdout' ? 'primary' : 'ghost'}
                       onClick={() => setLogMode('stdout')}
                     >
-                      Pytest 输出 (stdout.log)
+                      标准日志输出 (stdout.log)
                     </Btn>
                     <Btn
                       size="sm"
@@ -526,23 +596,34 @@ export function CaseDetailDrawer({
                     >
                       设备日志 (device.log)
                     </Btn>
+                    {selectedRun.status === 'running' && (
+                      <span style={{ fontSize: 11, color: 'var(--accent)', marginLeft: 'auto' }}>
+                        实时刷新中…
+                      </span>
+                    )}
                   </div>
 
                   <pre
+                    ref={logBoxRef}
                     style={{
                       margin: 0,
                       padding: 10,
                       borderRadius: 6,
                       background: 'var(--bg-base)',
                       border: '1px solid var(--border)',
+                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
                       fontSize: 11,
+                      lineHeight: 1.6,
                       color: 'var(--text-secondary)',
-                      maxHeight: 260,
+                      maxHeight: 280,
                       overflow: 'auto',
                       whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
                     }}
                   >
-                    {logMode === 'stdout' ? runLog || '(空)' : deviceLog || '(无设备日志)'}
+                    {logMode === 'stdout'
+                      ? runLog || (selectedRun.status === 'running' ? '（等待执行输出…）' : '（无标准输出）')
+                      : deviceLog || '（无设备日志）'}
                   </pre>
                 </div>
               )}

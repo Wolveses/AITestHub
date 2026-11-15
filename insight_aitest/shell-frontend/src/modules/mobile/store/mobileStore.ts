@@ -400,11 +400,11 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   getCaseRuns: (caseId) => req(`${BASE}/runs?case_id=${caseId}`),
   getRunDetail: (runId) => req(`${BASE}/runs/${runId}`),
   getRunLog: async (runId) => {
-    const r = await fetch(`${BASE}/runs/${runId}/log`);
+    const r = await fetch(`${BASE}/runs/${runId}/log?_t=${Date.now()}`);
     return r.ok ? r.text() : '';
   },
   getRunDeviceLog: async (runId) => {
-    const r = await fetch(`${BASE}/runs/${runId}/device-log`);
+    const r = await fetch(`${BASE}/runs/${runId}/device-log?_t=${Date.now()}`);
     return r.ok ? r.text() : '';
   },
 
