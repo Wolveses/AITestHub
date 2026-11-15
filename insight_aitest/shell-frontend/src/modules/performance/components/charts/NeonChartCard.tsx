@@ -7,9 +7,10 @@ interface NeonChartCardProps {
   data: number[];
   timestamps: string[];
   note?: string;
+  totalMemoryMb?: number | null;
 }
 
-export default function NeonChartCard({ config, data, timestamps, note }: NeonChartCardProps) {
+export default function NeonChartCard({ config, data, timestamps, note, totalMemoryMb }: NeonChartCardProps) {
   // 动画状态
   const [animatedValue, setAnimatedValue] = useState(0);
   const [animatedMax, setAnimatedMax] = useState(0);
@@ -118,11 +119,11 @@ export default function NeonChartCard({ config, data, timestamps, note }: NeonCh
 
       {/* 图表区域 - 占据主要空间 */}
       <div className="flex-1 min-h-0" style={{ minHeight: '180px' }}>
-        <RealTimeChart data={data} timestamps={timestamps} config={config} />
+        <RealTimeChart data={data} timestamps={timestamps} config={config} totalMemoryMb={totalMemoryMb} />
       </div>
 
       {/* 当前值 - 带平滑动画 */}
-      <div className="mt-2 flex-shrink-0 flex items-baseline">
+      <div className="mt-2 flex-shrink-0 flex items-baseline flex-wrap" style={{ rowGap: '2px' }}>
         <span
           style={{
             fontSize: '1.1rem',
@@ -143,8 +144,8 @@ export default function NeonChartCard({ config, data, timestamps, note }: NeonCh
         {note && (
           <span style={{
             marginLeft: '8px',
-            fontSize: '0.65rem',
-            color: "var(--text-muted)",
+            fontSize: '0.75rem',
+            color: "var(--text-secondary)",
           }}>
             {note}
           </span>

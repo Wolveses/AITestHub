@@ -8,6 +8,9 @@ import subprocess
 from logzero import logger
 from enum import Enum
 
+# 设备全局性能监控专用目标标识（不绑定单个应用包名）
+DEVICE_GLOBAL_TARGET = "__device__"
+
 
 class Platform(Enum):
     """平台枚举"""

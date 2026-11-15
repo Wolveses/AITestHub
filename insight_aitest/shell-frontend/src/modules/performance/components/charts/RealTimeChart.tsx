@@ -1,8 +1,8 @@
-import { useEffect, useRef, useMemo, useCallback } from 'react';
+import { useEffect, useRef, useMemo, useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import * as echarts from 'echarts';
 import type { MetricCardConfig } from '@/shared/types';
-import { getChartNeutral } from '@/shared/theme/chart-tokens';
+import { getChartNeutral, getTimeAxisInterval, formatMemoryMb } from '@/shared/theme/chart-tokens';
 import { useThemeStore } from '@/shared/store/themeStore';
 
 // echarts 用 canvas 渲染，无法解析 CSS variables（var(--*) 会 fallback 到黑色）。
@@ -13,9 +13,10 @@ interface RealTimeChartProps {
   data: number[];
   timestamps: string[];
   config: MetricCardConfig;
+  totalMemoryMb?: number | null;
 }
 
-export default function RealTimeChart({ data, timestamps, config }: RealTimeChartProps) {
+export default function RealTimeChart({ data, timestamps, config, totalMemoryMb }: RealTimeChartProps) {
   const { t, i18n } = useTranslation();
   // 图表时间轴跟随界面语言（而非写死 zh-CN）
   const timeLocale = i18n.language === 'en-US' ? 'en-US' : 'zh-CN';
@@ -24,22 +25,35 @@ export default function RealTimeChart({ data, timestamps, config }: RealTimeChar
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstance = useRef<echarts.ECharts | null>(null);
   const updateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [chartWidth, setChartWidth] = useState(320);
 
   // 清理函数
   useEffect(() => {
-    if (!chartRef.current) return;
+    const el = chartRef.current;
+    if (!el) return;
 
     // 初始化图表
-    chartInstance.current = echarts.init(chartRef.current);
+    chartInstance.current = echarts.init(el);
+    if (el.clientWidth > 0) {
+      setChartWidth(el.clientWidth);
+    }
 
-    // 添加窗口resize监听器
+    // 监听窗口与容器尺寸变化，及时重绘并重算时间轴刻度密度
     const handleResize = () => {
       chartInstance.current?.resize();
+      if (el.clientWidth > 0) {
+        setChartWidth(el.clientWidth);
+      }
     };
 
+    const observer = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(handleResize)
+      : null;
+    observer?.observe(el);
     window.addEventListener('resize', handleResize);
 
     return () => {
+      observer?.disconnect();
       window.removeEventListener('resize', handleResize);
       if (updateTimerRef.current) {
         clearTimeout(updateTimerRef.current);
@@ -48,13 +62,10 @@ export default function RealTimeChart({ data, timestamps, config }: RealTimeChar
     };
   }, []);
 
-  // 计算X轴刻度间隔（完全复刻桌面版逻辑）
+  // 根据容器宽度与点数动态计算 X 轴刻度间隔，配合 hideOverlap 避免文字重叠
   const xAxisInterval = useMemo(() => {
-    const len = data.length;
-    if (len <= 20) return 5;
-    if (len <= 40) return 10;
-    return 15;
-  }, [data.length]);
+    return getTimeAxisInterval(data.length, chartWidth);
+  }, [data.length, chartWidth]);
 
   // 格式化时间戳（HH:mm:ss）
   const formatTime = useCallback((date: Date): string => {
@@ -149,12 +160,14 @@ export default function RealTimeChart({ data, timestamps, config }: RealTimeChar
           color: chartNeutral.axisLabel,
           fontSize: 11,
           fontFamily: 'Arial, sans-serif',
-          interval: xAxisInterval - 1, // 动态间隔控制显示密度
+          interval: xAxisInterval,
+          hideOverlap: true,
         },
         axisLine: {
           lineStyle: { color: chartNeutral.axisLine }
         },
         axisTick: {
+          alignWithLabel: true,
           lineStyle: { color: chartNeutral.axisLine }
         },
       },
@@ -215,6 +228,10 @@ export default function RealTimeChart({ data, timestamps, config }: RealTimeChar
 
           const value = point.value as number;
           const unit = config.unit;
+          const memoryExtra =
+            config.metricId === 'memory' && totalMemoryMb && totalMemoryMb > 0
+              ? ` (${((value / totalMemoryMb) * 100).toFixed(2)}% / ${formatMemoryMb(totalMemoryMb)})`
+              : '';
 
           return `
             <div style="padding: 4px 0;">
@@ -225,7 +242,7 @@ export default function RealTimeChart({ data, timestamps, config }: RealTimeChar
               </div>
               <div>
                 <span style="color: var(--text-muted);">${t('stats.value')}:</span>
-                <span style="color: ${config.color}; margin-left: 8px; font-family: 'Roboto Mono', monospace; font-weight: 500;">${value.toFixed(config.decimals)}${unit}</span>
+                <span style="color: ${config.color}; margin-left: 8px; font-family: 'Roboto Mono', monospace; font-weight: 500;">${value.toFixed(config.decimals)}${unit}${memoryExtra}</span>
               </div>
             </div>
           `;
@@ -312,7 +329,7 @@ export default function RealTimeChart({ data, timestamps, config }: RealTimeChar
       chartInstance.current.setOption(option, { notMerge: false, lazyUpdate: true });
     }, 50); // 50ms throttle，避免过于频繁的更新
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, timestamps, xAxisInterval, config, formatTime, parseTimestamp, chartNeutral]);
+  }, [data, timestamps, xAxisInterval, config, formatTime, parseTimestamp, chartNeutral, totalMemoryMb]);
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>

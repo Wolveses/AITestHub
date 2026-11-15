@@ -12,6 +12,7 @@ import re
 from typing import Optional, Dict
 from logzero import logger
 from insight_aitest.platform.services.collectors.adb import adb
+from insight_aitest.platform.services.device_common import DEVICE_GLOBAL_TARGET
 
 
 class MemoryCollector:
@@ -32,12 +33,37 @@ class MemoryCollector:
         self.device_id = device_id
         self.device_profile = device_profile
         self.strategy = device_profile.get_strategy() if device_profile else None
+        self._total_memory_mb: Optional[float] = None
 
         if self.strategy:
             logger.debug(
                 f"[内存采集器] 使用策略: {self.strategy.memory_primary_method}, "
                 f"单位: {self.strategy.memory_unit}"
             )
+
+    def _get_device_total_memory_mb(self) -> Optional[float]:
+        """读取并缓存设备物理总内存（MB）"""
+        if self._total_memory_mb is not None:
+            return self._total_memory_mb
+        try:
+            output = adb.shell("cat /proc/meminfo", self.device_id)
+            if output:
+                match = re.search(r"MemTotal:\s*(\d+)\s*kB", output, re.IGNORECASE)
+                if match:
+                    self._total_memory_mb = round(float(match.group(1)) / 1024.0, 2)
+                    return self._total_memory_mb
+        except Exception as e:
+            logger.debug(f"读取 /proc/meminfo 失败: {e}")
+        return None
+
+    def _enrich_with_device_total(self, data: Dict[str, float]) -> Dict[str, float]:
+        """附加设备总内存与内存占用百分比"""
+        total_mb = self._get_device_total_memory_mb()
+        if total_mb and total_mb > 0:
+            used_mb = float(data.get("totalPass", 0) or 0)
+            data["total_mb"] = total_mb
+            data["percentage"] = round((used_mb / total_mb) * 100.0, 2)
+        return data
 
     def _parse_memory_from_dumpsys(self, package_name: str) -> Optional[Dict[str, float]]:
         """
@@ -196,12 +222,52 @@ class MemoryCollector:
             logger.error(f"简化内存解析失败: {e}")
             return None
 
+    def collect_device(self) -> Dict[str, float]:
+        """采集整台设备的全局物理内存使用量（基于 /proc/meminfo）"""
+        try:
+            output = adb.shell("cat /proc/meminfo", self.device_id)
+            if output:
+                values: Dict[str, float] = {}
+                for line in output.splitlines():
+                    match = re.match(r"^([A-Za-z0-9_()]+):\s+(\d+)\s*kB", line.strip())
+                    if match:
+                        values[match.group(1)] = float(match.group(2))
+
+                total_kb = values.get("MemTotal", 0.0)
+                if total_kb > 0:
+                    if "MemAvailable" in values:
+                        avail_kb = values["MemAvailable"]
+                    else:
+                        avail_kb = (
+                            values.get("MemFree", 0.0)
+                            + values.get("Buffers", 0.0)
+                            + values.get("Cached", 0.0)
+                            + values.get("SReclaimable", 0.0)
+                        )
+                    used_kb = max(0.0, total_kb - avail_kb)
+                    total_mb = round(total_kb / 1024.0, 2)
+                    used_mb = round(used_kb / 1024.0, 2)
+                    self._total_memory_mb = total_mb
+                    return {
+                        "totalPass": used_mb,
+                        "nativePass": 0.0,
+                        "dalvikPass": 0.0,
+                        "total_mb": total_mb,
+                        "percentage": round((used_mb / total_mb) * 100.0, 2),
+                    }
+        except Exception as e:
+            logger.error(f"Android 整机内存采集失败: {e}")
+
+        return self._enrich_with_device_total(
+            {"totalPass": 0.0, "nativePass": 0.0, "dalvikPass": 0.0}
+        )
+
     def collect(self, package_name: str) -> Optional[Dict[str, float]]:
         """
         采集内存使用情况
 
         Args:
-            package_name: 应用包名 (如 com.example.app)
+            package_name: 应用包名 (如 com.example.app)，或 DEVICE_GLOBAL_TARGET 表示整机全局
 
         Returns:
             dict: {
@@ -216,22 +282,29 @@ class MemoryCollector:
             - dalvikPass: Dalvik/Java 堆内存（Java/Kotlin 代码使用）
             - 返回单位为 MB
         """
+        if package_name == DEVICE_GLOBAL_TARGET:
+            return self.collect_device()
+
         try:
             # 方法1: 使用完整 dumpsys meminfo 解析
             result = self._parse_memory_from_dumpsys(package_name)
             if result:
-                return result
+                return self._enrich_with_device_total(result)
 
             # 方法2: 使用简化解析
             result = self._parse_memory_simple(package_name)
             if result:
-                return result
+                return self._enrich_with_device_total(result)
 
             # 如果都失败，返回默认值
             logger.debug(f"无法获取 {package_name} 的内存使用情况")
-            return {"totalPass": 0, "nativePass": 0, "dalvikPass": 0}
+            return self._enrich_with_device_total(
+                {"totalPass": 0, "nativePass": 0, "dalvikPass": 0}
+            )
 
         except Exception as e:
             logger.error(f"Android 内存采集失败: {e}")
             # 返回默认值而非 None，避免后续处理失败
-            return {"totalPass": 0, "nativePass": 0, "dalvikPass": 0}
+            return self._enrich_with_device_total(
+                {"totalPass": 0, "nativePass": 0, "dalvikPass": 0}
+            )

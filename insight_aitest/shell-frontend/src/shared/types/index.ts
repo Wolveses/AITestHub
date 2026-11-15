@@ -1,3 +1,10 @@
+// 设备全局性能监控专用目标标识（与后端 DEVICE_GLOBAL_TARGET 保持一致）
+export const DEVICE_GLOBAL_TARGET = '__device__';
+
+export function isDeviceGlobalTarget(target?: string | null): boolean {
+  return target === DEVICE_GLOBAL_TARGET;
+}
+
 export interface Device {
   device_id: string;
   name: string;
@@ -38,6 +45,8 @@ export interface MetricsData {
   timestamp: string;
   cpu?: number;
   memory?: number;
+  memory_total_mb?: number;
+  memory_percent?: number;
   fps?: number;
   network_up?: number;
   network_down?: number;

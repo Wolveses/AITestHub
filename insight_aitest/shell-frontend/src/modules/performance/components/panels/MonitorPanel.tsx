@@ -1,11 +1,21 @@
 import { useMonitoringStore } from '@/modules/performance/store/monitoringStore';
 import { useTranslation } from 'react-i18next';
 import { ALL_METRIC_CARDS } from '@/shared/config/metricCards';
+import { formatMemoryMb } from '@/shared/theme/chart-tokens';
 import NeonChartCard from '@/modules/performance/components/charts/NeonChartCard';
 
 export default function MonitorPanel() {
   const { t } = useTranslation();
-  const { metricsData, timestamps, isMonitoring, enabledMetricIds, devices, selectedDevice } = useMonitoringStore();
+  const {
+    metricsData,
+    timestamps,
+    isMonitoring,
+    enabledMetricIds,
+    devices,
+    selectedDevice,
+    memoryTotalMb,
+    memoryPercent,
+  } = useMonitoringStore();
 
   // 检测当前设备类型
   const currentDeviceType = devices.find(d => d.device_id === selectedDevice)?.type || 'android';
@@ -22,6 +32,17 @@ export default function MonitorPanel() {
     .filter(card => filteredMetricIds.includes(card.metricId))
     .sort((a, b) => a.priority - b.priority);
 
+  const memoryValues = metricsData.memory || [];
+  const latestMemory = memoryValues.length > 0 ? memoryValues[memoryValues.length - 1] : 0;
+  const resolvedMemPercent =
+    memoryTotalMb && memoryTotalMb > 0
+      ? (memoryPercent ?? Number(((latestMemory / memoryTotalMb) * 100).toFixed(2)))
+      : null;
+  const memoryNote =
+    memoryTotalMb && memoryTotalMb > 0 && resolvedMemPercent !== null
+      ? `(${resolvedMemPercent.toFixed(2)}% / ${formatMemoryMb(memoryTotalMb)})`
+      : undefined;
+
   return (
     <div>
       {/* 图表网格 - 直接置顶 */}
@@ -35,7 +56,8 @@ export default function MonitorPanel() {
                 config={card}
                 data={metricsData[card.metricId] || []}
                 timestamps={timestamps}
-                note={undefined}
+                note={card.metricId === 'memory' ? memoryNote : undefined}
+                totalMemoryMb={card.metricId === 'memory' ? memoryTotalMb : undefined}
               />
             ))}
           </div>

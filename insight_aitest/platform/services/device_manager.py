@@ -349,6 +349,17 @@ class DeviceManager:
                                             metrics_data.memory = float(
                                                 memory_data.get("totalPass", 0)
                                             )
+                                        total_mb = memory_data.get("total_mb")
+                                        if total_mb is not None and float(total_mb) > 0:
+                                            metrics_data.memory_total_mb = float(total_mb)
+                                            pct = memory_data.get("percentage")
+                                            metrics_data.memory_percent = (
+                                                float(pct)
+                                                if pct is not None
+                                                else round(
+                                                    (metrics_data.memory / float(total_mb)) * 100, 2
+                                                )
+                                            )
                                     mem_elapsed = (time.time() - mem_start) * 1000
                                     logger.debug(f"[性能] 内存采集耗时: {mem_elapsed:.0f}ms")
                                 except Exception as e:
@@ -444,9 +455,9 @@ class DeviceManager:
 
                         if has_data:
                             logger.debug(
-                                f"数据采集成功: CPU={metrics_data.cpu:.1f}%, "
-                                f"Memory={metrics_data.memory:.1f}MB, "
-                                f"FPS={metrics_data.fps:.0f}"
+                                f"数据采集成功: CPU={metrics_data.cpu or 0.0:.1f}%, "
+                                f"Memory={metrics_data.memory or 0.0:.1f}MB, "
+                                f"FPS={metrics_data.fps or 0.0:.0f}"
                             )
 
                             # 保存到数据库（修复测试报告无数据问题）
@@ -479,6 +490,8 @@ class DeviceManager:
                                         fps=metrics_data.fps,
                                         cpu=metrics_data.cpu,
                                         memory=metrics_data.memory,
+                                        memory_total_mb=metrics_data.memory_total_mb,
+                                        memory_percent=metrics_data.memory_percent,
                                         network_up=metrics_data.network_up,
                                         network_down=metrics_data.network_down,
                                         battery=metrics_data.battery,

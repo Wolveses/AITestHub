@@ -56,3 +56,29 @@ export function getChartNeutral(theme: 'dark' | 'light'): ChartNeutral {
  * @deprecated 保留向后兼容（固定暗黑）。新代码请用 getChartNeutral(theme)。
  */
 export const chartNeutral: ChartNeutral = chartNeutralDark;
+
+/**
+ * 根据图表容器宽度与数据点数量计算 X 轴刻度间隔，避免时间标签重叠。
+ */
+export function getTimeAxisInterval(
+  pointCount: number,
+  containerWidth: number,
+  horizontalPadding = 75,
+  labelSlotPx = 80
+): number {
+  if (pointCount <= 1) return 0;
+  const plotWidth = Math.max(120, containerWidth - horizontalPadding);
+  const maxLabels = Math.max(2, Math.floor(plotWidth / labelSlotPx));
+  const step = pointCount <= maxLabels ? 1 : Math.ceil(pointCount / maxLabels);
+  return Math.max(0, step - 1);
+}
+
+/**
+ * 将 MB 内存容量格式化为易读文本（>= 1024 MB 时按 GB 显示）。
+ */
+export function formatMemoryMb(mb: number): string {
+  if (mb >= 1024) {
+    return `${(mb / 1024).toFixed(2)} GB`;
+  }
+  return `${mb.toFixed(0)} MB`;
+}

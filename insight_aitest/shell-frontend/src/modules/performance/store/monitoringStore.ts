@@ -25,6 +25,8 @@ interface MonitoringState {
   timestamps: string[];
   wsConnection: WebSocket | null;
   batteryInfo: BatteryInfo;
+  memoryTotalMb: number | null;
+  memoryPercent: number | null;
   alarms: AlarmRecord[];
   enabledMetricIds: string[];  // 启用的指标ID列表
   samplingInterval: number;  // 采样间隔（毫秒）
@@ -68,6 +70,8 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
     temperature: '--',
     capacity: '--',
   },
+  memoryTotalMb: null,
+  memoryPercent: null,
   alarms: [],
   enabledMetricIds: ['cpu', 'memory', 'fps', 'network_up', 'network_down'],  // 默认启用前5个
   samplingInterval: 1000,  // 默认1秒
@@ -157,6 +161,8 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
         wsConnection: ws,
         metricsData: {},
         timestamps: [],
+        memoryTotalMb: null,
+        memoryPercent: null,
       });
     } catch (error) {
       console.error('Error starting monitoring:', error);
@@ -211,7 +217,14 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
 
     // 更新每个指标
     Object.entries(data).forEach(([key, value]) => {
-      if (key !== 'timestamp' && key !== 'battery' && key !== 'temperature' && typeof value === 'number') {
+      if (
+        key !== 'timestamp' &&
+        key !== 'battery' &&
+        key !== 'temperature' &&
+        key !== 'memory_total_mb' &&
+        key !== 'memory_percent' &&
+        typeof value === 'number'
+      ) {
         if (!newMetricsData[key]) {
           newMetricsData[key] = [];
         }
@@ -235,17 +248,30 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
     const trimmedTimestamps = newTimestamps.slice(-100);
 
     // 处理电池信息更新
-    const batteryInfo = state.batteryInfo;
+    const batteryInfo = { ...state.batteryInfo };
     if (data.battery !== undefined || data.temperature !== undefined) {
       batteryInfo.level = data.battery !== undefined && data.battery !== null ? `${data.battery}%` : '--';
       batteryInfo.temperature = data.temperature !== undefined && data.temperature !== null ? `${data.temperature}°C` : '--';
       batteryInfo.capacity = '--';  // 容量信息暂未采集
     }
 
+    const memoryTotalMb =
+      typeof data.memory_total_mb === 'number' && data.memory_total_mb > 0
+        ? data.memory_total_mb
+        : state.memoryTotalMb;
+    const memoryPercent =
+      typeof data.memory_percent === 'number'
+        ? data.memory_percent
+        : memoryTotalMb && typeof data.memory === 'number'
+          ? Number(((data.memory / memoryTotalMb) * 100).toFixed(2))
+          : state.memoryPercent;
+
     return {
       metricsData: newMetricsData,
       timestamps: trimmedTimestamps,
       batteryInfo,
+      memoryTotalMb,
+      memoryPercent,
     };
   }),
 
@@ -253,6 +279,8 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
   clearMetrics: () => set({
     metricsData: {},
     timestamps: [],
+    memoryTotalMb: null,
+    memoryPercent: null,
   }),
 
   // 设置电池信息

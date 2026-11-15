@@ -46,6 +46,8 @@ class MetricsData:
     timestamp: datetime
     cpu: Optional[float] = None  # 百分比
     memory: Optional[float] = None  # MB
+    memory_total_mb: Optional[float] = None  # 设备总内存 (MB)
+    memory_percent: Optional[float] = None  # 内存占用百分比
     fps: Optional[float] = None
     network_up: Optional[float] = None  # KB/s
     network_down: Optional[float] = None  # KB/s
@@ -64,6 +66,8 @@ class MetricsData:
             "timestamp": self.timestamp.isoformat(),
             "cpu": self.cpu,
             "memory": self.memory,
+            "memory_total_mb": self.memory_total_mb,
+            "memory_percent": self.memory_percent,
             "fps": self.fps,
             "network_up": self.network_up,
             "network_down": self.network_down,
@@ -101,6 +105,8 @@ class MetricsData:
             timestamp=datetime.fromisoformat(data["timestamp"]),
             cpu=data.get("cpu"),
             memory=data.get("memory"),
+            memory_total_mb=data.get("memory_total_mb"),
+            memory_percent=data.get("memory_percent"),
             fps=data.get("fps"),
             network_up=data.get("network_up"),
             network_down=data.get("network_down"),
