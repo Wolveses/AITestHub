@@ -281,8 +281,10 @@ class AndroidAppEnumerator(BaseAppEnumerator):
                 logger.warning("未通过 dumpsys activity processes 检测到前台进程，尝试备用方法")
                 process_priority = self._get_process_priorities_fallback()
 
-            # 使用ps命令获取所有进程
+            # 使用ps命令获取所有进程（兼容 OPPO/ColorOS 等带 FRZ 列的 10 列 ps -A 输出，以及旧版 ps）
             output = self._adb.shell("ps -A", self.device_id, timeout=10)
+            if not output or len(output.strip().splitlines()) <= 1:
+                output = self._adb.shell("ps", self.device_id, timeout=10)
             if not output:
                 return []
 
@@ -290,13 +292,15 @@ class AndroidAppEnumerator(BaseAppEnumerator):
             running_apps = {}
             for line in output.split("\n")[1:]:  # 跳过标题行
                 parts = line.split()
-                if len(parts) >= 9:
+                if len(parts) >= 3 and parts[1].isdigit():
                     pid = int(parts[1])
-                    package_name = parts[8]
+                    raw_name = parts[-1]
+                    package_name = raw_name.split(":")[0]
 
-                    # 只关注用户应用（通常包含点号）
-                    if "." in package_name:
-                        if package_name not in running_apps:
+                    # 只关注包含包名格式的应用进程
+                    if "." in package_name and not package_name.startswith("."):
+                        is_main_process = raw_name == package_name
+                        if package_name not in running_apps or is_main_process:
                             running_apps[package_name] = {
                                 "pid": pid,
                                 "package_name": package_name,
@@ -357,32 +361,72 @@ class AndroidAppEnumerator(BaseAppEnumerator):
             logger.debug(f"dumpsys activity processes 输出长度: {len(output)} 字符")
 
             for line in output.split("\n"):
-                # 查找进程行，例如：Process Record{... u0 com.xlive.app/pid:1234...}
-                match = re.search(r"u0\s+([\w.]+)/.*pid:(\d+)", line)
-                if match:
-                    current_package = match.group(1)
-                    current_pid = int(match.group(2))
+                stripped = line.strip()
+
+                # 查找进程块起始行：
+                # 1) Android 8+ 格式: *APP* UID 10029 ProcessRecord{85a5ab2 2742:com.digibird.umplayer/u0a29}
+                # 2) 旧格式: Process Record{... u0 com.xlive.app/pid:1234...}
+                match_modern = re.search(
+                    r"\*(?:APP|PERS)\*\s+UID\s+\d+\s+ProcessRecord\{[^\s]+\s+(\d+):([\w.\-:]+)/",
+                    line,
+                )
+                match_legacy = re.search(r"u0\s+([\w.]+)/.*pid:(\d+)", line)
+
+                if match_modern or match_legacy:
+                    if match_modern:
+                        current_pid = int(match_modern.group(1))
+                        current_package = match_modern.group(2).split(":")[0]
+                    else:
+                        current_package = match_legacy.group(1)
+                        current_pid = int(match_legacy.group(2))
+
                     if current_package not in process_info:
                         process_info[current_package] = {
                             "is_foreground": False,
                             "oom_adj": 1000,  # 默认后台优先级
                         }
                     logger.debug(f"找到进程: {current_package} (PID: {current_pid})")
+                    continue
 
-                # 查找 oom_adj 值（在同一进程块内）
-                if current_package and "adj=" in line:
+                # 遇到汇总列表行或非进程块标题时重置 current_package，避免后续属性误归属
+                if current_package and (
+                    stripped.startswith("PID #")
+                    or stripped.startswith("Proc #")
+                    or "ProcessRecord{" in line
+                    or "Process Record{" in line
+                ):
+                    current_package = None
+                    continue
+
+                if not current_package:
+                    continue
+
+                # Android 8+ 进程块中的前台标记与 oom 分值：
+                # oom: max=1001 curRaw=0 setRaw=0 cur=0 set=0
+                # hasClientActivities=false foregroundActivities=true (rep=true)
+                if "foregroundActivities=true" in line:
+                    process_info[current_package]["is_foreground"] = True
+                    process_info[current_package]["oom_adj"] = min(
+                        process_info[current_package]["oom_adj"], 0
+                    )
+                    logger.info(f"标记为前台: {current_package} (foregroundActivities=true)")
+
+                oom_match = re.search(r"\boom:.*\bcur=(-?\d+)", line)
+                if oom_match:
+                    cur_adj = int(oom_match.group(1))
+                    process_info[current_package]["oom_adj"] = cur_adj
+                    if cur_adj == 0:
+                        process_info[current_package]["is_foreground"] = True
+                        logger.info(f"标记为前台: {current_package} (oom cur={cur_adj})")
+
+                # 兼容旧格式 adj= 值
+                if "adj=" in line:
                     # 例如：adj=_FOREGROUND_APP 或 adj=0
                     adj_match = re.search(r"adj=(\S+)", line)
                     if adj_match:
                         adj_value = adj_match.group(1)
                         logger.debug(f"包名 {current_package} 的 adj={adj_value}")
 
-                        # 判断是否前台应用 - 扩展判断条件
-                        # 前台应用通常的 adj 值：
-                        # - _FOREGROUND_APP, _FOREGROUND
-                        # - 0 (前台进程)
-                        # - 100 (前台服务)
-                        # - 200 (可见进程)
                         is_fg = adj_value in [
                             "_FOREGROUND_APP",
                             "_FOREGROUND",
@@ -392,7 +436,6 @@ class AndroidAppEnumerator(BaseAppEnumerator):
                         if not is_fg:
                             try:
                                 adj_num = int(adj_value)
-                                # adj <= 200 通常认为是前台或可见进程
                                 is_fg = adj_num <= 200
                             except Exception:
                                 is_fg = False
@@ -401,21 +444,14 @@ class AndroidAppEnumerator(BaseAppEnumerator):
                             process_info[current_package]["is_foreground"] = True
                             logger.info(f"标记为前台: {current_package} (adj={adj_value})")
 
-                        # 尝试解析数值
                         try:
                             if adj_value.startswith("_"):
-                                # 移除前缀，例如 _FOREGROUND_APP -> FOREGROUND_APP
                                 adj_value = adj_value[1:]
                             process_info[current_package]["oom_adj"] = (
                                 int(adj_value) if adj_value.isdigit() else 1000
                             )
                         except Exception:
                             pass
-
-                # 重置当前包名（遇到新的进程块）
-                if "Process Record{" in line and current_package:
-                    if "u0" not in line:
-                        current_package = None
 
             logger.info(
                 f"进程优先级检测完成: 找到 {len(process_info)} 个进程，前台进程: {[p for p, info in process_info.items() if info['is_foreground']]}"
@@ -457,35 +493,59 @@ class AndroidAppEnumerator(BaseAppEnumerator):
     def _get_foreground_packages(self) -> set:
         """
         获取当前前台应用的包名集合
-        使用 dumpsys activity 命令获取当前前台应用
+        优先读取 dumpsys activity activities / dumpsys window windows 的 ResumedActivity / mCurrentFocus，
+        再回退到 dumpsys activity top。
 
         Returns:
             set: 前台应用的包名集合
         """
         try:
-            # 使用 dumpsys activity top 获取当前前台 Activity
+            foreground_packages = set()
+
+            # 1. 优先从 dumpsys activity activities 提取 ResumedActivity / topResumedActivity
+            activities_out = self._adb.shell("dumpsys activity activities", self.device_id, timeout=10)
+            if activities_out:
+                for line in activities_out.split("\n"):
+                    if any(
+                        key in line
+                        for key in ("ResumedActivity", "mResumedActivity", "topResumedActivity", "mFocusedActivity")
+                    ):
+                        match = re.search(r"(?:u\d+\s+)?([\w.]+)/", line.split(":", 1)[-1])
+                        if match:
+                            pkg = match.group(1)
+                            if "." in pkg:
+                                foreground_packages.add(pkg)
+
+            # 2. 从 dumpsys window windows 提取 mCurrentFocus / mFocusedApp
+            window_out = self._adb.shell("dumpsys window windows", self.device_id, timeout=10)
+            if window_out:
+                for line in window_out.split("\n"):
+                    if "mCurrentFocus" in line or "mFocusedApp" in line:
+                        match = re.search(r"u\d+\s+([\w.]+)/", line)
+                        if match:
+                            pkg = match.group(1)
+                            if "." in pkg:
+                                foreground_packages.add(pkg)
+
+            if foreground_packages:
+                return foreground_packages
+
+            # 3. 兜底使用 dumpsys activity top
             output = self._adb.shell("dumpsys activity top", self.device_id, timeout=10)
             if not output:
                 return set()
 
-            foreground_packages = set()
-
             # 解析输出，查找 ACTIVITY 和 mFocusedApp
             for line in output.split("\n"):
-                # 查找类似 "ACTIVITY com.xlive.app/com.xlive.app.activity.MainActivity" 的行
                 if "ACTIVITY" in line and "/" in line:
                     parts = line.strip().split()
                     if len(parts) >= 2:
-                        activity_info = parts[
-                            1
-                        ]  # 例如: com.xlive.app/com.xlive.app.activity.MainActivity
+                        activity_info = parts[1]
                         package_name = activity_info.split("/")[0]
-                        if "." in package_name:  # 确保是有效的包名
+                        if "." in package_name:
                             foreground_packages.add(package_name)
 
-                # 查找 mFocusedApp (更可靠的方法)
                 if "mFocusedApp" in line and "ActivityRecord" in line:
-                    # 例如: mFocusedApp=ActivityRecord{xxx u0 com.xlive.app/com.xlive.app.activity.MainActivity txxx}
                     match = re.search(r"u0\s+([\w.]+)/", line)
                     if match:
                         package_name = match.group(1)
