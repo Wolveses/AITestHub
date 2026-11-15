@@ -415,6 +415,9 @@ def run_case(
     except DeviceBusyError as e:
         raise HTTPException(409, str(e)) from e
 
+    out_dir = paths.artifacts_dir(int(case.project_id), case_id)
+    out_rel = paths.to_rel(out_dir)
+
     run_id = db.create_run(
         case_id=case_id,
         project_id=case.project_id,
@@ -425,12 +428,22 @@ def run_case(
         runner="script",
         device_id=body.device_id,
         script_version=case.script_version,
+        artifacts_rel_path=out_rel,
     )
     db.update_case(case_id, status=CaseStatus.RUNNING, last_run_id=run_id)
 
+    def _write_fallback_stdout(msg: str) -> None:
+        stdout_file = out_dir / "stdout.log"
+        try:
+            existing = stdout_file.read_text(encoding="utf-8", errors="replace") if stdout_file.exists() else ""
+            if not existing.strip():
+                stdout_file.write_text(msg.rstrip() + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
     def _worker() -> None:
         try:
-            res = run_script(case, app, body.device_id)
+            res = run_script(case, app, body.device_id, out_dir=out_dir)
             passed = res["status"] == "passed"
             db.update_run(
                 run_id,
@@ -447,10 +460,12 @@ def run_case(
                 last_error_message=None if passed else res["error_message"],
             )
         except MobileEnvError as e:
+            _write_fallback_stdout(f"[环境异常] {e}")
             db.update_run(
                 run_id,
                 status=RunStatus.ERROR,
                 error=str(e),
+                artifacts_rel_path=out_rel,
                 finished_at=datetime.now(),
             )
             db.update_case(
@@ -460,10 +475,12 @@ def run_case(
                 last_error_message=str(e),
             )
         except Exception as e:
+            _write_fallback_stdout(f"[执行器异常] {type(e).__name__}: {e}")
             db.update_run(
                 run_id,
                 status=RunStatus.ERROR,
                 error=f"{type(e).__name__}: {e}",
+                artifacts_rel_path=out_rel,
                 finished_at=datetime.now(),
             )
             db.update_case(

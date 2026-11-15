@@ -66,14 +66,30 @@ def get_run(run_id: int, db: MobileDatabase = Depends(get_mobile_db)) -> dict:
 
 
 @router.get("/{run_id}/log")
-def get_run_stdout(run_id: int, db: MobileDatabase = Depends(get_mobile_db)):
+def get_run_stdout(
+    run_id: int,
+    tail: int = Query(200_000, ge=1_000, le=2_000_000),
+    db: MobileDatabase = Depends(get_mobile_db),
+):
     run = db.get_run(run_id)
-    if run is None or not run.artifacts_rel_path:
+    if run is None:
+        raise HTTPException(404, "执行记录不存在")
+    status_val = run.status.value if isinstance(run.status, RunStatus) else str(run.status)
+    if not run.artifacts_rel_path:
+        if status_val == RunStatus.RUNNING.value:
+            return PlainTextResponse("（等待执行输出…）")
         raise HTTPException(404, "运行日志不存在")
     p = paths.resolve_rel(run.artifacts_rel_path) / "stdout.log"
     if not p.exists():
+        if status_val == RunStatus.RUNNING.value:
+            return PlainTextResponse("（等待执行输出…）")
         return PlainTextResponse("")
-    return PlainTextResponse(p.read_text(encoding="utf-8", errors="replace"))
+    text = p.read_text(encoding="utf-8", errors="replace")
+    if not text and status_val == RunStatus.RUNNING.value:
+        return PlainTextResponse("（等待执行输出…）")
+    if len(text) > tail:
+        text = f"…（已截断，仅显示最后 {tail} 字符）…\n" + text[-tail:]
+    return PlainTextResponse(text)
 
 
 @router.get("/{run_id}/device-log")

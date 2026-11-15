@@ -17,7 +17,11 @@ from typing import Any
 from insight_aitest.modules.mobile.backend.automation import paths, prompt_builder
 from insight_aitest.modules.mobile.backend.automation.runner import run_script
 from insight_aitest.modules.mobile.backend.automation.tree_pruner import ElementRef, prune_android_xml
-from insight_aitest.modules.mobile.backend.automation.validator import validate_staging_dir
+from insight_aitest.modules.mobile.backend.automation.validator import (
+    LOG_PREFIXES,
+    MIN_LOGS_PER_TEST,
+    validate_staging_dir,
+)
 from insight_aitest.modules.mobile.backend.deps import get_mobile_db
 from insight_aitest.modules.mobile.backend.device_pool import (
     DeviceBusyError,
@@ -565,7 +569,18 @@ def tool_get_case_context(rt: SessionRuntime) -> dict:
             "禁止使用 driver.tap([(x, y)]) 等绝对像素坐标，优先使用 AppiumBy.ACCESSIBILITY_ID / ID / ANDROID_UIAUTOMATOR",
             "测试账号与密码可从 app_env.get('test_username') / app_env.get('test_password') 读取",
             "可复用的页面操作封装可写入 pages/<name>.py 并由 case.py 导入",
+            (
+                f"执行日志规范：每个 def test_* 至少 {MIN_LOGS_PER_TEST} 条 print(...) 日志（pytest -s 实时写入执行记录标准输出），"
+                f"统一节点前缀 {' / '.join(LOG_PREFIXES)}，且必须同时包含 [步骤] 与 [断言]（或 [校验]），"
+                "断言前打印实际值与预期值"
+            ),
         ],
+        "log_rules": {
+            "min_per_test": MIN_LOGS_PER_TEST,
+            "prefixes": list(LOG_PREFIXES),
+            "required": f"每个 def test_* 至少 {MIN_LOGS_PER_TEST} 条 print，且包含 [步骤] 与 [断言]/[校验]",
+            "sample": 'print(f"[步骤] 启动并进入被测应用 {app_env.get(\'app_package\', \'\')}")',
+        },
     }
 
 
@@ -769,6 +784,8 @@ def tool_run_server_dry_run(rt: SessionRuntime) -> dict:
     stg_case = rt.staging / "case.py"
     script_hash = hashlib.sha256(stg_case.read_bytes()).hexdigest()
 
+    out_dir = paths.artifacts_dir(rt.project_id, rt.case_id)
+    out_rel = paths.to_rel(out_dir)
     run_id = db.create_run(
         case_id=rt.case_id,
         project_id=rt.project_id,
@@ -779,15 +796,23 @@ def tool_run_server_dry_run(rt: SessionRuntime) -> dict:
         runner="dry_run",
         device_id=rt.device_id,
         script_version=int(case.script_version or 0) + 1 if case else 1,
+        artifacts_rel_path=out_rel,
     )
 
     try:
-        res = run_script(case, app, rt.device_id, script_path=stg_case)
+        res = run_script(case, app, rt.device_id, script_path=stg_case, out_dir=out_dir)
     except Exception as e:
+        stdout_file = out_dir / "stdout.log"
+        if not stdout_file.exists() or not stdout_file.read_text(encoding="utf-8", errors="replace").strip():
+            try:
+                stdout_file.write_text(f"试跑执行器异常: {e}\n", encoding="utf-8")
+            except OSError:
+                pass
         db.update_run(
             run_id,
             status=RunStatus.ERROR,
             error=str(e),
+            artifacts_rel_path=out_rel,
             finished_at=datetime.now(),
         )
         db.update_generation(rt.generation_id, last_dry_run_passed=0)

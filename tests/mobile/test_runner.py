@@ -52,8 +52,11 @@ def test_run_script_executes_real_pytest_and_prunes_old_runs(tmp_path, monkeypat
     script_file.write_text(
         "import json, os\n\n"
         "def test_smoke():\n"
+        "    print('[步骤] 读取测试环境配置')\n"
         "    with open(os.environ['INSIGHT_MOBILE_ENV'], encoding='utf-8') as f:\n"
         "        env = json.load(f)\n"
+        "    print('[操作] 校验应用包名字段')\n"
+        "    print(f\"[断言] app_package 实际={env['app_package']!r} 预期='com.example.test'\")\n"
         "    assert env['app_package'] == 'com.example.test'\n",
         encoding="utf-8",
     )
@@ -78,5 +81,8 @@ def test_run_script_executes_real_pytest_and_prunes_old_runs(tmp_path, monkeypat
     out_dir = paths.resolve_rel(res["artifacts_rel_path"])
     assert (out_dir / "junit.xml").exists()
     assert (out_dir / "stdout.log").exists()
+    stdout_text = (out_dir / "stdout.log").read_text(encoding="utf-8")
+    assert "[步骤] 读取测试环境配置" in stdout_text
+    assert "[断言] app_package" in stdout_text
     remaining_dirs = [p for p in art_parent.iterdir() if p.is_dir()]
     assert len(remaining_dirs) <= runner.RUN_RETAIN

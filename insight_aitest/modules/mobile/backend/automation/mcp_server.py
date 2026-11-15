@@ -25,9 +25,12 @@ from starlette.responses import JSONResponse
 from insight_aitest.modules.mobile.backend.automation import prompt_builder
 from insight_aitest.modules.mobile.backend.automation import session_manager as sm
 from insight_aitest.modules.mobile.backend.automation.validator import (
+    LOG_PREFIXES,
+    MIN_LOGS_PER_TEST,
     _FORBIDDEN_ATTR_CALLS,
     _FORBIDDEN_BUILTINS,
     _FORBIDDEN_MODULES,
+    lint_script_logs,
 )
 from insight_aitest.modules.mobile.backend.deps import get_mobile_db
 from insight_aitest.platform.mcp_http import build_streamable_mcp_app, mount_streamable_mcp
@@ -47,12 +50,13 @@ INSTRUCTIONS = """Insight-AITest App 自动化「真机探索 + 暂存试跑 + �
 - 修复约束：以现有脚本为基线做最小修复，不改无关步骤，禁止为通过而删除或放宽断言。
 - 定位规范：优先采用工具返回的 recommended_locator（accessibility_id / resource-id / android_uiautomator / xpath），禁止绝对像素坐标 driver.tap([(x, y)])。
 - 脚本契约：入口函数为 def test_case(driver, params, app_env):，直接使用脚手架注入的 driver fixture，禁止自行调用 webdriver.Remote。
-- 试跑守卫：write_staging_file 写入或修改 case.py 后，必须通过 run_server_dry_run 真机试跑通过，才能调用 commit_staging_script 入库并释放设备锁。
+- 日志规范：每个 def test_* 必须用 print(...) 输出可读执行日志（pytest -s 实时落盘到执行记录标准输出 stdout.log），至少 3 条；日志必须使用统一节点前缀：[步骤]、[操作]、[输入]、[选择]、[勾选]、[断言]、[校验]、[数据]、[结果]，且必须同时包含 [步骤] 与 [断言]（或 [校验]），断言前需打印实际值与预期值。
+- 试跑守卫：write_staging_file 写入或修改 case.py 后，必须通过 run_server_dry_run 静态校验（含安全、定位与执行日志检查）与真机试跑通过，才能调用 commit_staging_script 入库并释放设备锁。
 - 失败处理：isError=true 时先读 JSON 中的 code / fix / required_next；收到 DRY_RUN_REQUIRED 时先调用 run_server_dry_run，不要反复写入相同内容；同一错误码连续 3 次无进展则停止并汇报。
 - 兜底：客户端未注入本说明或未展示 structuredContent 时，可先读 insight://mobile/instructions、insight://mobile/rules 与 insight://mobile/template。"""
 
 _MINIMAL_TEMPLATE = '''# -*- coding: utf-8 -*-
-"""Mobile App 自动化用例最小可运行骨架。"""
+"""Mobile App 自动化用例最小可运行骨架（含标准执行日志节点）。"""
 
 from appium.webdriver.common.appiumby import AppiumBy
 from selenium.webdriver.support import expected_conditions as EC
@@ -61,11 +65,16 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 def test_case(driver, params, app_env):
     wait = WebDriverWait(driver, 15)
-    # 1. [步骤] 使用推荐定位器定位并交互（禁止使用 driver.tap([(x, y)])）
+    expected_pkg = app_env.get("app_package", "")
+    print(f"[步骤] 启动并进入被测应用 {expected_pkg}")
     # el = wait.until(EC.presence_of_element_located((AppiumBy.ACCESSIBILITY_ID, "示例入口")))
+    # print("[操作] 点击示例入口")
     # el.click()
-    # 2. [断言] 校验目标界面元素已呈现
-    assert driver.current_package == app_env["app_package"]
+    print("[操作] 获取当前前台应用包名进行校验")
+    actual_pkg = driver.current_package
+    print(f"[断言] 当前包名 实际={actual_pkg!r} 预期={expected_pkg!r}")
+    assert actual_pkg == expected_pkg
+    print("[结果] 通过")
 '''
 
 
@@ -86,6 +95,7 @@ class CaseContextPayload(ToolPayload):
     existing_pages: list = Field(default_factory=list)
     lessons: list = Field(default_factory=list)
     scaffold_rules: list[str] = Field(default_factory=list)
+    log_rules: dict = Field(default_factory=dict)
 
 
 class ActionPayload(ToolPayload):
@@ -260,6 +270,7 @@ def _build_rules_text() -> str:
     mods = ", ".join(sorted(_FORBIDDEN_MODULES))
     builtins = ", ".join(sorted(_FORBIDDEN_BUILTINS))
     attrs = ", ".join(f"{a}.{b}()" for a, b in sorted(_FORBIDDEN_ATTR_CALLS))
+    prefixes = " / ".join(LOG_PREFIXES)
     return "\n".join(
         [
             "# Mobile App 自动化脚本规范",
@@ -269,6 +280,16 @@ def _build_rules_text() -> str:
             f"4. 禁止导入系统模块：{mods}。",
             f"5. 禁止调用危险内建/系统函数：{builtins}、{attrs}。",
             "6. 可复用页面封装可写入 pages/<name>.py 并由 case.py 导入。",
+            "",
+            "# 执行日志规范（对齐 UI 自动化，run_server_dry_run 静态校验强制检查）",
+            f"7. 每个 def test_* 至少包含 {MIN_LOGS_PER_TEST} 条 print(...) 执行日志，平台执行器以 pytest -s 实时写入执行记录标准输出（stdout.log）。",
+            f"8. 统一节点前缀：{prefixes}。",
+            "9. 每个 def test_* 必须同时包含 [步骤] 与 [断言]（或 [校验]）日志；操作/输入后打印关键参数，断言前打印实际值与预期值：",
+            '   - print(f"[步骤] 进入登录页并准备登录")',
+            '   - print(f"[输入] 用户名={username!r}")',
+            '   - print("[操作] 点击登录按钮")',
+            '   - print(f"[断言] 首页标题 实际={actual!r} 预期={expected!r}")',
+            '   - print("[结果] 通过")',
         ]
     )
 
@@ -529,16 +550,22 @@ def _build_server() -> MCPServer:
         )
         if not ok:
             return _error(res)
+        norm_path = rel_path.replace("\\", "/").lstrip("/")
+        log_hint = ""
+        if norm_path == "case.py":
+            log_warn = lint_script_logs(content)
+            if log_warn:
+                log_hint = f"；日志规范提醒：{log_warn}（run_server_dry_run 将拦截未达标脚本）"
         return _result(
-            f"已写入 {rel_path}（{res.get('bytes')} bytes, sha256={str(res.get('sha256') or '')[:12]}）；"
-            "完成后请调用 run_server_dry_run 试跑验证",
+            f"已写入 {rel_path}（{res.get('bytes')} bytes, sha256={str(res.get('sha256') or '')[:12]}）"
+            f"{log_hint}；完成后请调用 run_server_dry_run 试跑验证",
             res,
         )
 
     @server.tool(
         name="run_server_dry_run",
         title="服务端真机试跑验真",
-        description="在平台主机对暂存区 case.py 执行 AST 安全校验与真实 pytest 试跑；失败返回 isError=true 与修复指引，通过后可调用 commit_staging_script。",
+        description="在平台主机对暂存区 case.py 执行 AST 安全/定位/执行日志静态校验与真实 pytest -s 试跑；失败返回 isError=true 与修复指引，通过后可调用 commit_staging_script。",
         annotations=_DEVICE,
     )
     async def run_server_dry_run() -> DryRunPayload:
@@ -571,7 +598,7 @@ def _build_server() -> MCPServer:
         "insight://mobile/instructions",
         name="运行规范",
         title="App 自动化 Agent 操作规范",
-        description="真机探索流程、定位器规范、脚本契约与试跑守卫要求。",
+        description="真机探索流程、定位器规范、执行日志节点规范、脚本契约与试跑守卫要求。",
         mime_type="text/plain",
     )
     def instructions_resource() -> str:
@@ -581,7 +608,7 @@ def _build_server() -> MCPServer:
         "insight://mobile/rules",
         name="脚手架与安全规则",
         title="App 自动化脚本校验规则",
-        description="入口签名、禁用系统模块/调用以及定位器 AST 校验约束。",
+        description="入口签名、禁用系统模块/调用、定位器与执行日志 AST 校验约束。",
         mime_type="text/markdown",
     )
     def rules_resource() -> str:
@@ -591,7 +618,7 @@ def _build_server() -> MCPServer:
         "insight://mobile/template",
         name="最小脚本骨架",
         title="Mobile pytest 脚本最小可运行骨架",
-        description="接收 driver, params, app_env 的最小可运行 Appium pytest 用例模板。",
+        description="包含 [步骤]/[操作]/[断言]/[结果] 日志、接收 driver, params, app_env 的最小可运行 Appium pytest 用例模板。",
         mime_type="text/x-python",
     )
     def template_resource() -> str:

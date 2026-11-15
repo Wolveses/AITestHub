@@ -215,6 +215,9 @@ def run_script(
             "INSIGHT_MOBILE_EXTRA_CAPS": json.dumps(app.extra_caps_json or {}, ensure_ascii=False),
             "INSIGHT_MOBILE_PARAMS": str(params_file) if params_payload else "",
             "INSIGHT_MOBILE_TIMEOUT_MS": "10000",
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+            "PYTHONUNBUFFERED": "1",
         }
     )
 
@@ -231,6 +234,9 @@ def run_script(
                 "pytest",
                 str(script),
                 "-v",
+                # -s 关闭 pytest 的输出捕获：脚本里的 print 实时写进 stdout.log，
+                # 执行记录「标准日志输出」才能在运行中与通过后看到每步操作与断言日志
+                "-s",
                 "-p",
                 "no:cacheprovider",
                 "-p",

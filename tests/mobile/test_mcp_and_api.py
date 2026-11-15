@@ -136,6 +136,10 @@ def test_mobile_mcp_metadata_prompts_and_resources_conventions():
         "insight://mobile/rules",
         "insight://mobile/template",
     ]
+    assert "[步骤]" in mcp_server._build_rules_text()
+    assert "[断言]" in mcp_server._build_rules_text()
+    assert "[步骤]" in mcp_server._MINIMAL_TEMPLATE
+    assert "[断言]" in mcp_server._MINIMAL_TEMPLATE
 
 
 def test_apps_devices_and_wireless_api(mobile_client, monkeypatch):
@@ -276,6 +280,9 @@ def test_mcp_generation_dry_run_and_commit_flow(mobile_client, monkeypatch):
     assert ctx_res["structuredContent"]["device_id"] == "emulator-5554"
     assert ctx_res["structuredContent"]["intent"] == "create"
     assert ctx_res["structuredContent"]["workflow"]["id"] == "mobile.create@1"
+    log_rules = ctx_res["structuredContent"]["log_rules"]
+    assert log_rules["min_per_test"] == 3
+    assert "[步骤]" in log_rules["prefixes"] and "[断言]" in log_rules["prefixes"]
 
     # prompts/get reuses unified prompt_builder
     prompt_resp = _mcp_post(
@@ -329,10 +336,48 @@ def test_mcp_generation_dry_run_and_commit_flow(mobile_client, monkeypatch):
     bad_err = json.loads(bad_write["content"][0]["text"])
     assert bad_err["code"] == "INVALID_PATH"
 
+    # Missing log nodes -> write_staging_file warns, run_server_dry_run rejects VALIDATION_FAILED
+    no_log_script = (
+        "from appium.webdriver.common.appiumby import AppiumBy\n\n"
+        "def test_(driver, params, app_env):\n"
+        "    assert driver is not None\n"
+    )
+    warn_write = _parse_mcp_body(
+        _mcp_post(
+            client,
+            headers,
+            "tools/call",
+            req_id=60,
+            params={
+                "name": "write_staging_file",
+                "arguments": {"rel_path": "case.py", "content": no_log_script},
+            },
+            session_id=mcp_session_id,
+        )
+    )["result"]
+    assert warn_write["isError"] is False
+    assert "日志规范提醒" in warn_write["content"][0]["text"]
+
+    no_log_dry = _parse_mcp_body(
+        _mcp_post(
+            client,
+            headers,
+            "tools/call",
+            req_id=601,
+            params={"name": "run_server_dry_run", "arguments": {}},
+            session_id=mcp_session_id,
+        )
+    )["result"]
+    assert no_log_dry["isError"] is True
+    assert json.loads(no_log_dry["content"][0]["text"])["code"] == "VALIDATION_FAILED"
+
     # Write valid staging case.py
     valid_script = (
         "from appium.webdriver.common.appiumby import AppiumBy\n\n"
         "def test_(driver, params, app_env):\n"
+        "    print('[步骤] 启动被测应用')\n"
+        "    print('[操作] 检查驱动状态')\n"
+        "    print('[断言] driver 已就绪')\n"
         "    assert driver is not None\n"
     )
     good_write = _parse_mcp_body(
@@ -529,3 +574,71 @@ def test_active_generation_recovery_duplicate_guard_and_stale_lease_cleanup(mobi
     assert expired_res.json() == {"active": False, "generation": None}
     assert db.get_generation(gen_id).status == "cancelled"
     assert db.get_case(case_id).status == CaseStatus.NOT_IMPLEMENTED
+
+
+def test_run_stdout_log_available_while_running_and_after(mobile_client, monkeypatch):
+    import threading
+    import time
+    from insight_aitest.modules.mobile.backend.routes import cases as cases_routes
+
+    client, db, _, _ = mobile_client
+    app_id = db.create_app(project_id=1, name="Demo", app_package="com.example.demo", is_default=1)
+    case_id = db.create_case(project_id=1, kb_document_id=999, title="实时标准输出日志用例")
+    script_path = paths.case_script_path(1, case_id)
+    script_path.write_text("def test_(driver):\n    pass\n", encoding="utf-8")
+    db.update_case(
+        case_id,
+        status=CaseStatus.IMPLEMENTED,
+        script_rel_path=paths.to_rel(script_path),
+        script_version=1,
+    )
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fake_run_script(case, app, device_id, *, script_path=None, out_dir=None, **kwargs):
+        assert out_dir is not None
+        stdout_file = out_dir / "stdout.log"
+        stdout_file.write_text("[步骤] 正在执行第一步\n", encoding="utf-8")
+        entered.set()
+        assert release.wait(timeout=5)
+        stdout_file.write_text("[步骤] 正在执行第一步\n[断言] 校验通过\n[结果] 通过\n", encoding="utf-8")
+        return {
+            "status": "passed",
+            "run_status": "passed",
+            "error_category": None,
+            "error_message": "",
+            "duration_ms": 50,
+            "screenshots": [],
+            "artifacts_rel_path": paths.to_rel(out_dir),
+            "stdout_tail": "[结果] 通过",
+            "logcat_tail": "",
+        }
+
+    monkeypatch.setattr(cases_routes, "run_script", fake_run_script)
+
+    run_resp = client.post(
+        f"/api/modules/mobile/automation/cases/{case_id}/run",
+        json={"device_id": "emulator-5554", "app_id": app_id},
+    )
+    assert run_resp.status_code == 200
+    run_id = run_resp.json()["run_id"]
+    assert entered.wait(timeout=5)
+
+    # 运行中即可直接读取 stdout.log，不再返回 404
+    live_log = client.get(f"/api/modules/mobile/runs/{run_id}/log")
+    assert live_log.status_code == 200
+    assert "[步骤] 正在执行第一步" in live_log.text
+
+    release.set()
+    for _ in range(40):
+        detail = client.get(f"/api/modules/mobile/runs/{run_id}").json()
+        if detail["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert detail["status"] == "passed"
+    assert detail["has_log"] is True
+
+    final_log = client.get(f"/api/modules/mobile/runs/{run_id}/log")
+    assert final_log.status_code == 200
+    assert "[断言] 校验通过" in final_log.text
