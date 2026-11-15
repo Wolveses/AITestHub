@@ -94,6 +94,7 @@ def list_sessions(limit: int = 100, project_id: int | None = None):
                 id=s.id,
                 device_id=s.device_id,
                 app_package=s.app_package,
+                app_name=s.app_name,
                 platform=getattr(s, "platform", "android"),
                 status=s.status.value,
                 start_time=s.start_time.isoformat(),

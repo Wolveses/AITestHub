@@ -16,6 +16,7 @@ import time
 from typing import Optional, Dict, Tuple
 from logzero import logger
 from insight_aitest.platform.services.collectors.adb import adb
+from insight_aitest.platform.services.device_common import DEVICE_GLOBAL_TARGET
 
 
 class CPUCollector:
@@ -620,12 +621,115 @@ class CPUCollector:
             logger.error(f"使用 dumpsys 获取 CPU 失败: {e}")
             return None
 
+    def _read_device_proc_stat(self) -> Optional[Tuple[int, int]]:
+        """读取 /proc/stat 首行，返回 (total_time, idle_time)"""
+        stat_result = adb.shell("cat /proc/stat", self.device_id)
+        if not stat_result:
+            return None
+        for line in stat_result.strip().split("\n"):
+            if line.startswith("cpu "):
+                parts = line.split()
+                if len(parts) < 5:
+                    return None
+                values = [int(p) for p in parts[1:]]
+                total_time = sum(values)
+                # idle (index 3) + iowait (index 4 if present)
+                idle_time = values[3] + (values[4] if len(values) > 4 else 0)
+                return (total_time, idle_time)
+        return None
+
+    def _parse_device_cpu_from_proc_stat(self) -> Optional[float]:
+        """基于 /proc/stat 计算整机全局 CPU 使用率 (0-100%)"""
+        snapshot = self._read_device_proc_stat()
+        if not snapshot or snapshot[0] <= 0:
+            return None
+
+        key = DEVICE_GLOBAL_TARGET
+        if key not in self._last_cpu_data:
+            self._last_cpu_data[key] = {
+                "total_time": snapshot[0],
+                "idle_time": snapshot[1],
+            }
+            # 首次采样短间隔再读一次，避免首点固定为 0%
+            time.sleep(0.15)
+            snapshot = self._read_device_proc_stat()
+            if not snapshot or snapshot[0] <= 0:
+                return None
+
+        last = self._last_cpu_data[key]
+        total_delta = snapshot[0] - last["total_time"]
+        idle_delta = snapshot[1] - last["idle_time"]
+        self._last_cpu_data[key] = {
+            "total_time": snapshot[0],
+            "idle_time": snapshot[1],
+        }
+
+        if total_delta <= 0:
+            return None
+        rate = ((total_delta - max(0, idle_delta)) / total_delta) * 100.0
+        return round(max(0.0, min(100.0, rate)), 2)
+
+    def _parse_device_cpu_from_top(self) -> Optional[float]:
+        """备选方案：解析 top -n 1 的系统总 CPU 占比"""
+        try:
+            result = adb.shell("top -n 1", self.device_id)
+            if not result:
+                return None
+            clean = self._ANSI_ESCAPE_PATTERN.sub("", result)
+            for line in clean.splitlines():
+                # Toybox top: "800%cpu   3%user   0%nice  39%sys 758%idle ..."
+                cpu_match = re.search(r"(\d+)%cpu\b", line, re.IGNORECASE)
+                idle_match = re.search(r"(\d+)%idle\b", line, re.IGNORECASE)
+                if cpu_match and idle_match:
+                    total_pct = float(cpu_match.group(1))
+                    idle_pct = float(idle_match.group(1))
+                    if total_pct > 0:
+                        rate = ((total_pct - idle_pct) / total_pct) * 100.0
+                        return round(max(0.0, min(100.0, rate)), 2)
+                # Toolbox top: "User 12%, System 5%, IOW 0%, IRQ 0%"
+                if "User" in line and "System" in line:
+                    pcts = [float(x) for x in re.findall(r"(\d+(?:\.\d+)?)%", line)]
+                    if pcts:
+                        return round(max(0.0, min(100.0, sum(pcts))), 2)
+        except Exception as e:
+            logger.debug(f"top 解析整机 CPU 失败: {e}")
+        return None
+
+    def _parse_device_cpu_from_dumpsys(self) -> Optional[float]:
+        """最终备选：解析 dumpsys cpuinfo 末尾 TOTAL 行"""
+        try:
+            result = adb.shell("dumpsys cpuinfo", self.device_id)
+            if not result:
+                return None
+            for line in reversed(result.splitlines()):
+                match = re.search(r"^\s*(\d+(?:\.\d+)?)%\s+TOTAL:", line)
+                if match:
+                    return round(max(0.0, min(100.0, float(match.group(1)))), 2)
+        except Exception as e:
+            logger.debug(f"dumpsys cpuinfo 解析整机 CPU 失败: {e}")
+        return None
+
+    def collect_device(self) -> Dict[str, float]:
+        """采集整台设备全局 CPU 使用率"""
+        try:
+            for parser in (
+                self._parse_device_cpu_from_proc_stat,
+                self._parse_device_cpu_from_top,
+                self._parse_device_cpu_from_dumpsys,
+            ):
+                rate = parser()
+                if rate is not None:
+                    return {"appCpuRate": rate, "sysCpuRate": rate}
+        except Exception as e:
+            logger.error(f"Android 整机 CPU 采集失败: {e}")
+        return {"appCpuRate": 0.0, "sysCpuRate": 0.0}
+
     def collect(self, package_name: str) -> Optional[Dict[str, float]]:
         """
         采集 CPU 使用率
 
         Args:
-            package_name: 应用包名 (如 com.example.app)
+            package_name: 应用包名 (如 com.example.app)，或 DEVICE_GLOBAL_TARGET 表示整机全局
 
         Returns:
             dict: {'appCpuRate': float, 'sysCpuRate': float} 或 None
@@ -638,6 +742,9 @@ class CPUCollector:
               2. top 命令（备选，实时采样值）
               3. dumpsys cpuinfo（最后，累计平均值，不推荐）
         """
+        if package_name == DEVICE_GLOBAL_TARGET:
+            return self.collect_device()
+
         try:
             # 方法1: 精确算法（主要方法，基于 /proc/stat 的差值法，实时值）
             # 首次采样返回 None 是正常的，需要两次采样计算差值

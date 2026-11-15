@@ -77,6 +77,27 @@ class CPUCollector:
                 self._sysmon_service = SysmonService.get_instance(self.adapter.device_id)
 
             if self._sysmon_service.is_available() or self._sysmon_service.connect():
+                if self.bundle_id == "__device__":
+                    processes = self._sysmon_service.get_processes()
+                    if processes:
+                        from .connection_manager import IOSConnectionManager
+
+                        cores = 1
+                        try:
+                            mgr = IOSConnectionManager.get_instance(self.adapter.device_id)
+                            if mgr.is_connected:
+                                cores = max(1, mgr.get_cpu_core_count())
+                        except Exception:
+                            pass
+                        total_raw = sum(
+                            max(0.0, self._sysmon_service.parse_cpu_usage(p))
+                            for p in processes
+                        )
+                        filtered_cpu = round(min(100.0, total_raw / cores), 2)
+                        cpu_data = {"cpu_app": filtered_cpu, "cpu_system": filtered_cpu}
+                        self._last_cpu_data = cpu_data
+                        return cpu_data
+
                 process = self._sysmon_service.get_process_by_bundle_id(self.bundle_id)
 
                 if process:

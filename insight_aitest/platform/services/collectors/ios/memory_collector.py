@@ -61,21 +61,35 @@ class MemoryCollector:
         if self._total_memory_mb is None:
             self._total_memory_mb = self._get_device_total_memory()
 
+        # 设备全局模式：优先尝试 py-ios-device 系统级内存接口
+        if self.bundle_id == "__device__":
+            try:
+                from .py_ios_device_helper import PyiOSDeviceHelper
+
+                sys_mem = PyiOSDeviceHelper(self.adapter.device_id).get_system_memory()
+                if sys_mem and sys_mem.get("total_mb", 0) > 0:
+                    self._last_memory_data = sys_mem
+                    return sys_mem
+            except Exception as e:
+                logger.debug(f"py-ios-device 全局内存采集失败，回退至 sysmon: {e}")
+
         # 方案 1: 使用 Throttle 层（流式监听，如果可用）
         if self._throttle:
             try:
                 metrics = self._throttle.get_metrics(self.bundle_id)
+                total_mb = float(self._total_memory_mb or metrics["total_mb"] or 4 * 1024)
+                used_mb = round(min(float(metrics["used_mb"]), total_mb), 2) if self.bundle_id == "__device__" else metrics["used_mb"]
 
                 logger.debug(
                     f"===== iOS 内存采集成功 (流式监听) =====\n"
                     f"Bundle ID: {self.bundle_id}\n"
-                    f"内存: {metrics['used_mb']}MB / {metrics['total_mb']}MB"
+                    f"内存: {used_mb}MB / {total_mb}MB"
                 )
 
                 memory_data = {
-                    "used_mb": metrics["used_mb"],
-                    "total_mb": metrics["total_mb"],
-                    "percentage": round((metrics["used_mb"] / metrics["total_mb"] * 100), 2),
+                    "used_mb": used_mb,
+                    "total_mb": total_mb,
+                    "percentage": round((used_mb / total_mb * 100), 2) if total_mb > 0 else 0.0,
                 }
 
                 self._last_memory_data = memory_data
@@ -92,6 +106,23 @@ class MemoryCollector:
                 self._sysmon_service = SysmonService.get_instance(self.adapter.device_id)
 
             if self._sysmon_service.is_available() or self._sysmon_service.connect():
+                if self.bundle_id == "__device__":
+                    processes = self._sysmon_service.get_processes()
+                    if processes:
+                        total_used = sum(
+                            self._sysmon_service.parse_memory_usage(p).get("used_mb", 0.0)
+                            for p in processes
+                        )
+                        total_mb = float(self._total_memory_mb or 4096.0)
+                        filtered_used_mb = self._filter_memory_data(total_used)
+                        memory_data = {
+                            "used_mb": round(filtered_used_mb, 2),
+                            "total_mb": total_mb,
+                            "percentage": round((filtered_used_mb / total_mb * 100), 2) if total_mb > 0 else 0.0,
+                        }
+                        self._last_memory_data = memory_data
+                        return memory_data
+
                 logger.debug(
                     f"[MemoryCollector] 调用 get_process_by_bundle_id('{self.bundle_id}')..."
                 )

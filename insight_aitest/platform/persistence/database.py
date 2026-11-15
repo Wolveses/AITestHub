@@ -119,29 +119,34 @@ class DatabaseManager:
         if platform not in ("android", "ios"):
             raise ValueError(f"Invalid platform: {platform}. Must be 'android' or 'ios'")
 
-        # 获取应用友好名称（可选，失败用包名）——保留原行为
-        app_name = app_package
-        try:
-            from insight_aitest.platform.services.device_adapters.app_enumerator import (
-                AppEnumeratorFactory,
-            )
-            from insight_aitest.platform.services.device_common import Platform
+        # 获取应用友好名称（全局监控直接标注友好名称，其余通过枚举器解析）
+        from insight_aitest.platform.services.device_common import DEVICE_GLOBAL_TARGET
 
-            platform_enum = Platform.ANDROID if platform == "android" else Platform.IOS
-            enumerator = AppEnumeratorFactory.create_enumerator(device_id, platform_enum)
-            if enumerator:
-                apps = enumerator.enumerate_apps(include_system_apps=False)
-                for app in apps:
-                    if app.package_name == app_package:
-                        app_name = app.app_name
-                        break
-        except Exception as e:
+        if app_package == DEVICE_GLOBAL_TARGET:
+            app_name = "设备全局监控"
+        else:
+            app_name = app_package
             try:
-                from logzero import logger
+                from insight_aitest.platform.services.device_adapters.app_enumerator import (
+                    AppEnumeratorFactory,
+                )
+                from insight_aitest.platform.services.device_common import Platform
 
-                logger.debug(f"获取应用名称失败: {e}，使用包名代替")
-            except Exception:
-                pass
+                platform_enum = Platform.ANDROID if platform == "android" else Platform.IOS
+                enumerator = AppEnumeratorFactory.create_enumerator(device_id, platform_enum)
+                if enumerator:
+                    apps = enumerator.enumerate_apps(include_system_apps=False)
+                    for app in apps:
+                        if app.package_name == app_package:
+                            app_name = app.app_name
+                            break
+            except Exception as e:
+                try:
+                    from logzero import logger
+
+                    logger.debug(f"获取应用名称失败: {e}，使用包名代替")
+                except Exception:
+                    pass
 
         now = datetime.now()
         row = SessionRow(

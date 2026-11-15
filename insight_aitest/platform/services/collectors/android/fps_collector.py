@@ -21,7 +21,7 @@ import time
 import traceback
 from logzero import logger
 from insight_aitest.platform.services.collectors.adb import adb
-from insight_aitest.platform.services.device_common import Devices
+from insight_aitest.platform.services.device_common import Devices, DEVICE_GLOBAL_TARGET
 from insight_aitest.platform.services.collectors.android.device_profile import (
     get_device_profile,
     DeviceProfile,
@@ -288,15 +288,18 @@ class SurfaceStatsCollector(object):
         """启动 SurfaceStatsCollector 采集线程"""
         if not self.use_legacy_method:
             try:
-                self.focus_window = self.get_focus_activity()
+                self.focus_window = self.get_focus_activity() or ""
                 # 如果self.focus_window里包含字符'$'，必须将其转义
-                if self.focus_window.find("$") != -1:
+                if self.focus_window and self.focus_window.find("$") != -1:
                     self.focus_window = self.focus_window.replace("$", r"\$")
                 logger.debug(f"获取到焦点窗口: {self.focus_window}")
             except (ValueError, IndexError) as e:
-                logger.warning(f"无法动态获取当前Activity名称，使用page_flip统计全屏帧率: {e}")
-                self.use_legacy_method = True
-                self.surface_before = self._get_surface_stats_legacy()
+                if self.package_name == DEVICE_GLOBAL_TARGET:
+                    self.focus_window = ""
+                else:
+                    logger.warning(f"无法动态获取当前Activity名称，使用page_flip统计全屏帧率: {e}")
+                    self.use_legacy_method = True
+                    self.surface_before = self._get_surface_stats_legacy()
             except (IOError, OSError) as e:
                 logger.warning(f"获取Activity名称时发生IO错误，使用page_flip统计全屏帧率: {e}")
                 self.use_legacy_method = True
@@ -372,6 +375,29 @@ class SurfaceStatsCollector(object):
         # 在 Python 中过滤，兼容 Windows
         dumpsys_result = adb.shell(cmd="dumpsys SurfaceFlinger --list", deviceId=self.device)
         dumpsys_result_list = dumpsys_result.split("\n")
+
+        # 全局设备监控模式：选择当前可见的活动窗口，不匹配 __device__ 字面量
+        if self.package_name == DEVICE_GLOBAL_TARGET:
+            ignored_prefixes = (
+                "StatusBar",
+                "NavigationBar",
+                "InputMethod",
+                "ImageWallpaper",
+                "Keyguard",
+            )
+            for line in dumpsys_result_list:
+                line = line.strip()
+                if "/" not in line:
+                    continue
+                for part in line.split():
+                    if "/" in part and not part.startswith(ignored_prefixes):
+                        activity_name = part.split("#")[0]
+                        if "/" in activity_name:
+                            prefix, suffix = activity_name.split("/", 1)
+                            if suffix.startswith(".") and prefix:
+                                activity_name = f"{prefix}/{prefix}{suffix}"
+                        return activity_name
+            return ""
 
         # 策略1：查找包含包名且格式像 "package/activity" 的行
         for line in dumpsys_result_list:
@@ -834,6 +860,20 @@ class SurfaceStatsCollector(object):
                     self.fps_queue.task_done()
         self.data_queue.put("Stop")
 
+    def _resolve_device_fps_target(self):
+        """设备全局模式下动态解析当前前台应用包名与焦点窗口"""
+        focus = self.get_focus_activity() or ""
+        if "/" in focus:
+            pkg = focus.split("/", 1)[0].strip()
+            if pkg and pkg != DEVICE_GLOBAL_TARGET:
+                return pkg, focus
+        sv_win = self.get_surfaceview_activity() or ""
+        if "/" in sv_win:
+            pkg = sv_win.split("/", 1)[0].strip()
+            if pkg and pkg != DEVICE_GLOBAL_TARGET:
+                return pkg, sv_win
+        return "", focus or sv_win
+
     def _get_surfaceflinger_frame_data(self):
         """获取 SurfaceFlinger 帧时间数据 - 生产级多策略方案
 
@@ -850,74 +890,85 @@ class SurfaceStatsCollector(object):
         nanoseconds_per_second = 1e9
         pending_fence_timestamp = (1 << 63) - 1
 
+        target_package = self.package_name
+        if self.package_name == DEVICE_GLOBAL_TARGET:
+            target_package, dynamic_window = self._resolve_device_fps_target()
+            if dynamic_window:
+                self.focus_window = dynamic_window
+
         # ========== 策略1：gfxinfo framestats（推荐）==========
         # 适用于：Android 6.0 (API 23) 及以上版本
         # 优点：应用级数据，权限要求低，数据准确
-        try:
-            gfx_results = adb.shell(
-                cmd="dumpsys gfxinfo %s framestats" % self.package_name, deviceId=self.device
-            )
-            if gfx_results and gfx_results.strip():
-                gfx_results = gfx_results.replace("\r\n", "\n").splitlines()
-                if len(gfx_results) > 0:
-                    timestamps = self._parse_gfxinfo_framestats(gfx_results)
-                    if timestamps and len(timestamps) >= 2:
-                        # 从帧数据估算刷新周期
-                        refresh_period = (timestamps[-1][1] - timestamps[0][1]) / len(timestamps)
-                        logger.info(
-                            f"[策略1成功] gfxinfo framestats: {len(timestamps)} 帧，刷新周期 {refresh_period:.6f}s"
-                        )
-                        return (refresh_period, timestamps)
-                    else:
-                        logger.debug("[策略1失败] gfxinfo framestats 解析后无有效帧数据")
-            else:
-                logger.debug("[策略1失败] gfxinfo framestats 返回空结果")
-        except Exception as e:
-            logger.debug(f"[策略1失败] gfxinfo framestats 异常: {e}")
-
-        # ========== 策略2：gfxinfo summary（备用）==========
-        # 从 gfxinfo 汇总数据中提取帧统计信息
-        # 优点：包含总帧数和卡顿帧数，兼容性好
-        try:
-            summary_results = adb.shell(
-                cmd="dumpsys gfxinfo %s" % self.package_name, deviceId=self.device
-            )
-            if summary_results and summary_results.strip():
-                timestamps = self._parse_gfxinfo_summary(summary_results)
-                if timestamps and len(timestamps) >= 2:
-                    refresh_period = (timestamps[-1][1] - timestamps[0][1]) / len(timestamps)
-                    logger.info(
-                        f"[策略2成功] gfxinfo summary: {len(timestamps)} 帧，刷新周期 {refresh_period:.6f}s"
-                    )
-                    return (refresh_period, timestamps)
+        if target_package and target_package != DEVICE_GLOBAL_TARGET:
+            try:
+                gfx_results = adb.shell(
+                    cmd="dumpsys gfxinfo %s framestats" % target_package, deviceId=self.device
+                )
+                if gfx_results and gfx_results.strip():
+                    gfx_results = gfx_results.replace("\r\n", "\n").splitlines()
+                    if len(gfx_results) > 0:
+                        timestamps = self._parse_gfxinfo_framestats(gfx_results)
+                        if timestamps and len(timestamps) >= 2:
+                            # 从帧数据估算刷新周期
+                            refresh_period = (timestamps[-1][1] - timestamps[0][1]) / len(
+                                timestamps
+                            )
+                            logger.info(
+                                f"[策略1成功] gfxinfo framestats: {len(timestamps)} 帧，刷新周期 {refresh_period:.6f}s"
+                            )
+                            return (refresh_period, timestamps)
+                        else:
+                            logger.debug("[策略1失败] gfxinfo framestats 解析后无有效帧数据")
                 else:
-                    logger.debug("[策略2失败] gfxinfo summary 解析后无有效帧数据")
-            else:
-                logger.debug("[策略2失败] gfxinfo summary 返回空结果")
-        except Exception as e:
-            logger.debug(f"[策略2失败] gfxinfo summary 异常: {e}")
+                    logger.debug("[策略1失败] gfxinfo framestats 返回空结果")
+            except Exception as e:
+                logger.debug(f"[策略1失败] gfxinfo framestats 异常: {e}")
 
-        # ========== 策略2.5：gfxinfo framestats 无窗口名匹配（备用）==========
-        # 如果策略1返回了数据但窗口名不匹配，尝试宽松解析
-        # 这是为了处理小米/华为等厂商定制 ROM 的特殊情况
-        try:
-            gfx_results = adb.shell(
-                cmd="dumpsys gfxinfo %s framestats" % self.package_name, deviceId=self.device
-            )
-            if gfx_results and gfx_results.strip():
-                gfx_results = gfx_results.replace("\r\n", "\n").splitlines()
-                if len(gfx_results) > 0:
-                    timestamps = self._parse_gfxinfo_framestats_loose(gfx_results)
+            # ========== 策略2：gfxinfo summary（备用）==========
+            # 从 gfxinfo 汇总数据中提取帧统计信息
+            # 优点：包含总帧数和卡顿帧数，兼容性好
+            try:
+                summary_results = adb.shell(
+                    cmd="dumpsys gfxinfo %s" % target_package, deviceId=self.device
+                )
+                if summary_results and summary_results.strip():
+                    timestamps = self._parse_gfxinfo_summary(summary_results)
                     if timestamps and len(timestamps) >= 2:
                         refresh_period = (timestamps[-1][1] - timestamps[0][1]) / len(timestamps)
                         logger.info(
-                            f"[策略2.5成功] gfxinfo framestats 宽松解析: {len(timestamps)} 帧"
+                            f"[策略2成功] gfxinfo summary: {len(timestamps)} 帧，刷新周期 {refresh_period:.6f}s"
                         )
                         return (refresh_period, timestamps)
                     else:
-                        logger.debug("[策略2.5失败] gfxinfo framestats 宽松解析无有效帧数据")
-        except Exception as e:
-            logger.debug(f"[策略2.5失败] gfxinfo framestats 宽松解析异常: {e}")
+                        logger.debug("[策略2失败] gfxinfo summary 解析后无有效帧数据")
+                else:
+                    logger.debug("[策略2失败] gfxinfo summary 返回空结果")
+            except Exception as e:
+                logger.debug(f"[策略2失败] gfxinfo summary 异常: {e}")
+
+            # ========== 策略2.5：gfxinfo framestats 无窗口名匹配（备用）==========
+            # 如果策略1返回了数据但窗口名不匹配，尝试宽松解析
+            # 这是为了处理小米/华为等厂商定制 ROM 的特殊情况
+            try:
+                gfx_results = adb.shell(
+                    cmd="dumpsys gfxinfo %s framestats" % target_package, deviceId=self.device
+                )
+                if gfx_results and gfx_results.strip():
+                    gfx_results = gfx_results.replace("\r\n", "\n").splitlines()
+                    if len(gfx_results) > 0:
+                        timestamps = self._parse_gfxinfo_framestats_loose(gfx_results)
+                        if timestamps and len(timestamps) >= 2:
+                            refresh_period = (timestamps[-1][1] - timestamps[0][1]) / len(
+                                timestamps
+                            )
+                            logger.info(
+                                f"[策略2.5成功] gfxinfo framestats 宽松解析: {len(timestamps)} 帧"
+                            )
+                            return (refresh_period, timestamps)
+                        else:
+                            logger.debug("[策略2.5失败] gfxinfo framestats 宽松解析无有效帧数据")
+            except Exception as e:
+                logger.debug(f"[策略2.5失败] gfxinfo framestats 宽松解析异常: {e}")
 
         # ========== 策略3：SurfaceFlinger --latency（兼容）==========
         # 适用于：Android 5.0 (Lollipop) 及以上
@@ -1463,7 +1514,10 @@ class SurfaceStatsCollector(object):
             return None
         match = re.search(r"^Result: Parcel\((\w+)", ret)
         if match:
-            cur_surface = int(match.group(1), 16)
+            try:
+                cur_surface = int(match.group(1), 16)
+            except ValueError:
+                return None
             return {"page_flip_count": cur_surface, "timestamp": timestamp}
         return None
 

@@ -14,6 +14,7 @@ import time
 from typing import Optional, Dict
 from logzero import logger
 from insight_aitest.platform.services.collectors.adb import adb
+from insight_aitest.platform.services.device_common import DEVICE_GLOBAL_TARGET
 
 
 class NetworkCollector:
@@ -143,6 +144,9 @@ class NetworkCollector:
 
             for line in lines:
                 if ":" in line and not line.strip().startswith("Inter-"):
+                    iface = line.split(":", 1)[0].strip()
+                    if iface == "lo":
+                        continue
                     parts = line.split()
                     if len(parts) >= 10:
                         # 接收字节数在第二列
@@ -230,6 +234,15 @@ class NetworkCollector:
             - 第一次采集返回 0
         """
         try:
+            # 设备全局模式：直接采集整机网络接口流量（跳过 loopback），无需查单个应用 UID
+            if package_name == DEVICE_GLOBAL_TARGET:
+                traffic = self._get_traffic_from_network_dev(DEVICE_GLOBAL_TARGET)
+                if traffic:
+                    return self._calculate_flow_rate(
+                        DEVICE_GLOBAL_TARGET, traffic["rx_bytes"], traffic["tx_bytes"]
+                    )
+                return {"upFlow": 0, "downFlow": 0}
+
             # 方法1: 使用 UID 精确获取应用级流量
             uid = self._get_app_uid(package_name)
             if uid:

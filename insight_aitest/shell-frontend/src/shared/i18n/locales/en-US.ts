@@ -52,6 +52,12 @@ export default {
     device: {
       title: 'Device',
       app: 'Application',
+      monitorScope: 'Monitor Mode',
+      appScope: 'App Monitor',
+      deviceGlobalScope: 'Device Global',
+      globalTarget: 'Device Global Monitor',
+      globalTargetDesc: 'Monitors whole-device CPU, physical memory, foreground FPS, device-wide network traffic, and battery without targeting a single app.',
+      monitorTarget: 'Target',
       currentTarget: 'Current Target',
       startMonitor: 'Start Monitor',
       stopMonitor: 'Stop Monitor',

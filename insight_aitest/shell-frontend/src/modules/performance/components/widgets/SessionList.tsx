@@ -13,6 +13,7 @@ import { api } from '@/shared/api/api';
 import { useConfirmStore } from '@/shared/store/confirmStore';
 import { useIsMobile } from '@/shared/hooks/useIsMobile';
 import type { Session, Device } from '@/shared/types';
+import { isDeviceGlobalTarget } from '@/shared/types';
 
 interface SessionListProps {
   onSelectSession?: (sessionId: number | null) => void;
@@ -136,8 +137,11 @@ export default function SessionList({
       if (searchText && searchText.trim()) {
         const searchLower = searchText.toLowerCase().trim();
         const packageName = session.app_package.toLowerCase();
-        const appName = (session.app_name || '').toLowerCase();
-        if (!packageName.includes(searchLower) && !appName.includes(searchLower)) {
+        const displayLabel = (isDeviceGlobalTarget(session.app_package)
+          ? t('device.globalTarget')
+          : (session.app_name || '')
+        ).toLowerCase();
+        if (!packageName.includes(searchLower) && !displayLabel.includes(searchLower)) {
           return false;
         }
       }
@@ -386,7 +390,9 @@ export default function SessionList({
                         color: isSelected ? "var(--bg-base)" : "var(--text-primary)",
                       }}
                     >
-                      {session.app_name || session.app_package || 'Unknown'}
+                      {isDeviceGlobalTarget(session.app_package)
+                        ? t('device.globalTarget')
+                        : (session.app_name || session.app_package || 'Unknown')}
                     </span>
                   </div>
                 </div>

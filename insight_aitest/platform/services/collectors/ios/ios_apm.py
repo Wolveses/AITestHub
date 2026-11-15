@@ -8,6 +8,7 @@ iOS APM (Application Performance Monitoring) 主类
 import re
 from typing import Dict, Any
 from logzero import logger
+from insight_aitest.platform.services.device_common import DEVICE_GLOBAL_TARGET
 
 # Bundle ID 验证正则表达式（iOS 应用标识符格式）
 # iOS Bundle ID 格式: 如 com.example.app，至少两级
@@ -19,15 +20,18 @@ def _validate_bundle_id(bundle_id: str) -> bool:
     验证 iOS Bundle ID 格式是否有效
 
     Args:
-        bundle_id: 应用 Bundle ID
+        bundle_id: 应用 Bundle ID，或全局设备监控标识 ``DEVICE_GLOBAL_TARGET``
 
     Returns:
         bool: Bundle ID 是否有效
 
     Examples:
-        有效: com.example.app, com.company.myapp
+        有效: com.example.app, com.company.myapp, __device__
         无效: example, com..app, -com.example
     """
+    if bundle_id == DEVICE_GLOBAL_TARGET:
+        return True
+
     if not bundle_id or not isinstance(bundle_id, str):
         return False
 
@@ -131,21 +135,24 @@ class IOSAPM:
                 # 包装为通用连接错误
                 raise ConnectionError(f"无法连接 iOS 设备: {self.device_id}, 原因: {e}")
 
-        # ===== 启动前验证进程存在性 =====
-        logger.info("正在检查目标进程...")
+        # ===== 启动前验证进程存在性（全局设备监控跳过单进程检查）=====
         sysmon_service = SysmonService.get_instance(self.device_id)
 
         if not sysmon_service.connect():
             raise ConnectionError(f"无法连接到设备: {self.device_id}")
 
-        target_process = sysmon_service.get_process_by_bundle_id(self.bundle_name)
+        if self.bundle_name != DEVICE_GLOBAL_TARGET:
+            logger.info("正在检查目标进程...")
+            target_process = sysmon_service.get_process_by_bundle_id(self.bundle_name)
 
-        if not target_process:
-            raise ProcessNotFoundError(bundle_id=self.bundle_name, device_id=self.device_id)
+            if not target_process:
+                raise ProcessNotFoundError(bundle_id=self.bundle_name, device_id=self.device_id)
 
-        logger.info(
-            f"✓ 找到目标进程: PID={target_process.get('pid')}, Name={target_process.get('name')}"
-        )
+            logger.info(
+                f"✓ 找到目标进程: PID={target_process.get('pid')}, Name={target_process.get('name')}"
+            )
+        else:
+            logger.info(f"✓ 启用 iOS 设备全局性能监控: {self.device_id}")
 
         # ===== 启动流式监听服务 =====
         from insight_aitest.platform.services.collectors.ios.sysmon_stream_service import (

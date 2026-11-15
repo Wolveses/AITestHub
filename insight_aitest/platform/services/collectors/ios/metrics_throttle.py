@@ -349,6 +349,7 @@ class MetricsThrottle:
         self._target_frequency = target_frequency
         self._cpu_core_count = max(1, cpu_core_count)  # 至少为 1，避免除零
         self._accumulator = TimeWindowAccumulator(window_seconds=120)
+        self._device_accumulator = TimeWindowAccumulator(window_seconds=120)
         self._process_cache: Dict[int, Dict] = {}  # {pid: {name, cpu, memory}}
         self._cache_lock = threading.RLock()
         self._last_data_time = 0.0
@@ -371,6 +372,10 @@ class MetricsThrottle:
         self._last_data_time = current_time
 
         with self._cache_lock:
+            total_cpu = 0.0
+            total_mem_mb = 0.0
+            has_cpu_sample = False
+
             for proc in process_list:
                 pid = proc.get("pid")
                 if pid is None:
@@ -387,12 +392,16 @@ class MetricsThrottle:
                 # 提取 CPU 和内存数据
                 # sysmontap 的 cpuUsage 是非归一化值（按核心累加，可 >100%），
                 # 按 PerfDog/Xcode 标准除以核心数得到 0-100% 的单核等效值。
-                raw_cpu = proc.get("cpuUsage", 0.0)
-                if raw_cpu is None:
+                raw_cpu = proc.get("cpuUsage")
+                if raw_cpu is not None:
+                    has_cpu_sample = True
+                else:
                     raw_cpu = 0.0
                 cpu = raw_cpu / self._cpu_core_count if self._cpu_core_count > 1 else raw_cpu
                 phys_footprint = proc.get("physFootprint", 0)
                 memory_mb = phys_footprint / 1024 / 1024 if phys_footprint > 0 else 0.0
+                total_cpu += max(0.0, float(cpu))
+                total_mem_mb += memory_mb
 
                 # 调试日志：显示接收到的原始数据（含归一化前后）
                 logger.debug(
@@ -408,16 +417,30 @@ class MetricsThrottle:
                 if self._target_pid is not None and pid == self._target_pid:
                     self._accumulator.add(cpu, memory_mb)
 
+            # 设备全局聚合：汇总整批所有进程的 CPU 占比与物理占用
+            if has_cpu_sample or total_mem_mb > 0:
+                self._device_accumulator.add(min(100.0, total_cpu), total_mem_mb)
+
     def get_metrics(self, bundle_id: str, target_pid: Optional[int] = None) -> Dict[str, float]:
         """获取聚合后的指标（由 Collector 调用）
 
         Args:
-            bundle_id: 应用 Bundle ID（用于查找目标进程）
+            bundle_id: 应用 Bundle ID（用于查找目标进程），或 "__device__" 获取整机聚合
             target_pid: 目标进程 PID（如果已知，优先使用）
 
         Returns:
             {'cpu_app': float, 'cpu_system': float, 'used_mb': float, 'total_mb': float}
         """
+        frequency_seconds = max(1, int(self._target_frequency))
+        if bundle_id == "__device__":
+            aggregated = self._device_accumulator.get_aggregated_data(frequency_seconds)
+            return {
+                "cpu_app": aggregated["cpu_app"],
+                "cpu_system": aggregated["cpu_app"],
+                "used_mb": aggregated["used_mb"],
+                "total_mb": 4 * 1024,
+            }
+
         # 查找目标进程 PID（如果未提供）
         if target_pid is None:
             proc_info = self.get_process_info(bundle_id)
@@ -504,6 +527,7 @@ class MetricsThrottle:
     def clear(self):
         """清空所有数据"""
         self._accumulator.clear()
+        self._device_accumulator.clear()
         with self._cache_lock:
             self._process_cache.clear()
         logger.debug("频率控制层: 数据已清空")

@@ -5,7 +5,7 @@
  * 支持 i18n 国际化
  */
 
-import type { Session, Device } from '@/shared/types';
+import { isDeviceGlobalTarget, type Session, type Device } from '@/shared/types';
 import i18n from '@/shared/i18n';
 
 // 后端 API 返回的 MetricsData 类型
@@ -368,9 +368,13 @@ export async function exportHtmlReport(
   // 5. 准备模板上下文
   const t = i18n.t;
   const locale = i18n.language === 'en' ? 'en-US' : 'zh-CN';
+  const targetLabel = isDeviceGlobalTarget(session.app_package)
+    ? t('device.globalTarget')
+    : (session.app_name || session.app_package);
+  sessionInfo.app_name = targetLabel;
 
   const context: HtmlExportContext = {
-    title: `${t('help.about.projectName')} ${t('report.title')} - ${session.app_package}`,
+    title: `${t('help.about.projectName')} ${t('report.title')} - ${targetLabel}`,
     session: sessionInfo,
     device,
     statistics,
@@ -384,7 +388,10 @@ export async function exportHtmlReport(
   const htmlContent = renderHtmlTemplate(context);
 
   // 7. 下载文件
-  const filename = `report_${Date.now()}_${session.app_package.replace(/\./g, '_')}.html`;
+  const safeTarget = isDeviceGlobalTarget(session.app_package)
+    ? 'device_global'
+    : session.app_package.replace(/\./g, '_');
+  const filename = `report_${Date.now()}_${safeTarget}.html`;
   downloadHtmlFile(htmlContent, filename);
 }
 

@@ -6,7 +6,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '@/shared/api/api';
-import type { Session, Device } from '@/shared/types';
+import { isDeviceGlobalTarget, type Session, type Device } from '@/shared/types';
 
 interface SessionInfoBarProps {
   sessionId: number | null;
@@ -122,7 +122,8 @@ export default function SessionInfoBar({ sessionId }: SessionInfoBarProps) {
   }
 
   const deviceName = device?.name || t('sessionList.deviceId', { id: session.device_id.slice(0, 8) });
-  const appName = session.app_name || session.app_package;
+  const isGlobal = isDeviceGlobalTarget(session.app_package);
+  const appName = isGlobal ? t('device.globalTarget') : (session.app_name || session.app_package);
   const timeDisplay = formatTimeDisplay();
   const duration = calculateDuration();
 
@@ -136,7 +137,7 @@ export default function SessionInfoBar({ sessionId }: SessionInfoBarProps) {
         fontSize: '10pt',
       }}
     >
-      {t('sessionList.device')}: {deviceName} | {t('sessionList.app')}: {appName} | {t('sessionList.time')}: {timeDisplay} | {t('sessionList.duration')}: {duration}
+      {t('sessionList.device')}: {deviceName} | {isGlobal ? t('device.monitorTarget') : t('sessionList.app')}: {appName} | {t('sessionList.time')}: {timeDisplay} | {t('sessionList.duration')}: {duration}
     </div>
   );
 }

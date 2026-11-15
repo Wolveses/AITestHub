@@ -52,6 +52,12 @@ export default {
     device: {
       title: '设备',
       app: '应用',
+      monitorScope: '监控模式',
+      appScope: '应用监控',
+      deviceGlobalScope: '设备全局',
+      globalTarget: '设备全局监控',
+      globalTargetDesc: '采集整台设备的 CPU、物理内存、前台画面 FPS、整机网络流量与电池状态，无需选择单个应用。',
+      monitorTarget: '目标',
       currentTarget: '当前目标',
       startMonitor: '开始监控',
       stopMonitor: '停止监控',

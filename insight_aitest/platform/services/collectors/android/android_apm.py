@@ -23,6 +23,7 @@ from insight_aitest.platform.services.collectors.android.device_profile import (
     get_device_profile,
     DeviceProfile,
 )
+from insight_aitest.platform.services.device_common import DEVICE_GLOBAL_TARGET
 
 # 包名验证正则表达式（P3-21）
 # Android 包名格式: 至少两级，如 com.example.app
@@ -35,15 +36,18 @@ def _validate_package_name(package_name: str) -> bool:
     验证 Android 包名格式是否有效（P3-21）
 
     Args:
-        package_name: 应用包名
+        package_name: 应用包名，或全局设备监控标识 ``DEVICE_GLOBAL_TARGET``
 
     Returns:
         bool: 包名是否有效
 
     Examples:
-        有效: com.example.app, com.company.myapp
+        有效: com.example.app, com.company.myapp, __device__
         无效: example, com..app, 123.example, com.example
     """
+    if package_name == DEVICE_GLOBAL_TARGET:
+        return True
+
     if not package_name or not isinstance(package_name, str):
         return False
 
