@@ -156,9 +156,9 @@ def _execute_api_case(params: dict, ctx: SkillContext) -> dict:
     # 可选环境覆盖
     environment_id = params.get("environment_id")
     if environment_id is not None:
-        from insight_aitest.modules.api.backend.deps import get_env_db
+        from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 
-        env = get_env_db().get(environment_id)
+        env = get_automation_db().get_env(int(environment_id))
         if env is None:
             raise ValueError(f"环境 {environment_id} 不存在")
         import copy
@@ -285,7 +285,7 @@ _ANALYZE_PROMPT = """你是一个资深接口测试工程师。一条 API 用例
 {failures}
 
 请分析失败原因并输出 JSON（不要额外解释）：
-{{"root_cause": "一句话根因（如：断言期望200但实际返回404，因为路径拼写错误）", "analysis": "2-3句详细分析", "suggested_fix": "具体修复建议（如：把 path 从 /usre/login 改为 /user/login）"}}"""
+{{"failure_category": "case_defect|env_or_auth|service_bug", "root_cause": "一句话根因（如：断言期望200但实际返回404，因为路径拼写错误）", "analysis": "2-3句详细分析（区分是用例自身参数/路径错误，还是环境/被测服务异常）", "suggested_fix": "具体修复建议（如：把 path 从 /usre/login 改为 /user/login；若属被测服务真实缺陷请注明不应篡改预期断言）"}}"""
 
 
 def _analyze_failure(params: dict, ctx: SkillContext) -> dict:
@@ -339,6 +339,7 @@ _FIX_PROMPT = """你是一个资深接口测试工程师。一条 API 用例执�
 - 建议：{suggested_fix}
 
 请输出修复后的完整 content JSON（不要额外解释，直接输出 JSON 对象）。
+修复红线：仅允许修正请求路径、请求头、参数格式、前置变量提取等用例自身问题；严禁为了迎合报错响应而弱化或篡改合理的业务预期断言（如严禁将正常接口的 expected 200 改为 500/404）。
 content 必须包含 base_url（字符串）和 steps（数组），每个 step 至少有 method 和 path：
 {{"base_url": "...", "steps": [{{"method": "GET", "path": "/...", "headers": {{}}, "body": {{}}, "assertions": [{{"type": "status_code", "expected": 200}}]}}]}}"""
 
@@ -396,7 +397,7 @@ _FIX_UI_PROMPT = """你是测试工程师。UI 用例执行失败，请根据根
 分析：{analysis}
 建议：{suggested_fix}
 
-请输出修复后的完整 content JSON（不要额外解释）。
+请输出修复后的完整 content JSON（不要额外解释）。修复红线：仅允许优化步骤定位描述或操作顺序，严禁删除或弱化核心业务断言。
 content 必须包含 base_url（字符串）和 steps（数组），每个 step 至少有 kind（action|assert|extract）：
 {{"base_url": "...", "steps": [{{"kind": "action", "action": "操作描述"}}]}}"""
 
@@ -486,7 +487,7 @@ def _write_ui_case_from_image(params: dict, ctx: SkillContext) -> dict:
 
 _DATA_DRIVEN_PROMPT = """你是一名资深接口测试工程师。请生成一条「数据驱动」的 API 测试用例：用一个模板请求（body 里的可变字段用占位符）+ 多组测试数据，覆盖边界值和等价类。
 
-可用 skill：{catalog}
+
 
 测试目标：{query}
 {refs_section}
@@ -554,7 +555,7 @@ def _generate_data_driven_api_case(params: dict, ctx: SkillContext) -> dict:
         pass
 
     prompt = _DATA_DRIVEN_PROMPT.format(
-        catalog=get_skill_catalog(),
+
         query=query,
         refs_section=refs_section,
     )
@@ -739,9 +740,9 @@ def _run_api_suite(params: dict, ctx: SkillContext) -> dict:
     environment = None
     environment_id = params.get("environment_id")
     if environment_id is not None:
-        from insight_aitest.modules.api.backend.deps import get_env_db
+        from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 
-        environment = get_env_db().get(int(environment_id))
+        environment = get_automation_db().get_env(int(environment_id))
 
     # 执行前快照每个 case 的 last_result（回归基线）
     baselines: dict[int, str | None] = {}

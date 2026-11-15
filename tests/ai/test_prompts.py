@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-from insight_aitest.modules.ai.backend.agent.prompts import build_system_message
+from insight_aitest.modules.ai.backend.agent.prompts import (
+    build_chat_only_message,
+    build_system_message,
+)
 
 
 def test_system_message_with_citations():
@@ -19,3 +22,10 @@ def test_system_message_empty_chunks():
     """空检索降级提示。"""
     msg = build_system_message([])
     assert "参考资料为空" in msg or "未基于知识库" in msg
+
+
+def test_chat_only_message_no_rag_contradiction():
+    """纯对话提示词不应包含'必须【仅基于】参考资料'的自相矛盾指令。"""
+    msg = build_chat_only_message()
+    assert "纯对话模式" in msg
+    assert "【仅基于】参考资料" not in msg

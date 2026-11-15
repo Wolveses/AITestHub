@@ -47,8 +47,30 @@ def execute_suite(
 
     # 1. 基础 context（环境变量在底）
     context: dict[str, Any] = {}
+    auth_header_val: str | None = None
     if environment is not None:
-        context.update(environment.variables or {})
+        context.update(getattr(environment, "variables", None) or {})
+        try:
+            from insight_aitest.modules.ui.backend.automation.env_service import prepare_auth
+            auth = prepare_auth(environment)
+            if auth.ok and auth.token:
+                raw_prefix = (getattr(environment, "token_prefix", "") or "").strip()
+                prefix = f"{raw_prefix} " if raw_prefix else "Bearer "
+                auth_header_val = f"{prefix}{auth.token}"
+        except Exception:
+            pass
+
+    def _inject_auth(steps_list: list[dict] | None) -> list[dict]:
+        if not steps_list:
+            return []
+        res = copy.deepcopy(steps_list)
+        if auth_header_val:
+            for st in res:
+                if isinstance(st, dict):
+                    hdrs = st.setdefault("headers", {})
+                    if not any(k.lower() == "authorization" for k in hdrs):
+                        hdrs["Authorization"] = auth_header_val
+        return res
 
     # setup/teardown 的 base_url：优先环境，否则取首条 case 的 base_url
     setup_base_url = environment.base_url if environment is not None else None
@@ -58,7 +80,7 @@ def execute_suite(
         setup_status: str | None = None
         if suite.get("setup"):
             base = setup_base_url or _first_case_base_url(suite["case_ids"], cases_provider)
-            setup_status, setup_extracts = _run_steps(client, suite["setup"], context, base)
+            setup_status, setup_extracts = _run_steps(client, _inject_auth(suite["setup"]), context, base)
             if setup_status != "passed":
                 return {
                     "status": SuiteRunStatus.FAILED,
@@ -79,6 +101,8 @@ def execute_suite(
             content = copy.deepcopy(case["content"])
             if environment is not None:
                 content["base_url"] = environment.base_url
+            if auth_header_val and isinstance(content.get("steps"), list):
+                content["steps"] = _inject_auth(content["steps"])
             run = execute(
                 content,
                 transport=transport,
@@ -96,7 +120,7 @@ def execute_suite(
         # 4. TEARDOWN（失败不影响结果）
         if suite.get("teardown"):
             base = setup_base_url or _first_case_base_url(suite["case_ids"], cases_provider)
-            _run_steps(client, suite["teardown"], context, base)
+            _run_steps(client, _inject_auth(suite["teardown"]), context, base)
 
     has_non_pass = any(s != RunStatus.PASSED for s in run_statuses)
     status = SuiteRunStatus.FAILED if has_non_pass else SuiteRunStatus.COMPLETED

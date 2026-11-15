@@ -6,7 +6,10 @@
 """
 from __future__ import annotations
 
-from insight_aitest.modules.ai.backend.agent.planner import _STRATEGY_PROMPT
+from insight_aitest.modules.ai.backend.agent.planner import (
+    _STRATEGY_PROMPT,
+    _UNDERSTAND_PROMPT,
+)
 
 
 def test_strategy_prompt_mentions_extract_test_points():
@@ -45,3 +48,16 @@ def test_strategy_prompt_mentions_documents_text_param():
     否则 LLM 产出策略时不知道把需求原文传给 documents_text。
     """
     assert "documents_text" in _STRATEGY_PROMPT
+
+
+def test_understand_prompt_renders_valid_json_example():
+    """_UNDERSTAND_PROMPT 渲染后的 JSON 示例必须是合法纯 JSON（不含 // 注释或伪语法）。"""
+    import json
+
+    rendered = _UNDERSTAND_PROMPT.format(intent="测试登录", documents="无")
+    start = rendered.find('{\n  "intent_type"')
+    assert start != -1
+    candidate = rendered[start : rendered.rfind("}") + 1]
+    parsed = json.loads(candidate)
+    assert "intent_type" in parsed
+    assert isinstance(parsed["is_actionable"], bool)

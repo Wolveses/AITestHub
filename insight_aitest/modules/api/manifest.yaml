@@ -5,7 +5,7 @@ name:
 version: 2.0.0
 category: testing
 icon: Network
-order: 4
+order: 5
 description:
   zh: 执行 API 用例（多步请求 + 断言 + 变量串联）
   en: Execute API test cases (multi-step requests + assertions + variable chaining)

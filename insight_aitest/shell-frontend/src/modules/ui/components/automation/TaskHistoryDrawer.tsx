@@ -29,6 +29,17 @@ export function TaskHistoryDrawer({
     }
   }, [open, taskId, loadTaskRuns]);
 
+  const hasRunning = currentTaskRuns.some((r) => r.status === 'running');
+
+  // 批次执行期间每 2 秒静默刷新，进度（通过数/耗时）实时变化，结束后自动停止
+  useEffect(() => {
+    if (!open || !taskId || !hasRunning) return;
+    const timer = setInterval(() => {
+      loadTaskRuns(taskId).catch(() => {});
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [open, taskId, hasRunning, loadTaskRuns]);
+
   if (!open) return null;
 
   const handleRefresh = () => {
@@ -172,7 +183,8 @@ export function TaskHistoryDrawer({
                     <Btn
                       size="sm"
                       onClick={() => onOpenReport(r.id)}
-                      disabled={isRunning}
+                      disabled={r.passed_cases + r.failed_cases === 0}
+                      title={r.passed_cases + r.failed_cases === 0 ? '暂无用例执行完成' : '查看已完成用例的报告'}
                       style={{ flexShrink: 0 }}
                     >
                       <FileText size={13} /> 查看测试报告

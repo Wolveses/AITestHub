@@ -54,6 +54,15 @@ class VersionUpdate(BaseModel):
     is_active: bool | None = None
 
 
+def _count_project_envs(project_id: int) -> int:
+    try:
+        from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+
+        return len(get_automation_db().list_envs(project_id))
+    except Exception:
+        return 0
+
+
 def _project_to_dict(p, version_count: int = 0) -> dict[str, Any]:
     return {
         "id": p.id,
@@ -61,6 +70,8 @@ def _project_to_dict(p, version_count: int = 0) -> dict[str, Any]:
         "description": p.description,
         "color": p.color,
         "version_count": version_count,
+        "env_count": _count_project_envs(p.id),
+        "current_env_id": getattr(p, "current_env_id", None),
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
     }

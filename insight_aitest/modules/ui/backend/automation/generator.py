@@ -337,6 +337,18 @@ SYSTEM_PROMPT = """你是资深 Playwright 测试工程师。你的任务是通�
     断言一律用文案（expect(dialog.get_by_text("显示名称不能为空")).to_be_visible()），
     禁止编造 ui-input-error 这类 class。密码为空的提示是「密码不能为空」，
     且需先取消勾选「使用默认密码」，否则密码框 disabled、不参与校验。
+39. 脚本必须输出可读的执行日志（执行记录的「日志」里直接可见；pytest 以 -s 运行，print 实时落盘）：
+    - 每步操作前打印步骤与目标：print("[步骤] 打开用户管理页")、print("[操作] 点击「新增」")
+    - 输入/选择/勾选后打印实际提交的值：print(f"[输入] 用户名={username}")、
+      print(f"[选择] 部门={dept}")、print(f"[勾选] 使用默认密码={checked}")
+    - 断言前先确认元素可见（expect(loc).to_be_visible()），再读实际值打印预期 vs 实际，
+      最后再执行 expect 校验（保留自动重试，不要因为读值把断言写死）：
+      expect(row).to_be_visible()
+      actual = row.inner_text()
+      print(f"[断言] 部门 实际={actual!r} 预期={expected!r}")
+      expect(row).to_contain_text(expected)
+    日志一行一条、文案简短可读；禁止打印密码、token、Cookie 等敏感信息，
+    也不要打印整段 HTML/快照，每步保留关键值即可。
 """
 
 
@@ -1456,6 +1468,10 @@ class GenerationJob:
             return
         project_id = int(case.project_id)
         is_fix = self.kind == GenerationKind.FIX
+        op = {
+            GenerationKind.FIX: "fix",
+            GenerationKind.REGENERATE: "regenerate",
+        }.get(self.kind, "generate")
         self.db.update_case(
             self.case_id,
             status=CaseStatus.FIXING if is_fix else CaseStatus.GENERATING,
@@ -1480,7 +1496,19 @@ class GenerationJob:
 
         outcome = {"status": GenerationStatus.FAILED, "error_category": ErrorCategory.MODEL}
         try:
-            outcome = self._execute(is_fix)
+            from insight_aitest.platform.services.llm.tracing import trace_context
+
+            with trace_context(
+                name=f"ui.script.{op}",
+                session_id=f"ui-case-{self.case_id}-gen-{self.gen_id}",
+                tags=["module:ui", f"kind:{self.kind}"],
+                metadata={
+                    "case_id": self.case_id,
+                    "project_id": project_id,
+                    "gen_id": self.gen_id,
+                },
+            ):
+                outcome = self._execute(is_fix)
         except Exception as e:
             if concurrency.is_cancelled(self.case_id):
                 # 终止时关闭 MCP/杀掉子进程会以异常形式冒泡，按「已终止」收尾而不是失败
@@ -2133,6 +2161,8 @@ class GenerationJob:
                     pages_root=self._staged_pages,
                     params_schema=param_schema,
                     params_values=param_values,
+                    # 仅生成期首跑采集网络请求；修复场景复用既有脚本，不重复采集
+                    capture_network=not is_fix,
                 )
                 if result.get("cancelled"):
                     return self._cancelled_outcome()
@@ -2147,6 +2177,8 @@ class GenerationJob:
                 if result.get("run_status") == "passed":
                     adopt_pages(int(self.case.project_id), self._staged_pages)
                     self._staged_pages = None
+                    if not is_fix:
+                        self._import_capture(result)
                     return self._solidify(
                         source,
                         ok=True,
@@ -2567,6 +2599,7 @@ class GenerationJob:
         pages_root: Path | None = None,
         params_schema: list[dict] | None = None,
         params_values: dict | None = None,
+        capture_network: bool = False,
     ) -> dict:
         project_id = int(self.case.project_id)
         case_dir = paths.case_dir(project_id, int(self.case.id))
@@ -2583,6 +2616,7 @@ class GenerationJob:
                 pages_root=pages_root if pages_root is not None else self._staged_pages,
                 # 首跑是本任务另一个长阻塞点，终止时立即杀掉 pytest 子进程
                 cancel_check=lambda: concurrency.is_cancelled(self.case_id),
+                capture_network=capture_network,
             )
             # 记住本次首跑产物位置，通过时把终态截图固化到生成记录旁
             self.validate_artifacts_rel = result.get("artifacts_rel_path") or ""
@@ -2595,6 +2629,36 @@ class GenerationJob:
                 "error_category": ErrorCategory.SCRIPT,
                 "error_message": f"{type(e).__name__}: {e}",
             }
+
+    def _import_capture(self, result: dict) -> None:
+        """生成期首跑抓包 → 独立接口资产库（纯旁路，失败不影响生成结果）。"""
+        run_dir = result.get("run_dir") or ""
+        if not run_dir:
+            return
+        try:
+            from urllib.parse import urlsplit
+
+            from .capture import import_captured_api_assets
+
+            env = self.env
+            base_origin = ""
+            raw_base = (getattr(env, "base_url", "") or "").strip() if env else ""
+            if raw_base:
+                parts = urlsplit(raw_base)
+                if parts.scheme and parts.netloc:
+                    base_origin = f"{parts.scheme}://{parts.netloc}"
+            stats = import_captured_api_assets(
+                project_id=int(self.case.project_id),
+                ui_case_id=int(self.case.id),
+                ui_case_title=self.case.title,
+                network_path=Path(run_dir) / "network.jsonl",
+                base_origin=base_origin,
+                login_api_path=(getattr(env, "login_api_path", "") or "") if env else "",
+                auto_enhance=True,
+            )
+            self._write_log({"type": "api_capture", **stats})
+        except Exception:
+            logger.warning("生成期接口抓包入库失败 case=%s", self.case_id, exc_info=True)
 
     def _solidify(
         self,
@@ -2749,6 +2813,10 @@ class GenerationJob:
 
 def start_job(case_id: int, kind: str) -> None:
     """在后台线程启动生成/修复（调用方需已通过 acquire 抢到项目锁）。"""
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if not is_ai_assist_enabled():
+        raise RuntimeError("系统设置已关闭 LLM 自动化辅助能力，已阻止启动生成/修复任务")
     # 先清理上一次残留的终止标记，避免新任务一起手就被判定为已终止
     concurrency.clear_cancel(case_id)
     job = GenerationJob(case_id, kind)

@@ -60,6 +60,9 @@ interface RunState {
 
   loadCases: () => Promise<void>;
   selectCase: (id: number) => void;
+  createCase: (title: string) => Promise<number>;
+  updateCase: (id: number, patch: { title?: string; content?: { base_url: string; steps: unknown[] } }) => Promise<void>;
+  deleteCase: (id: number) => Promise<void>;
   loadRuns: (caseId: number) => Promise<void>;
   execute: (caseId: number, environmentId?: number | null) => Promise<void>;
   loadRunDetail: (runId: number) => Promise<void>;
@@ -94,6 +97,47 @@ export const useRunStore = create<RunState>((set, get) => ({
   selectCase: (id) => {
     set({ selectedCaseId: id, runs: [], selectedRun: null });
     get().loadRuns(id);
+  },
+
+  createCase: async (title) => {
+    const { currentProjectId, currentVersionId } = useProjectStore.getState();
+    const r = await fetch(TC_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        type: 'api',
+        content: { base_url: '', steps: [] },
+        project_id: currentProjectId,
+        version_id: currentVersionId,
+      }),
+    });
+    if (!r.ok) throw new Error((await r.text()) || '新建用例失败');
+    const created = (await r.json()) as ApiCase;
+    await get().loadCases();
+    return created.id;
+  },
+
+  updateCase: async (id, patch) => {
+    const r = await fetch(`${TC_BASE}/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!r.ok) throw new Error((await r.text()) || '保存用例失败');
+    const updated = (await r.json()) as ApiCase;
+    set((s) => ({ cases: s.cases.map((c) => (c.id === id ? { ...c, ...updated } : c)) }));
+  },
+
+  deleteCase: async (id) => {
+    const r = await fetch(`${TC_BASE}/${id}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error((await r.text()) || '删除用例失败');
+    set((s) => ({
+      cases: s.cases.filter((c) => c.id !== id),
+      selectedCaseId: s.selectedCaseId === id ? null : s.selectedCaseId,
+      runs: s.selectedCaseId === id ? [] : s.runs,
+      selectedRun: s.selectedCaseId === id ? null : s.selectedRun,
+    }));
   },
 
   loadRuns: async (caseId) => {

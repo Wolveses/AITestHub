@@ -5,9 +5,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from insight_aitest.modules.ui.backend.automation.models import (
+    AuthoringEvent,
+    AuthoringStage,
+    AuthoringState,
+    CaseStatus,
+    GenerationStatus,
+    McpToken,
     UiCase,
     UiEnv,
     UiGeneration,
@@ -122,6 +128,54 @@ def _ensure_ui_envs_auth_script(db_path: str) -> None:
         conn.commit()
 
 
+def _ensure_ui_envs_local_agent(db_path: str) -> None:
+    """给旧 ui_envs 表补 allow_local_agent 列（幂等，默认允许本地 Agent 读取认证信息）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ui_envs)")}
+        if cols and "allow_local_agent" not in cols:
+            conn.execute(
+                "ALTER TABLE ui_envs ADD COLUMN allow_local_agent INTEGER NOT NULL DEFAULT 1"
+            )
+            conn.commit()
+
+
+def _ensure_ui_cases_authoring(db_path: str) -> None:
+    """给旧 ui_cases 表补本地 Agent 编写来源列（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ui_cases)")}
+        if not cols:
+            return
+        for name, ddl in (
+            ("source", "TEXT NOT NULL DEFAULT 'ai'"),
+            ("authoring_by", "TEXT NOT NULL DEFAULT ''"),
+            ("authoring_at", "DATETIME"),
+        ):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE ui_cases ADD COLUMN {name} {ddl}")
+        conn.commit()
+
+
+def _ensure_ui_authoring_session(db_path: str) -> None:
+    """给旧 ui_authoring_states 表补本地 Agent 会话绑定列（幂等）。"""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(ui_authoring_states)")}
+        if not cols:
+            return
+        for name, ddl in (
+            ("authoring_mode", "TEXT NOT NULL DEFAULT ''"),
+            ("generation_id", "INTEGER"),
+        ):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE ui_authoring_states ADD COLUMN {name} {ddl}")
+        conn.commit()
+
+
 class UIAutomationDatabase:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -132,6 +186,9 @@ class UIAutomationDatabase:
                 UiEnv.__table__,
                 UiGeneration.__table__,
                 UiLesson.__table__,
+                McpToken.__table__,
+                AuthoringState.__table__,
+                AuthoringEvent.__table__,
                 RunRecord.__table__,
                 UiTask.__table__,
                 UiTaskCase.__table__,
@@ -147,10 +204,56 @@ class UIAutomationDatabase:
                 _ensure_generation_metrics,
                 _drop_flow_assets,
                 _ensure_ui_envs_auth_script,
+                _ensure_ui_envs_local_agent,
+                _ensure_ui_cases_authoring,
+                _ensure_ui_authoring_session,
             ],
         )
 
     # ===== 用例 =====
+
+    def recover_interrupted_jobs(self) -> int:
+        """后端重启后收敛残留的生成/修复状态（内存任务已不可能存活）。
+
+        残留的 running 生成记录置为 failed；generating/fixing 用例按是否有脚本
+        回退为已实现/未实现，避免前端一直显示「生成中」且停止按钮失效。
+        """
+        with session_scope(self.db_path) as s:
+            gens = list(
+                s.scalars(
+                    select(UiGeneration).where(
+                        UiGeneration.status == GenerationStatus.RUNNING
+                    )
+                )
+            )
+            for g in gens:
+                g.status = GenerationStatus.FAILED
+                g.error_message = g.error_message or "服务重启导致任务中断"
+                g.finished_at = datetime.now()
+            cases = list(
+                s.scalars(
+                    select(UiCase).where(
+                        UiCase.status.in_([CaseStatus.GENERATING, CaseStatus.FIXING])
+                    )
+                )
+            )
+            for c in cases:
+                c.status = (
+                    CaseStatus.IMPLEMENTED if c.script_rel_path else CaseStatus.NOT_IMPLEMENTED
+                )
+                c.last_error_message = "服务重启导致任务中断"
+                c.updated_at = datetime.now()
+            # 本地 Agent 会话已不可能存活：清空绑定，下一次 contract.get 自动新建记录
+            states = list(
+                s.scalars(
+                    select(AuthoringState).where(AuthoringState.generation_id.is_not(None))
+                )
+            )
+            for st in states:
+                st.generation_id = None
+                st.authoring_mode = ""
+                st.updated_at = datetime.now()
+            return len(gens) + len(cases)
 
     def get_case(self, case_id: int) -> UiCase | None:
         with session_scope(self.db_path) as s:
@@ -307,8 +410,38 @@ class UIAutomationDatabase:
             s.flush()
             return gen.id
 
+    def get_generation(self, gen_id: int) -> UiGeneration | None:
+        if not gen_id:
+            return None
+        with session_scope(self.db_path) as s:
+            gen = s.get(UiGeneration, int(gen_id))
+            if gen is not None:
+                s.expunge(gen)
+            return gen
+
+    def count_generations(self, case_id: int, kind: str | None = None) -> int:
+        stmt = select(func.count(UiGeneration.id)).where(UiGeneration.ui_case_id == case_id)
+        if kind:
+            stmt = stmt.where(UiGeneration.kind == kind)
+        with session_scope(self.db_path) as s:
+            return int(s.scalar(stmt) or 0)
+
+    def bump_generation(self, gen_id: int, **deltas: int) -> None:
+        """原子自增（调用方保证同 case 串行）；无会话时静默跳过。"""
+        if not gen_id:
+            return
+        with session_scope(self.db_path) as s:
+            gen = s.get(UiGeneration, int(gen_id))
+            if gen is None:
+                return
+            for key, delta in deltas.items():
+                if hasattr(gen, key):
+                    setattr(gen, key, int(getattr(gen, key) or 0) + int(delta))
+
     def update_generation(self, gen_id: int, **fields) -> None:
         """更新生成记录（生成期先落日志路径，结束时再补终态）。"""
+        if not gen_id:
+            return
         with session_scope(self.db_path) as s:
             gen = s.get(UiGeneration, gen_id)
             if gen is None:
@@ -318,6 +451,8 @@ class UIAutomationDatabase:
                     setattr(gen, k, v)
 
     def finish_generation(self, gen_id: int, **fields) -> None:
+        if not gen_id:
+            return
         with session_scope(self.db_path) as s:
             gen = s.get(UiGeneration, gen_id)
             if gen is None:
@@ -417,6 +552,22 @@ class UIAutomationDatabase:
                 .limit(limit)
             ).scalars()
             return [self._run_dict(r) for r in rows]
+
+    def latest_script_runs(self, case_ids: list[int]) -> dict[int, dict]:
+        """批量取每个用例最近一条脚本执行记录（按 case_id 索引），避免逐条查询。"""
+        if not case_ids:
+            return {}
+        with session_scope(self.db_path) as s:
+            rows = s.execute(
+                select(RunRecord)
+                .where(RunRecord.case_id.in_(case_ids), RunRecord.runner == "script")
+                .order_by(RunRecord.id.desc())
+            ).scalars()
+            out: dict[int, dict] = {}
+            for row in rows:
+                if int(row.case_id) not in out:
+                    out[int(row.case_id)] = self._run_dict(row)
+            return out
 
     def get_script_run(self, run_id: int) -> dict | None:
         with session_scope(self.db_path) as s:
@@ -692,3 +843,225 @@ class UIAutomationDatabase:
             s.flush()
             s.expunge(r)
             return r
+
+    # ===== 本地 Agent：MCP Token =====
+
+    def create_mcp_token(
+        self,
+        project_id: int,
+        name: str,
+        token_hash: str,
+        token_prefix: str,
+        expires_at: datetime | None = None,
+    ) -> McpToken:
+        token = McpToken(
+            project_id=project_id,
+            name=name,
+            token_hash=token_hash,
+            token_prefix=token_prefix,
+            expires_at=expires_at,
+        )
+        with session_scope(self.db_path) as s:
+            s.add(token)
+            s.flush()
+            s.expunge(token)
+            return token
+
+    def get_mcp_token(self, token_id: int) -> McpToken | None:
+        with session_scope(self.db_path) as s:
+            row = s.get(McpToken, token_id)
+            if row is not None:
+                s.expunge(row)
+            return row
+
+    def get_mcp_token_by_hash(self, token_hash: str) -> McpToken | None:
+        with session_scope(self.db_path) as s:
+            row = s.scalar(select(McpToken).where(McpToken.token_hash == token_hash))
+            if row is not None:
+                s.expunge(row)
+            return row
+
+    def list_mcp_tokens(self, project_id: int) -> list[McpToken]:
+        with session_scope(self.db_path) as s:
+            rows = list(
+                s.scalars(
+                    select(McpToken)
+                    .where(McpToken.project_id == project_id)
+                    .order_by(McpToken.id.desc())
+                )
+            )
+            for row in rows:
+                s.expunge(row)
+            return rows
+
+    def revoke_mcp_token(self, token_id: int, project_id: int) -> bool:
+        with session_scope(self.db_path) as s:
+            row = s.get(McpToken, token_id)
+            if row is None or int(row.project_id) != int(project_id):
+                return False
+            if row.revoked_at is None:
+                row.revoked_at = datetime.now()
+            return True
+
+    def touch_mcp_token(self, token_id: int) -> None:
+        with session_scope(self.db_path) as s:
+            row = s.get(McpToken, token_id)
+            if row is not None:
+                row.last_used_at = datetime.now()
+
+    # ===== 本地 Agent：校验状态 =====
+
+    def get_authoring_state(self, case_id: int) -> AuthoringState | None:
+        with session_scope(self.db_path) as s:
+            row = s.get(AuthoringState, case_id)
+            if row is not None:
+                s.expunge(row)
+            return row
+
+    def upsert_authoring_state(self, case_id: int, **fields) -> AuthoringState:
+        with session_scope(self.db_path) as s:
+            row = s.get(AuthoringState, case_id)
+            if row is None:
+                row = AuthoringState(case_id=case_id)
+                s.add(row)
+            for k, v in fields.items():
+                if hasattr(row, k):
+                    setattr(row, k, v)
+            row.updated_at = datetime.now()
+            s.flush()
+            s.expunge(row)
+            return row
+
+    # ===== 本地 Agent：进度事件 =====
+
+    def add_authoring_event(
+        self,
+        case_id: int,
+        project_id: int,
+        kind: str,
+        message: str = "",
+        payload: dict | None = None,
+    ) -> int:
+        event = AuthoringEvent(
+            case_id=case_id,
+            project_id=project_id,
+            kind=kind,
+            message=message[:2000],
+            payload=payload or {},
+        )
+        with session_scope(self.db_path) as s:
+            s.add(event)
+            s.flush()
+            return int(event.id)
+
+    def list_authoring_events(
+        self, case_id: int, after_id: int = 0, limit: int = 200
+    ) -> list[AuthoringEvent]:
+        with session_scope(self.db_path) as s:
+            rows = list(
+                s.scalars(
+                    select(AuthoringEvent)
+                    .where(AuthoringEvent.case_id == case_id, AuthoringEvent.id > after_id)
+                    .order_by(AuthoringEvent.id.asc())
+                    .limit(limit)
+                )
+            )
+            for row in rows:
+                s.expunge(row)
+            return rows
+
+    def list_active_authoring(
+        self, project_id: int, limit: int = 200
+    ) -> list[tuple[AuthoringState, UiCase]]:
+        """进行中的编写状态（已入库的用例状态会被清空，自然不在结果里）。"""
+        with session_scope(self.db_path) as s:
+            rows = list(
+                s.execute(
+                    select(AuthoringState, UiCase)
+                    .join(UiCase, UiCase.id == AuthoringState.case_id)
+                    .where(
+                        UiCase.project_id == project_id,
+                        AuthoringState.stage.in_(
+                            [
+                                AuthoringStage.GENERATING,
+                                AuthoringStage.VALIDATED,
+                                AuthoringStage.DRY_RUN_OK,
+                            ]
+                        ),
+                    )
+                    .order_by(AuthoringState.updated_at.desc())
+                    .limit(limit)
+                ).all()
+            )
+            for state, case in rows:
+                s.expunge(state)
+                s.expunge(case)
+            return rows
+
+    def list_prompt_ready_cases(
+        self, project_id: int, since: datetime, limit: int = 200
+    ) -> list[tuple[UiCase, AuthoringEvent]]:
+        """已生成编写文案、但还没进入校验/试跑状态的用例（等待本地 Agent）。"""
+        with session_scope(self.db_path) as s:
+            latest = (
+                select(
+                    AuthoringEvent.case_id.label("case_id"),
+                    func.max(AuthoringEvent.id).label("event_id"),
+                )
+                .where(
+                    AuthoringEvent.project_id == project_id,
+                    AuthoringEvent.kind == "prompt_ready",
+                    AuthoringEvent.created_at >= since,
+                )
+                .group_by(AuthoringEvent.case_id)
+                .subquery()
+            )
+            has_state = (
+                select(AuthoringState.case_id)
+                .where(AuthoringState.case_id == AuthoringEvent.case_id)
+                .exists()
+            )
+            rows = list(
+                s.execute(
+                    select(UiCase, AuthoringEvent)
+                    .join(UiCase, UiCase.id == AuthoringEvent.case_id)
+                    .join(latest, latest.c.event_id == AuthoringEvent.id)
+                    .where(
+                        UiCase.project_id == project_id,
+                        ~has_state,
+                        or_(
+                            UiCase.authoring_at.is_(None),
+                            UiCase.authoring_at < AuthoringEvent.created_at,
+                        ),
+                    )
+                    .order_by(AuthoringEvent.created_at.desc())
+                    .limit(limit)
+                ).all()
+            )
+            for case, event in rows:
+                s.expunge(case)
+                s.expunge(event)
+            return rows
+
+    def latest_authoring_event(self, case_id: int) -> AuthoringEvent | None:
+        with session_scope(self.db_path) as s:
+            row = s.scalars(
+                select(AuthoringEvent)
+                .where(AuthoringEvent.case_id == case_id)
+                .order_by(AuthoringEvent.id.desc())
+                .limit(1)
+            ).first()
+            if row is not None:
+                s.expunge(row)
+            return row
+
+    def latest_authoring_event_id(self, case_id: int) -> int:
+        with session_scope(self.db_path) as s:
+            return (
+                s.scalar(
+                    select(func.max(AuthoringEvent.id)).where(
+                        AuthoringEvent.case_id == case_id
+                    )
+                )
+                or 0
+            )

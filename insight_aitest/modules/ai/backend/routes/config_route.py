@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from insight_aitest.platform.services.llm.config import AIConfig, save_config, apply_provider
 from insight_aitest.platform.services.llm.client import test_connection
+from insight_aitest.platform.services.llm.tracing import test_langfuse_connection
 from insight_aitest.modules.ai.backend.deps import get_config, reset_singletons
 
 router = APIRouter(prefix="/config", tags=["ai-config"])
@@ -92,6 +93,13 @@ class ConfigOut(BaseModel):
     embed_base_url: str
     embed_api_key_set: bool
     max_upload_mb: int = 100
+    # Langfuse 可观测性
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key_set: bool = False
+    langfuse_host: str = "http://localhost:3000"
+    # 非 Agent 平台 LLM 自动化辅助能力开关
+    ai_assist_enabled: bool = True
     # 多 Provider
     providers: list[ProviderOut] = []
     active_provider_id: str = ""
@@ -123,6 +131,19 @@ class ConfigUpdate(BaseModel):
     embed_base_url: str | None = None
     embed_api_key: str | None = None
     max_upload_mb: int | None = None
+    langfuse_enabled: bool | None = None
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_host: str | None = None
+    ai_assist_enabled: bool | None = None
+
+
+class LangfuseTestRequest(BaseModel):
+    """Langfuse 连通性探测请求。"""
+
+    host: str = "http://localhost:3000"
+    public_key: str = ""
+    secret_key: str = ""  # 留空 = 沿用已保存的 Secret Key
 
 
 class ProviderUpsert(BaseModel):
@@ -184,6 +205,11 @@ def _to_config_out(cfg: AIConfig) -> ConfigOut:
         embed_base_url=cfg.embed_base_url,
         embed_api_key_set=bool(cfg.embed_api_key),
         max_upload_mb=cfg.max_upload_mb,
+        langfuse_enabled=bool(getattr(cfg, "langfuse_enabled", False)),
+        langfuse_public_key=getattr(cfg, "langfuse_public_key", "") or "",
+        langfuse_secret_key_set=bool(getattr(cfg, "langfuse_secret_key", "")),
+        langfuse_host=getattr(cfg, "langfuse_host", "http://localhost:3000") or "http://localhost:3000",
+        ai_assist_enabled=bool(getattr(cfg, "ai_assist_enabled", True)),
         providers=[_provider_to_out(p) for p in (cfg.providers or [])],
         active_provider_id=cfg.active_provider_id or "",
     )
@@ -231,10 +257,16 @@ def update_config(body: ConfigUpdate, cfg: AIConfig = Depends(get_config)) -> Co
         "embed_base_url",
         "embed_api_key",
         "max_upload_mb",
+        "langfuse_enabled",
+        "langfuse_public_key",
+        "langfuse_host",
+        "ai_assist_enabled",
     ):
         val = getattr(body, field)
         if val is not None:
             setattr(cfg, field, val)
+    if body.langfuse_secret_key:
+        cfg.langfuse_secret_key = body.langfuse_secret_key.strip()
     # 若有 active provider，把扁平字段同步回该 provider（保持一致性）
     if cfg.active_provider_id and cfg.providers:
         for p in cfg.providers:
@@ -270,6 +302,18 @@ def test_provider(body: TestRequest, cfg: AIConfig = Depends(get_config)) -> dic
     if not api_key:
         return {"ok": False, "message": "未填写 API Key，且没有可沿用的已保存 Key"}
     ok, msg = test_connection(body.base_url, api_key, body.model)
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/langfuse/test")
+def test_langfuse(body: LangfuseTestRequest, cfg: AIConfig = Depends(get_config)) -> dict:
+    """探测 Langfuse 连通性与鉴权（不写配置）。"""
+    host = (body.host or getattr(cfg, "langfuse_host", "") or "http://localhost:3000").strip()
+    public_key = (body.public_key or getattr(cfg, "langfuse_public_key", "") or "").strip()
+    secret_key = (body.secret_key or "").strip()
+    if not secret_key:
+        secret_key = (getattr(cfg, "langfuse_secret_key", "") or "").strip()
+    ok, msg = test_langfuse_connection(host, public_key, secret_key)
     return {"ok": ok, "message": msg}
 
 

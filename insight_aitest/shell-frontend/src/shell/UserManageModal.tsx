@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useConfirmStore } from '../shared/store/confirmStore';
 import {
   Users,
   X,
@@ -54,6 +55,7 @@ export function UserManageModal({ open, onClose }: { open: boolean; onClose: () 
   const [logsLoading, setLogsLoading] = useState(false);
   const [searchUsername, setSearchUsername] = useState('');
   const [filterTargetType, setFilterTargetType] = useState('');
+  const confirm = useConfirmStore((s) => s.confirm);
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -137,25 +139,30 @@ export function UserManageModal({ open, onClose }: { open: boolean; onClose: () 
     }
   };
 
-  const handleToggleActive = async (userId: number, currentActive: boolean) => {
+  const handleToggleActive = (userId: number, currentActive: boolean) => {
     const targetStatus = !currentActive;
     const confirmMsg = targetStatus ? '确定要重新启用该用户吗？' : '确定要停用该用户吗？停用后该用户将无法登录。';
-    if (!window.confirm(confirmMsg)) return;
-
-    try {
-      const res = await fetch(`/api/platform/auth/users/${userId}/toggle-active?active=${targetStatus}`, {
-        method: 'POST',
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.detail || '操作失败');
-      }
-      setMessage(data.message);
-      fetchUsers();
-      fetchLogs();
-    } catch (err: any) {
-      alert(err.message || '操作失败');
-    }
+    confirm({
+      title: targetStatus ? '确认启用用户' : '确认停用用户',
+      message: confirmMsg,
+      variant: targetStatus ? undefined : 'danger',
+      onConfirm: async () => {
+        try {
+          const res = await fetch(`/api/platform/auth/users/${userId}/toggle-active?active=${targetStatus}`, {
+            method: 'POST',
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(data.detail || '操作失败');
+          }
+          setMessage(data.message);
+          fetchUsers();
+          fetchLogs();
+        } catch (err: any) {
+          setMessage(`操作失败: ${err.message}`);
+        }
+      },
+    });
   };
 
   if (!open) return null;

@@ -31,6 +31,7 @@ class CaseStatus:
 class GenerationKind:
     GENERATE = "generate"
     FIX = "fix"
+    REGENERATE = "regenerate"
 
 
 class GenerationStatus:
@@ -55,6 +56,22 @@ class Site:
     BACKEND = "backend"
 
     ALL = (FRONTEND, BACKEND)
+
+
+class CaseSource:
+    """脚本来处：平台内 AI 生成 / 本地 Agent 编写后提交。"""
+
+    AI = "ai"
+    LOCAL_AGENT = "local_agent"
+
+
+class AuthoringStage:
+    """本地 Agent 编写脚本的校验状态机。"""
+
+    NONE = ""
+    GENERATING = "generating"  # 本地 Agent 已接入，正在生成/校验脚本
+    VALIDATED = "validated"  # L1/L2 通过，30 分钟内可 dry_run/submit
+    DRY_RUN_OK = "dry_run_ok"  # 本地试跑通过，24 小时内可 submit
 
 
 class UiCase(MappedAsDataclass, Base, kw_only=True):
@@ -96,6 +113,10 @@ class UiCase(MappedAsDataclass, Base, kw_only=True):
     script_rel_path: Mapped[str] = mapped_column(Text, default="")
     script_version: Mapped[int] = mapped_column(Integer, default=0)
     script_hash: Mapped[str] = mapped_column(Text, default="")
+    # 脚本来处：ai（平台内生成）/ local_agent（本地 Agent 通过 MCP 提交）
+    source: Mapped[str] = mapped_column(Text, default=CaseSource.AI)
+    authoring_by: Mapped[str] = mapped_column(Text, default="")
+    authoring_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     last_error_category: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     last_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
@@ -135,6 +156,8 @@ class UiEnv(MappedAsDataclass, Base, kw_only=True):
     token_prefix: Mapped[str] = mapped_column(Text, default="")
     storage_state_rel: Mapped[str] = mapped_column(Text, default="")
     is_default: Mapped[int] = mapped_column(Integer, default=0)
+    # 是否允许本地 Agent 通过 MCP 获取该环境的认证信息（关闭后 env.get 直接拒绝）
+    allow_local_agent: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
 
@@ -189,3 +212,63 @@ class UiLesson(MappedAsDataclass, Base, kw_only=True):
     hits: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+
+
+class McpToken(MappedAsDataclass, Base, kw_only=True):
+    """本地 Agent 访问平台 MCP 的静态 Bearer Token（只存哈希，明文只在创建时返回一次）。"""
+
+    __tablename__ = "ui_mcp_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_ui_mcp_tokens_hash"),
+        Index("idx_ui_mcp_tokens_project", "project_id"),
+    )
+
+    id: Mapped[int | None] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, default=None
+    )
+    project_id: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(Text, default="本地 Agent")
+    token_hash: Mapped[str] = mapped_column(Text, default="")
+    token_prefix: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+
+
+class AuthoringState(MappedAsDataclass, Base, kw_only=True):
+    """每个用例当前轮本地编写的校验状态（哈希 + 阶段 + 租约 + 冷却）。"""
+
+    __tablename__ = "ui_authoring_states"
+
+    case_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    project_id: Mapped[int] = mapped_column(Integer, default=0)
+    source_hash: Mapped[str] = mapped_column(Text, default="")
+    stage: Mapped[str] = mapped_column(Text, default=AuthoringStage.NONE)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    dry_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    lease_owner: Mapped[str] = mapped_column(Text, default="")
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    # 本轮本地编写会话绑定的生成记录（None 表示尚未开始或已收尾）
+    generation_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # 本轮请求模式：""（auto）/ "regenerate"；用于展示与模式切换判定
+    authoring_mode: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
+
+
+class AuthoringEvent(MappedAsDataclass, Base, kw_only=True):
+    """本地编写的进度事件（前端 SSE/轮询回显用）。"""
+
+    __tablename__ = "ui_authoring_events"
+    __table_args__ = (Index("idx_ui_authoring_events_case", "case_id", "id"),)
+
+    id: Mapped[int | None] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, default=None
+    )
+    case_id: Mapped[int] = mapped_column(Integer)
+    project_id: Mapped[int] = mapped_column(Integer, default=0)
+    kind: Mapped[str] = mapped_column(Text, default="")
+    message: Mapped[str] = mapped_column(Text, default="")
+    payload: Mapped[dict] = mapped_column(JSON, default_factory=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)

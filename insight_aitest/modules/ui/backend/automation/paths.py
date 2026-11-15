@@ -118,6 +118,11 @@ def new_run_dir(project_id: int, case_id: int) -> Path:
     return d
 
 
+def generation_log_path(ui_case_id: int, gen_id: int) -> Path:
+    """只计算生成日志路径，不创建目录（建会话落库时用，避免单测污染主目录）。"""
+    return workspace_root() / "generations" / str(ui_case_id) / f"{gen_id}.jsonl"
+
+
 def generation_log(ui_case_id: int, gen_id: int) -> Path:
     d = workspace_root() / "generations" / str(ui_case_id)
     d.mkdir(parents=True, exist_ok=True)

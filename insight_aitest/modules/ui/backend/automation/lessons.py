@@ -93,14 +93,14 @@ def record_solution(db, case, category: str, failure: str, solution: str) -> Non
         logger.exception("写入修复样本失败 case=%s", getattr(case, "id", "?"))
 
 
-def relevant_lessons(case, db) -> str:
-    """按用例文本相似度 + 历史命中次数挑 top 5 注入；无样本时返回空串。"""
+def pick_lessons(case, db, limit: int = MAX_INJECT) -> list:
+    """按用例相似度 + 历史命中挑 top N 条样本，并累加命中计数。"""
     try:
         entries = db.list_lessons(int(case.project_id), MAX_ENTRIES_PER_PROJECT)
     except Exception:  # noqa: BLE001
-        return ""
+        return []
     if not entries:
-        return ""
+        return []
 
     base = _case_text(case)
     ranked: list[tuple[float, object]] = []
@@ -110,13 +110,21 @@ def relevant_lessons(case, db) -> str:
         score += min(int(entry.hits or 0), 10) * 0.02
         ranked.append((score, entry))
     ranked.sort(key=lambda row: row[0], reverse=True)
+    picked = [entry for _, entry in ranked[: max(1, limit)]]
+    try:
+        db.bump_lesson_hits([int(entry.id) for entry in picked])
+        for entry in picked:  # 返回的是已 detach 的对象，同步一次内存计数
+            entry.hits = int(entry.hits or 0) + 1
+    except Exception:  # noqa: BLE001 - 计数失败不影响本次注入
+        pass
+    return picked
 
+
+def relevant_lessons(case, db) -> str:
+    """按用例文本相似度 + 历史命中次数挑 top 5 注入；无样本时返回空串。"""
     blocks: list[str] = []
-    picked: list[int] = []
     used = 0
-    for _, entry in ranked:
-        if len(blocks) >= MAX_INJECT:
-            break
+    for entry in pick_lessons(case, db):
         label = _CATEGORY_LABEL.get(entry.category, entry.category or "经验")
         body = _truncate(entry.content)
         block = f"- 【{label}】{entry.title}\n  " + body.replace("\n", "\n  ")
@@ -124,11 +132,4 @@ def relevant_lessons(case, db) -> str:
             break
         used += len(block)
         blocks.append(block)
-        picked.append(int(entry.id))
-    if not blocks:
-        return ""
-    try:
-        db.bump_lesson_hits(picked)
-    except Exception:  # noqa: BLE001 - 计数失败不影响本次注入
-        pass
     return "\n".join(blocks)

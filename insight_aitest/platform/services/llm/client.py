@@ -13,6 +13,11 @@ from typing import Iterator
 
 from insight_aitest.platform.services.llm.config import LLMConfig
 from insight_aitest.platform.services.llm.thinking import resolve_thinking_params
+from insight_aitest.platform.services.llm.tracing import (
+    LangfuseTracer,
+    extract_openai_usage,
+    utc_now,
+)
 
 logger = logging.getLogger("insight_aitest.llm")
 
@@ -58,7 +63,8 @@ class LLMUnavailableError(Exception):
 
 # 重试配置（瞬时错误：限流/超时/连接失败）
 _MAX_RETRIES = 3
-_RETRY_DELAYS = [1, 2, 4]  # 指数退避秒数
+_RETRY_DELAYS = [1.5, 3, 6]  # 指数退避秒数（首次 1.5s，逐次翻倍）
+_JITTER_RATIO = 0.2  # 退避抖动 ±20%，避免多实例同一时刻重试形成尖峰
 # 可重试的 OpenAI SDK 异常（瞬时）
 _RETRYABLE = (
     "RateLimitError",
@@ -73,8 +79,41 @@ def _is_retryable(e: Exception) -> bool:
     return any(type(e).__name__ == name for name in _RETRYABLE)
 
 
+def _retry_after(e: Exception) -> float | None:
+    """读取服务端 Retry-After（429/503 常用），支持秒数与 HTTP 日期两种格式。"""
+    resp = getattr(e, "response", None)
+    headers = getattr(resp, "headers", None)
+    if not headers:
+        return None
+    raw = headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        try:
+            from datetime import datetime
+            from email.utils import parsedate_to_datetime
+
+            dt = parsedate_to_datetime(raw)
+            return max(0.0, (dt - datetime.now(dt.tzinfo)).total_seconds())
+        except Exception:
+            return None
+
+
+def _sleep_before_retry(attempt: int, e: Exception) -> None:
+    """指数退避 + 抖动；服务端给了 Retry-After 时取两者较大值。"""
+    import random
+
+    delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
+    retry_after = _retry_after(e)
+    if retry_after is not None:
+        delay = max(delay, retry_after)
+    time.sleep(delay * random.uniform(1 - _JITTER_RATIO, 1 + _JITTER_RATIO))
+
+
 def _retry_call(fn, *args, **kwargs):
-    """带指数退避的重试包装。瞬时错误重试 ≤3 次（1s/2s/4s），耗尽后抛 LLMUnavailableError。
+    """带指数退避的重试包装。瞬时错误重试 ≤3 次（1.5s/3s/6s），耗尽后抛 LLMUnavailableError。
 
     不可重试的错误（AuthenticationError/BadRequestError/NotFoundError）原样抛出。
     """
@@ -86,7 +125,7 @@ def _retry_call(fn, *args, **kwargs):
             last_exc = e
             if not _is_retryable(e) or attempt == _MAX_RETRIES:
                 break
-            time.sleep(_RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)])
+            _sleep_before_retry(attempt, e)
     # 重试耗尽：瞬时错误转 LLMUnavailableError，配置/参数错误原样抛
     if last_exc is None:
         raise RuntimeError("_retry_call 退出但无异常（不应发生）")
@@ -131,6 +170,7 @@ class LLMClient:
                 api_key=embed_key,
                 timeout=config.llm_timeout,
             )
+        self._tracer = LangfuseTracer(config)
 
     def _ensure_key(self) -> None:
         if not self._config.llm_api_key:
@@ -147,169 +187,145 @@ class LLMClient:
         # 多数第三方提供商（如 DashScope 百炼）限制单批次请求不超过 25 条，取安全上限 20 自动子批次切分
         batch_size = min(getattr(self._config, "embed_batch_size", 20) or 20, 20)
         all_normalized: list[list[float]] = []
-        for i in range(0, len(texts), batch_size):
-            chunk_texts = texts[i : i + batch_size]
-            resp = self._embed_client.embeddings.create(model=self._embed_model, input=chunk_texts)
-            ordered = sorted(resp.data, key=lambda d: d.index)
-            # L2 归一化：sqlite-vec 默认用 L2（欧氏）距离，归一化后
-            # L2 距离与余弦距离等价（||a-b||² = 2(1-cos)），RAG 召回更准
-            all_normalized.extend([_normalize(d.embedding) for d in ordered])
+        total_usage: dict[str, int] = {"input": 0, "total": 0}
+        with self._tracer.observe_generation(
+            "llm.embed",
+            as_type="embedding",
+            model=self._embed_model,
+            input_data=texts if len(texts) <= 5 else {"count": len(texts), "sample": texts[:3]},
+            model_parameters={"dimensions": self._config.embed_dim, "batch_size": batch_size},
+        ) as obs:
+            for i in range(0, len(texts), batch_size):
+                chunk_texts = texts[i : i + batch_size]
+                # 显式传入配置的向量维度：vec0 表按 embed_dim 建，必须让模型输出同维向量，
+                # 否则写入/检索会维度不匹配（模型支持该参数时以配置为准，而非模型默认值）
+                resp = self._embed_client.embeddings.create(
+                    model=self._embed_model,
+                    input=chunk_texts,
+                    dimensions=self._config.embed_dim,
+                )
+                usage = extract_openai_usage(resp)
+                if usage:
+                    total_usage["input"] += usage.get("input", 0)
+                    total_usage["total"] += usage.get("total", 0)
+                ordered = sorted(resp.data, key=lambda d: d.index)
+                # L2 归一化：sqlite-vec 默认用 L2（欧氏）距离，归一化后
+                # L2 距离与余弦距离等价（||a-b||² = 2(1-cos)），RAG 召回更准
+                all_normalized.extend([_normalize(d.embedding) for d in ordered])
+            obs.update(
+                output={"vectors": len(all_normalized), "dim": self._config.embed_dim},
+                usage_details=total_usage if total_usage["total"] > 0 else None,
+            )
         return all_normalized
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed([text])[0]
 
-    def chat(self, messages: list[ChatMessage], thinking_level: str = "off", **kwargs) -> str:
+    def chat(
+        self,
+        messages: list[ChatMessage],
+        thinking_level: str = "off",
+        *,
+        model: str | None = None,
+        _vision_mode: bool = False,
+        **kwargs,
+    ) -> str:
+        """同步对话唯一底层出口（同时承接纯文本对话、单图 Vision、多图 Vision）。"""
         self._ensure_key()
+        target_model = model or self._chat_model
         # 合并思考级别参数（按模型族探测，off/不支持时为空 dict）
         call_kwargs = dict(kwargs)
-        thinking_params = resolve_thinking_params(self._chat_model, thinking_level)
-        if "extra_body" in thinking_params:
-            merged_extra = dict(call_kwargs.get("extra_body") or {})
-            merged_extra.update(thinking_params["extra_body"])
-            call_kwargs["extra_body"] = merged_extra
-        else:
-            call_kwargs.update(thinking_params)
+        if not _vision_mode:
+            thinking_params = resolve_thinking_params(target_model, thinking_level)
+            if "extra_body" in thinking_params:
+                merged_extra = dict(call_kwargs.get("extra_body") or {})
+                merged_extra.update(thinking_params["extra_body"])
+                call_kwargs["extra_body"] = merged_extra
+            else:
+                call_kwargs.update(thinking_params)
 
         req_id = uuid.uuid4().hex[:8]
         start_time = time.time()
+        tag = "LLM Vision" if _vision_mode else "LLM"
         logger.info(
-            "\n%s [LLM Request] (req_id=%s) %s\n"
+            "\n%s [%s Request] (req_id=%s) %s\n"
             "Model: %s\n"
             "Parameters: %s\n"
             "Messages (%d turns):\n%s\n%s",
             "=" * 28,
+            tag,
             req_id,
             "=" * 28,
-            self._chat_model,
+            target_model,
             call_kwargs,
             len(messages),
             _format_messages_for_log(messages),
             "=" * 78,
         )
 
-        try:
-            resp = _retry_call(
-                self._client.chat.completions.create,
-                model=self._chat_model,
-                messages=messages,
-                **call_kwargs,
-            )
-            content = resp.choices[0].message.content or ""
-            elapsed = time.time() - start_time
-            if not content.strip():
-                raise LLMUnavailableError("模型返回空回复，请重试或检查模型配置")
+        obs_name = "llm.chat_vision" if _vision_mode else "llm.chat"
+        with self._tracer.observe_generation(
+            obs_name,
+            model=target_model,
+            input_data=messages,
+            model_parameters={"thinking_level": thinking_level, **call_kwargs},
+        ) as obs:
+            try:
+                resp = _retry_call(
+                    self._client.chat.completions.create,
+                    model=target_model,
+                    messages=messages,
+                    **call_kwargs,
+                )
+                content = resp.choices[0].message.content or ""
+                elapsed = time.time() - start_time
+                if not content.strip():
+                    err_msg = (
+                        "模型返回空回复，请重试或检查视觉模型配置"
+                        if _vision_mode
+                        else "模型返回空回复，请重试或检查模型配置"
+                    )
+                    raise LLMUnavailableError(err_msg)
 
-            logger.info(
-                "\n%s [LLM Response] (req_id=%s, 耗时 %.2fs) %s\n" "%s\n%s",
-                "=" * 28,
-                req_id,
-                elapsed,
-                "=" * 28,
-                content,
-                "=" * 82,
-            )
-            return content
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(
-                "\n%s [LLM Error] (req_id=%s, 耗时 %.2fs) %s\n" "Error: %s\n%s",
-                "=" * 28,
-                req_id,
-                elapsed,
-                "=" * 28,
-                e,
-                "=" * 82,
-            )
-            raise
+                obs.update(
+                    output=content,
+                    usage_details=extract_openai_usage(resp),
+                )
+                logger.info(
+                    "\n%s [%s Response] (req_id=%s, 耗时 %.2fs) %s\n" "%s\n%s",
+                    "=" * 28,
+                    tag,
+                    req_id,
+                    elapsed,
+                    "=" * 28,
+                    content,
+                    "=" * 82,
+                )
+                return content
+            except Exception as e:
+                elapsed = time.time() - start_time
+                logger.error(
+                    "\n%s [%s Error] (req_id=%s, 耗时 %.2fs) %s\n" "Error: %s\n%s",
+                    "=" * 28,
+                    tag,
+                    req_id,
+                    elapsed,
+                    "=" * 28,
+                    e,
+                    "=" * 82,
+                )
+                raise
 
     def chat_with_image(
         self, prompt: str, image_base64: str, mime: str = "image/png", **kwargs
     ) -> str:
-        """多模态对话：发文本 + 图片（OpenAI 兼容 vision 协议），返回文本。
-
-        用 vision_model（空则回退 chat_model，与 ui executor 一致）。
-        图片以 data URL 形式传入：data:<mime>;base64,<image_base64>。
-        """
-        self._ensure_key()
-        model = self._config.vision_model or self._chat_model
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{image_base64}"},
-                    },
-                ],
-            }
-        ]
-
-        req_id = uuid.uuid4().hex[:8]
-        start_time = time.time()
-        logger.info(
-            "\n%s [LLM Vision Request] (req_id=%s) %s\n"
-            "Model: %s\n"
-            "Parameters: %s\n"
-            "Prompt: %s\n"
-            "Image: <mime=%s, base64_len=%d>\n%s",
-            "=" * 25,
-            req_id,
-            "=" * 25,
-            model,
-            kwargs,
-            prompt,
-            mime,
-            len(image_base64),
-            "=" * 78,
-        )
-
-        try:
-            resp = _retry_call(
-                self._client.chat.completions.create,
-                model=model,
-                messages=messages,
-                **kwargs,
-            )
-            content = resp.choices[0].message.content or ""
-            elapsed = time.time() - start_time
-            if not content.strip():
-                raise LLMUnavailableError("模型返回空回复，请重试或检查视觉模型配置")
-
-            logger.info(
-                "\n%s [LLM Vision Response] (req_id=%s, 耗时 %.2fs) %s\n" "%s\n%s",
-                "=" * 25,
-                req_id,
-                elapsed,
-                "=" * 25,
-                content,
-                "=" * 82,
-            )
-            return content
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(
-                "\n%s [LLM Vision Error] (req_id=%s, 耗时 %.2fs) %s\n" "Error: %s\n%s",
-                "=" * 25,
-                req_id,
-                elapsed,
-                "=" * 25,
-                e,
-                "=" * 82,
-            )
-            raise
+        """单图多模态对话：组装 OpenAI Vision 消息格式后委托给统一 chat() 出口。"""
+        return self.chat_with_images(prompt, [(image_base64, mime)], **kwargs)
 
     def chat_with_images(self, prompt: str, images: list[tuple[str, str]], **kwargs) -> str:
-        """多图多模态对话：发文本 + 多张图片（OpenAI 兼容 vision 协议），返回文本。
-
-        images: [(image_base64, mime), ...] 列表，至少 1 张。
-        每张图以 data URL 形式传入 content 数组。
-        用 vision_model（空则回退 chat_model，与 chat_with_image 一致）。
-        """
+        """多图多模态对话：组装 OpenAI Vision 消息格式后委托给统一 chat() 出口。"""
         assert images, "chat_with_images 至少需要 1 张图片"
-        self._ensure_key()
-        model = self._config.vision_model or self._chat_model
+        vision_model = self._config.vision_model or self._chat_model
         content: list[dict] = [{"type": "text", "text": prompt}]
         for image_base64, mime in images:
             content.append(
@@ -319,59 +335,7 @@ class LLMClient:
                 }
             )
         messages = [{"role": "user", "content": content}]
-
-        req_id = uuid.uuid4().hex[:8]
-        start_time = time.time()
-        logger.info(
-            "\n%s [LLM Multi-Vision Request] (req_id=%s) %s\n"
-            "Model: %s\n"
-            "Parameters: %s\n"
-            "Prompt: %s\n"
-            "Images Count: %d\n%s",
-            "=" * 23,
-            req_id,
-            "=" * 23,
-            model,
-            kwargs,
-            prompt,
-            len(images),
-            "=" * 78,
-        )
-
-        try:
-            resp = _retry_call(
-                self._client.chat.completions.create,
-                model=model,
-                messages=messages,
-                **kwargs,
-            )
-            content_out = resp.choices[0].message.content or ""
-            elapsed = time.time() - start_time
-            if not content_out.strip():
-                raise LLMUnavailableError("模型返回空回复，请重试或检查视觉模型配置")
-
-            logger.info(
-                "\n%s [LLM Multi-Vision Response] (req_id=%s, 耗时 %.2fs) %s\n" "%s\n%s",
-                "=" * 23,
-                req_id,
-                elapsed,
-                "=" * 23,
-                content_out,
-                "=" * 82,
-            )
-            return content_out
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(
-                "\n%s [LLM Multi-Vision Error] (req_id=%s, 耗时 %.2fs) %s\n" "Error: %s\n%s",
-                "=" * 23,
-                req_id,
-                elapsed,
-                "=" * 23,
-                e,
-                "=" * 82,
-            )
-            raise
+        return self.chat(messages, model=vision_model, _vision_mode=True, **kwargs)
 
     def stream_chat_raw(
         self, messages: list[ChatMessage], thinking_level: str = "off", **kwargs
@@ -413,86 +377,113 @@ class LLMClient:
             "=" * 87,
         )
 
-        # 流式启动重试（create 调用本身可能因限流/超时失败）
-        try:
-            stream = _retry_call(
-                self._client.chat.completions.create,
-                model=self._chat_model,
-                messages=messages,
-                stream=True,
-                **call_kwargs,
-            )
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(
-                "\n%s [LLM Stream Start Error] (req_id=%s, 耗时 %.2fs) %s\n" "Error: %s\n%s",
-                "=" * 25,
-                req_id,
-                elapsed,
-                "=" * 25,
-                e,
-                "=" * 87,
-            )
-            raise
-
-        has_any = False
-        collected_reasoning: list[str] = []
-        collected_content: list[str] = []
-
-        try:
-            for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if delta:
-                    # 兼容两家字段名：GLM/DeepSeek 用 reasoning_content，OpenAI o 系列原生 SDK 用 reasoning
-                    reasoning = getattr(delta, "reasoning_content", None) or getattr(
-                        delta, "reasoning", None
-                    )
-                    if reasoning:
-                        has_any = True
-                        collected_reasoning.append(reasoning)
-                        if thinking_level != "off":
-                            yield ("reasoning", reasoning)
-                    if delta.content:
-                        has_any = True
-                        collected_content.append(delta.content)
-                        yield ("content", delta.content)
-
-            elapsed = time.time() - start_time
-            # 空回复检测：整条流既无 content 也无 reasoning → 异常（不静默返回空）
-            if not has_any:
-                raise LLMUnavailableError("模型流式返回为空，请重试或检查模型配置")
-
-            full_reasoning = "".join(str(c) for c in collected_reasoning).strip()
-            full_content = "".join(str(c) for c in collected_content).strip()
-
-            log_parts = []
-            if full_reasoning:
-                log_parts.append(
-                    f"Reasoning/Thinking ({len(full_reasoning)} 字):\n{full_reasoning}"
+        with self._tracer.observe_generation(
+            "llm.stream_chat",
+            as_type="generation",
+            model=self._chat_model,
+            input_data=messages,
+            model_parameters={"thinking_level": thinking_level, **call_kwargs},
+            metadata={"req_id": req_id, "stream": True},
+        ) as obs:
+            # 流式启动重试（create 调用本身可能因限流/超时失败）
+            try:
+                stream = _retry_call(
+                    self._client.chat.completions.create,
+                    model=self._chat_model,
+                    messages=messages,
+                    stream=True,
+                    **call_kwargs,
                 )
-            log_parts.append(f"Content ({len(full_content)} 字):\n{full_content}")
+            except Exception as e:
+                elapsed = time.time() - start_time
+                logger.error(
+                    "\n%s [LLM Stream Start Error] (req_id=%s, 耗时 %.2fs) %s\n" "Error: %s\n%s",
+                    "=" * 25,
+                    req_id,
+                    elapsed,
+                    "=" * 25,
+                    e,
+                    "=" * 87,
+                )
+                raise
 
-            logger.info(
-                "\n%s [LLM Response (Stream)] (req_id=%s, 耗时 %.2fs) %s\n" "%s\n%s",
-                "=" * 25,
-                req_id,
-                elapsed,
-                "=" * 25,
-                "\n\n".join(log_parts),
-                "=" * 88,
-            )
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(
-                "\n%s [LLM Stream Error] (req_id=%s, 耗时 %.2fs) %s\n" "Error: %s\n%s",
-                "=" * 25,
-                req_id,
-                elapsed,
-                "=" * 25,
-                e,
-                "=" * 87,
-            )
-            raise
+            has_any = False
+            first_token_time = None
+            stream_usage = None
+            collected_reasoning: list[str] = []
+            collected_content: list[str] = []
+
+            try:
+                for chunk in stream:
+                    chunk_usage = extract_openai_usage(chunk)
+                    if chunk_usage:
+                        stream_usage = chunk_usage
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if delta:
+                        # 兼容两家字段名：GLM/DeepSeek 用 reasoning_content，OpenAI o 系列原生 SDK 用 reasoning
+                        reasoning = getattr(delta, "reasoning_content", None) or getattr(
+                            delta, "reasoning", None
+                        )
+                        if reasoning:
+                            if not has_any:
+                                first_token_time = utc_now()
+                            has_any = True
+                            collected_reasoning.append(reasoning)
+                            if thinking_level != "off":
+                                yield ("reasoning", reasoning)
+                        if delta.content:
+                            if not has_any:
+                                first_token_time = utc_now()
+                            has_any = True
+                            collected_content.append(delta.content)
+                            yield ("content", delta.content)
+
+                elapsed = time.time() - start_time
+                # 空回复检测：整条流既无 content 也无 reasoning → 异常（不静默返回空）
+                if not has_any:
+                    raise LLMUnavailableError("模型流式返回为空，请重试或检查模型配置")
+
+                full_reasoning = "".join(str(c) for c in collected_reasoning).strip()
+                full_content = "".join(str(c) for c in collected_content).strip()
+
+                obs.update(
+                    output=(
+                        {"content": full_content, "reasoning": full_reasoning}
+                        if full_reasoning
+                        else full_content
+                    ),
+                    completion_start_time=first_token_time,
+                    usage_details=stream_usage,
+                )
+
+                log_parts = []
+                if full_reasoning:
+                    log_parts.append(
+                        f"Reasoning/Thinking ({len(full_reasoning)} 字):\n{full_reasoning}"
+                    )
+                log_parts.append(f"Content ({len(full_content)} 字):\n{full_content}")
+
+                logger.info(
+                    "\n%s [LLM Response (Stream)] (req_id=%s, 耗时 %.2fs) %s\n" "%s\n%s",
+                    "=" * 25,
+                    req_id,
+                    elapsed,
+                    "=" * 25,
+                    "\n\n".join(log_parts),
+                    "=" * 88,
+                )
+            except Exception as e:
+                elapsed = time.time() - start_time
+                logger.error(
+                    "\n%s [LLM Stream Error] (req_id=%s, 耗时 %.2fs) %s\n" "Error: %s\n%s",
+                    "=" * 25,
+                    req_id,
+                    elapsed,
+                    "=" * 25,
+                    e,
+                    "=" * 87,
+                )
+                raise
 
     def stream_chat(self, messages: list[ChatMessage], **kwargs) -> Iterator[str]:
         """流式聊天（兼容旧）：只 yield content 文本（过滤 reasoning）。"""

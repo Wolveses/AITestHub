@@ -26,10 +26,10 @@ from pydantic import BaseModel
 
 from insight_aitest.platform.services.llm.config import AIConfig
 from insight_aitest.platform.services.kb.database import KBDatabase
-from insight_aitest.platform.services.kb.models import DocumentStatus
+from insight_aitest.platform.services.kb.models import DocumentStatus, EmbedStatus
 from insight_aitest.platform.services.kb.loader import get_loader
 from insight_aitest.platform.services.kb.loader.base import UnsupportedFormatError
-from insight_aitest.platform.services.kb.ingest import process_document
+from insight_aitest.platform.services.kb.ingest import _finalize_embed_status, process_document
 from insight_aitest.platform.services.tapd.labels import (
     PRIORITY_LABELS,
     SEVERITY_LABELS,
@@ -359,46 +359,101 @@ def delete_document(
     return {"deleted": doc_id}
 
 
-# 并发守护：同一文档同一时刻只允许一个重解析任务。
+# 并发守护：同一文档同一时刻只允许一个解析/向量化任务。
 # 多用户同时点同一文档 / 批量与单文档交叉触发时，重复任务会重复清块、
 # 重复调 embedding，并互相覆盖文档状态，因此在入口处占用槽位。
+# 重新解析与重新向量化共用一把锁、两个桶，保证两种任务对同一文档互斥。
 _reindex_lock = threading.Lock()
 _reindex_inflight: set[int] = set()
+_reembed_inflight: set[int] = set()
+
+
+def _reserve_doc_task(doc_id: int, bucket: set[int]) -> bool:
+    """占用文档任务槽位；解析与向量化任务互斥，已被占用返回 False。"""
+    with _reindex_lock:
+        if doc_id in _reindex_inflight or doc_id in _reembed_inflight:
+            return False
+        bucket.add(doc_id)
+        return True
 
 
 def _reserve_reindex(doc_id: int) -> bool:
-    """占用文档的重解析槽位；已被占用返回 False。"""
-    with _reindex_lock:
-        if doc_id in _reindex_inflight:
-            return False
-        _reindex_inflight.add(doc_id)
-        return True
+    """占用文档的重新解析槽位。"""
+    return _reserve_doc_task(doc_id, _reindex_inflight)
+
+
+def _reserve_reembed(doc_id: int) -> bool:
+    """占用文档的重新向量化槽位。"""
+    return _reserve_doc_task(doc_id, _reembed_inflight)
 
 
 def _release_reindex(doc_id: int) -> None:
     with _reindex_lock:
         _reindex_inflight.discard(doc_id)
+        _reembed_inflight.discard(doc_id)
 
 
 def is_reindexing(doc_id: int) -> bool:
-    """文档当前是否有重解析任务在跑（供批量入口跳过）。"""
+    """文档当前是否有解析/向量化任务在跑（供批量入口跳过）。"""
     with _reindex_lock:
-        return doc_id in _reindex_inflight
+        return doc_id in _reindex_inflight or doc_id in _reembed_inflight
 
 
-@router.post("/{doc_id}/reindex", response_model=DocumentOut)
-def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db), cfg=Depends(get_config)) -> DocumentOut:
-    """重新索引（删旧向量与 chunks，后台重新解析向量化）。
-
-    RAG 关闭时仍执行：清旧分块 → 重新解析分块 → 跳过向量化 → 状态 NOT_VECTORIZED。
-    向量化表是否存在由 _reindex_in_bg 内部查表决定，不依赖 cfg.vector_enabled。
-    """
+def _start_reparse(doc_id: int, db: KBDatabase) -> DocumentOut:
+    """启动后台重新解析（删旧向量与 chunks → 重新解析分块 → 向量化）。"""
     doc = db.get_document(doc_id)
     if not doc:
         raise HTTPException(404, "文档不存在")
     if not _reserve_reindex(doc_id):
-        raise HTTPException(409, "该文档正在重新解析中，请稍后再试")
+        raise HTTPException(409, "该文档正在解析或向量化中，请稍后再试")
     threading.Thread(target=_reindex_in_bg, args=(doc_id, db, True), daemon=True).start()
+    return _doc_to_out(db.get_document(doc_id))
+
+
+@router.post("/{doc_id}/reparse", response_model=DocumentOut)
+def reparse_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOut:
+    """重新解析：重新加载原始文件、重新分块并向量化。所有文档均可触发。"""
+    return _start_reparse(doc_id, db)
+
+
+@router.post("/{doc_id}/reindex", response_model=DocumentOut)
+def reindex_document(doc_id: int, db: KBDatabase = Depends(get_kb_db)) -> DocumentOut:
+    """兼容旧入口，等价于重新解析。"""
+    return _start_reparse(doc_id, db)
+
+
+@router.post("/{doc_id}/reembed", response_model=DocumentOut)
+def reembed_document(
+    doc_id: int, db: KBDatabase = Depends(get_kb_db), cfg=Depends(get_config)
+) -> DocumentOut:
+    """重新向量化：只对已有分块的文档重新计算向量，不重新解析。
+
+    仅允许非解析失败的终态文档；分块数必须与记录一致，避免对残缺数据做无效向量化。
+    """
+    if not getattr(cfg, "vector_enabled", False):
+        raise HTTPException(400, "向量检索未开启，无法重新向量化")
+    doc = db.get_document(doc_id)
+    if not doc:
+        raise HTTPException(404, "文档不存在")
+    if doc.status == DocumentStatus.PARSE_FAILED:
+        raise HTTPException(400, "解析失败的文档没有可用分块，请先重新解析")
+    if doc.status not in (
+        DocumentStatus.READY,
+        DocumentStatus.NOT_VECTORIZED,
+        DocumentStatus.EMBED_FAILED,
+        DocumentStatus.EMBED_PARTIAL,
+    ):
+        raise HTTPException(409, "文档正在处理中，请稍后再试")
+    chunks = db.get_chunks_by_document(doc_id)
+    if not chunks:
+        raise HTTPException(400, "文档尚未切块，请先重新解析")
+    if len(chunks) != doc.chunk_count:
+        raise HTTPException(
+            400, f"分块数据不一致（实际 {len(chunks)} / 记录 {doc.chunk_count}），请先重新解析"
+        )
+    if not _reserve_reembed(doc_id):
+        raise HTTPException(409, "该文档正在解析或向量化中，请稍后再试")
+    threading.Thread(target=_reembed_in_bg, args=(doc_id, db, True), daemon=True).start()
     return _doc_to_out(db.get_document(doc_id))
 
 
@@ -443,6 +498,82 @@ def _reindex_in_bg(doc_id: int, db: KBDatabase, reserved: bool = False) -> None:
         logger.exception("重新索引失败 doc_id=%s", doc_id)
         db.update_document_status(
             doc_id, DocumentStatus.EMBED_FAILED, error_message=f"重新索引失败: {e}"
+        )
+    finally:
+        _release_reindex(doc_id)
+
+
+def _reembed_in_bg(doc_id: int, db: KBDatabase, reserved: bool = False) -> None:
+    """后台重新向量化已有分块（不解析、不重新切块）。
+
+    允许降级：先删除旧向量再重新计算，任一批次失败最终置 embed_failed，
+    不保留旧向量（换 embedding 模型后旧向量维度/语义已不可用）。
+    """
+    if not reserved and not _reserve_reembed(doc_id):
+        logger.info("文档 %s 已在解析或向量化中，跳过重复任务", doc_id)
+        return
+    try:
+        llm = get_llm()
+        vs = get_vector_store()
+        cfg = get_config()
+        if not getattr(cfg, "vector_enabled", False):
+            db.update_document_status(
+                doc_id, DocumentStatus.NOT_VECTORIZED, error_message="向量检索未开启"
+            )
+            return
+        chunks = db.get_chunks_by_document(doc_id)
+        if not chunks:
+            db.update_document_status(
+                doc_id, DocumentStatus.PARSE_FAILED, error_message="没有可向量化的分块，请重新解析"
+            )
+            return
+        doc = db.get_document(doc_id)
+        if doc is not None and doc.chunk_count != len(chunks):
+            db.update_document_status(
+                doc_id,
+                DocumentStatus.EMBED_FAILED,
+                error_message=f"分块数据不一致（实际 {len(chunks)} / 记录 {doc.chunk_count}），请重新解析",
+            )
+            return
+        db.update_document_status(doc_id, DocumentStatus.EMBEDDING)
+        # 清旧向量 + 重置块级状态，避免旧向量与新向量混用、旧成功状态掩盖本次失败
+        vs.delete_document(doc_id)
+        conn = db.get_connection()
+        conn.execute(
+            "UPDATE chunks SET embed_status = ? WHERE document_id = ?",
+            (EmbedStatus.PENDING.value, doc_id),
+        )
+        conn.commit()
+        try:
+            vs.upsert_chunks(doc_id, chunks)
+        except Exception as e:
+            db.update_document_status(
+                doc_id, DocumentStatus.EMBED_FAILED, error_message=f"向量化失败: {e}"
+            )
+            return
+        # 校验向量行数与分块数一致，避免部分块未写入（API 返回条数不足等）却误判 ready
+        conn = db.get_connection()
+        has_vec_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'"
+        ).fetchone()
+        if has_vec_table:
+            vec_count = conn.execute(
+                "SELECT COUNT(*) FROM chunk_embeddings ce "
+                "JOIN chunks c ON c.id = ce.chunk_id WHERE c.document_id = ?",
+                (doc_id,),
+            ).fetchone()[0]
+            if vec_count != len(chunks):
+                db.update_document_status(
+                    doc_id,
+                    DocumentStatus.EMBED_FAILED,
+                    error_message=f"向量行数不一致（{vec_count}/{len(chunks)}），请重新向量化",
+                )
+                return
+        _finalize_embed_status(doc_id, db)
+    except Exception as e:
+        logger.exception("重新向量化失败 doc_id=%s", doc_id)
+        db.update_document_status(
+            doc_id, DocumentStatus.EMBED_FAILED, error_message=f"重新向量化失败: {e}"
         )
     finally:
         _release_reindex(doc_id)

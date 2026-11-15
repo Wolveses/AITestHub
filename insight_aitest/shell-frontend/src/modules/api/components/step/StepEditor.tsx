@@ -48,14 +48,14 @@ export function StepEditor({ step, onChange, onRemove }: {
       </div>
 
       <div style={{ marginBottom: 8 }}>
-        <div style={labelStyle}>Headers</div>
+        <div style={labelStyle}>{t('api.reqHeaders', '请求头')}</div>
         <KeyValueEditor pairs={toPairs(step.headers)} onChange={(p) => set({ headers: fromPairs(p) })} />
       </div>
 
       {step.method !== 'GET' && (
         <div style={{ marginBottom: 8 }}>
           <button onClick={() => setShowBody(!showBody)} style={{ ...btnStyle, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            Body {showBody ? <ChevronUp size={11} strokeWidth={1.5} /> : <ChevronDown size={11} strokeWidth={1.5} />}
+            {t('api.reqBody', '请求体')} {showBody ? <ChevronUp size={11} strokeWidth={1.5} /> : <ChevronDown size={11} strokeWidth={1.5} />}
           </button>
           {showBody && (
             <textarea style={{ ...inputStyle, width: '100%', minHeight: 60, marginTop: 4 }}
@@ -72,20 +72,20 @@ export function StepEditor({ step, onChange, onRemove }: {
         <div style={labelStyle}>{t('api.assertionLabel')}</div>
         {step.assertions.map((a, i) => (
           <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
-            <select style={{ ...methodStyle, width: 130 }} value={a.type}
+            <select style={{ ...methodStyle, width: 150 }} value={a.type}
               onChange={(e) => setAssertion(i, { type: e.target.value })}>
-              <option value="status_code">status_code</option>
-              <option value="header">header</option>
-              <option value="jsonpath">jsonpath</option>
-              <option value="response_time">response_time</option>
-              <option value="json_schema">json_schema</option>
-              <option value="contains">contains</option>
+              <option value="status_code">{t('testcase.assertionStatusCode', '状态码')}</option>
+              <option value="header">{t('testcase.assertionHeader', '响应头')}</option>
+              <option value="jsonpath">{t('testcase.assertionJsonPath', 'JSONPath')}</option>
+              <option value="response_time">{t('testcase.assertionResponseTime', '响应时间')}</option>
+              <option value="json_schema">{t('testcase.assertionJsonSchema', 'JSON Schema')}</option>
+              <option value="contains">{t('testcase.assertionContains', '包含')}</option>
             </select>
             {(a.type === 'header' || a.type === 'jsonpath' || a.type === 'contains') && (
-              <input style={inputStyle} placeholder="path" value={a.path || ''}
+              <input style={inputStyle} placeholder="路径 (如 $.data.id)" value={a.path || ''}
                 onChange={(e) => setAssertion(i, { path: e.target.value })} />
             )}
-            <input style={inputStyle} placeholder="expected" value={String(a.expected ?? '')}
+            <input style={inputStyle} placeholder={t('testcase.expectedValuePlaceholder', '期望值')} value={String(a.expected ?? '')}
               onChange={(e) => setAssertion(i, { expected: e.target.value })} />
             <button onClick={() => removeAssertion(i)} style={{ ...btnStyle, display: 'inline-flex', alignItems: 'center' }}>
               <X size={12} strokeWidth={1.5} />

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useConfigStore, type AIConfigUpdate, type ProviderOut, type ProviderUpsert } from '../store/configStore';
 import { Play, AlertTriangle, Plus, Trash2, Check, Zap, Edit3, ChevronDown, Sun, Moon } from 'lucide-react';
 import { useThemeStore, type Theme } from '@/shared/store/themeStore';
+import { useConfirmStore } from '@/shared/store/confirmStore';
 import { errorMessage } from '@/shared/utils/errorMessage';
 
 const inputStyle: React.CSSProperties = {
@@ -15,9 +16,12 @@ const labelStyle: React.CSSProperties = {
 
 export function SettingsPanel() {
   const { t } = useTranslation();
-  const { config, loading, saving, loadConfig, updateConfig } = useConfigStore();
+  const { config, loading, saving, loadConfig, updateConfig, testLangfuseConnection } = useConfigStore();
   const [form, setForm] = useState<AIConfigUpdate>({});
   const [vectorExpanded, setVectorExpanded] = useState(false);
+  const [langfuseExpanded, setLangfuseExpanded] = useState(false);
+  const [langfuseTesting, setLangfuseTesting] = useState(false);
+  const [langfuseMsg, setLangfuseMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   // 「与 LLM 保持一致」：URL 与 Key 都为空即视为复用 LLM 配置
   const [embedSameAsLlm, setEmbedSameAsLlm] = useState(false);
@@ -51,8 +55,13 @@ export function SettingsPanel() {
         embed_model: config.embed_model,
         embed_api_key: '',
         max_upload_mb: config.max_upload_mb ?? 100,
+        langfuse_enabled: config.langfuse_enabled ?? false,
+        langfuse_public_key: config.langfuse_public_key ?? '',
+        langfuse_secret_key: '',
+        langfuse_host: config.langfuse_host || 'http://localhost:3000',
       });
       setVectorExpanded(config.vector_enabled);
+      setLangfuseExpanded(Boolean(config.langfuse_enabled));
       setEmbedSameAsLlm(!config.embed_base_url && !config.embed_api_key_set);
       setRerankSameAsLlm(!config.rerank_base_url && !config.rerank_api_key_set);
     }
@@ -82,6 +91,9 @@ export function SettingsPanel() {
       } else if (!payload.rerank_api_key) {
         delete payload.rerank_api_key;
       }
+      if (!payload.langfuse_secret_key) {
+        delete payload.langfuse_secret_key;
+      }
       await updateConfig(payload);
       setMsg({ ok: true, text: t('settings.saved') });
     } catch (e) {
@@ -89,10 +101,30 @@ export function SettingsPanel() {
     }
   };
 
+  const handleTestLangfuse = async () => {
+    setLangfuseTesting(true);
+    setLangfuseMsg(null);
+    try {
+      const res = await testLangfuseConnection(
+        form.langfuse_host || 'http://localhost:3000',
+        form.langfuse_public_key || '',
+        form.langfuse_secret_key || '',
+      );
+      setLangfuseMsg({ ok: res.ok, text: res.message });
+    } catch (e) {
+      setLangfuseMsg({ ok: false, text: errorMessage(e, t('settings.saveFailed')) });
+    } finally {
+      setLangfuseTesting(false);
+    }
+  };
+
   return (
     <div style={{ padding: 24, overflow: 'auto', color: "var(--text-primary)" }}>
       {/* ===== 主题切换 ===== */}
       <ThemeSection />
+
+      {/* ===== 平台 LLM 自动化辅助能力总开关 ===== */}
+      <AiAssistSection />
 
       {/* ===== Provider 管理（Cursor 风格灵活切换）===== */}
       <ProviderSection />
@@ -295,6 +327,102 @@ export function SettingsPanel() {
         <NumInput value={form.history_turns} onChange={(v) => set('history_turns', v)} />
       </Row>
 
+      {/* ===== Langfuse 大模型可观测性（可折叠）===== */}
+      <div style={{ borderTop: '1px solid var(--bg-card)', margin: '24px 0 4px', paddingTop: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <button
+            onClick={() => setLangfuseExpanded((v) => !v)}
+            style={{
+              background: 'none', border: 'none', color: "var(--text-secondary)", cursor: 'pointer',
+              fontSize: 13, padding: 0, display: 'flex', alignItems: 'center', gap: 6,
+            }}
+          >
+            <Play size={12} strokeWidth={1.5} style={{ color: form.langfuse_enabled ? "var(--accent)" : 'var(--text-secondary)', transform: langfuseExpanded ? 'rotate(90deg)' : 'none', display: 'inline-flex' }} />
+            {t('settings.langfuseTitle')}{form.langfuse_enabled ? t('settings.langfuseEnabledTag') : t('settings.langfuseDisabledTag')}
+          </button>
+          {form.langfuse_host && (
+            <a
+              href={form.langfuse_host}
+              target="_blank"
+              rel="noreferrer"
+              style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none' }}
+            >
+              {t('settings.openLangfuseConsole')}
+            </a>
+          )}
+        </div>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, marginBottom: 0 }}>
+          {t('settings.langfuseHint')}
+        </p>
+      </div>
+
+      {langfuseExpanded && (
+        <>
+          <Row label={t('settings.enableLangfuse')}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: "var(--text-secondary)", cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={form.langfuse_enabled ?? false}
+                onChange={(e) => set('langfuse_enabled', e.target.checked)}
+              />
+              {t('settings.enableLangfuseHint')}
+            </label>
+          </Row>
+
+          <Row label={t('settings.langfuseHost')}>
+            <input
+              style={inputStyle}
+              value={form.langfuse_host ?? ''}
+              autoComplete="off"
+              placeholder={t('settings.langfuseHostPlaceholder')}
+              onChange={(e) => set('langfuse_host', e.target.value)}
+            />
+          </Row>
+
+          <Row label={t('settings.langfusePublicKey')}>
+            <input
+              style={inputStyle}
+              value={form.langfuse_public_key ?? ''}
+              autoComplete="off"
+              placeholder={t('settings.langfusePublicKeyPlaceholder')}
+              onChange={(e) => set('langfuse_public_key', e.target.value)}
+            />
+          </Row>
+
+          <Row label={t('settings.langfuseSecretKey')}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
+              <input
+                style={inputStyle}
+                type="password"
+                autoComplete="new-password"
+                value={form.langfuse_secret_key ?? ''}
+                placeholder={config.langfuse_secret_key_set ? t('settings.apiKeySet') : t('settings.langfuseSecretKeyPlaceholder')}
+                onChange={(e) => set('langfuse_secret_key', e.target.value)}
+              />
+              <button
+                type="button"
+                onClick={handleTestLangfuse}
+                disabled={langfuseTesting}
+                style={{
+                  background: 'none', border: '1px solid var(--bg-elevated)', color: "var(--text-secondary)",
+                  borderRadius: 4, padding: '6px 10px', cursor: langfuseTesting ? 'wait' : 'pointer',
+                  fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+                }}
+              >
+                <Zap size={12} strokeWidth={1.5} />
+                {langfuseTesting ? t('settings.testing') : t('settings.testConnection')}
+              </button>
+            </div>
+          </Row>
+
+          {langfuseMsg && (
+            <div style={{ marginLeft: 122, marginTop: 4, fontSize: 12, color: langfuseMsg.ok ? 'var(--chart-4)' : 'var(--error)' }}>
+              {langfuseMsg.text}
+            </div>
+          )}
+        </>
+      )}
+
       <div style={{ marginTop: 24, display: 'flex', alignItems: 'center', gap: 12 }}>
         <button
           onClick={saveRag}
@@ -317,6 +445,7 @@ export function SettingsPanel() {
 // ===== Provider 卡片管理区 =====
 function ProviderSection() {
   const { t } = useTranslation();
+  const confirm = useConfirmStore((s) => s.confirm);
   const { config, presets, loadPresets, upsertProvider, deleteProvider, activateProvider, testConnection, saving } = useConfigStore();
   const [editing, setEditing] = useState<ProviderOut | null>(null);
   const [adding, setAdding] = useState(false);
@@ -358,10 +487,19 @@ function ProviderSection() {
             isActive={p.id === config?.active_provider_id}
             onActivate={() => activateProvider(p.id)}
             onEdit={() => { setEditing(p); setAdding(false); }}
-            onDelete={async () => {
-              if (confirm(t('settings.confirmDeleteProvider', { name: p.name }))) {
-                try { await deleteProvider(p.id); } catch (e) { alert(errorMessage(e)); }
-              }
+            onDelete={() => {
+              confirm({
+                title: t('dialogs.confirmDelete', '确认删除'),
+                message: t('settings.confirmDeleteProvider', { name: p.name }),
+                variant: 'danger',
+                onConfirm: async () => {
+                  try {
+                    await deleteProvider(p.id);
+                  } catch (e) {
+                    alert(errorMessage(e));
+                  }
+                },
+              });
             }}
           />
         ))}
@@ -590,6 +728,68 @@ function ProviderEditor({ provider, presets, saving, onSave, onCancel, onTest }:
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+function AiAssistSection() {
+  const { t } = useTranslation();
+  const { config, saving, updateConfig } = useConfigStore();
+  const [statusMsg, setStatusMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const enabled = config?.ai_assist_enabled ?? true;
+
+  const handleToggle = async (next: boolean) => {
+    setStatusMsg(null);
+    try {
+      await updateConfig({ ai_assist_enabled: next });
+      setStatusMsg({
+        ok: true,
+        text: next ? t('settings.aiAssistUpdatedOn') : t('settings.aiAssistUpdatedOff'),
+      });
+    } catch (e) {
+      setStatusMsg({ ok: false, text: errorMessage(e, t('settings.saveFailed')) });
+    }
+  };
+
+  return (
+    <div style={{ borderTop: '1px solid var(--bg-card)', margin: '20px 0 4px', paddingTop: 14 }}>
+      <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <Play size={12} strokeWidth={1.5} style={{ color: enabled ? 'var(--accent)' : 'var(--text-muted)' }} />
+        <span>
+          {t('settings.aiAssistTitle')}
+          {enabled ? t('settings.aiAssistEnabledTag') : t('settings.aiAssistDisabledTag')}
+        </span>
+      </div>
+      <label
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          fontSize: 13,
+          color: 'var(--text-primary)',
+          cursor: saving ? 'wait' : 'pointer',
+          padding: '10px 12px',
+          background: 'var(--bg-card)',
+          border: '1px solid var(--bg-elevated)',
+          borderRadius: 6,
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={saving}
+          onChange={(e) => handleToggle(e.target.checked)}
+        />
+        <span>{t('settings.aiAssistToggleLabel')}</span>
+      </label>
+      <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
+        {t('settings.aiAssistScopeHint')}
+      </p>
+      {statusMsg && (
+        <div style={{ marginTop: 6, fontSize: 12, color: statusMsg.ok ? 'var(--chart-4)' : 'var(--error)' }}>
+          {statusMsg.text}
+        </div>
+      )}
     </div>
   );
 }

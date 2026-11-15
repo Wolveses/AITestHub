@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 
 /** 后端 GET /config 返回的脱敏配置（spec §6.6）。 */
 export interface AIConfig {
@@ -25,6 +26,13 @@ export interface AIConfig {
   embed_base_url: string;
   embed_api_key_set: boolean;
   max_upload_mb: number;
+  // Langfuse 可观测性
+  langfuse_enabled?: boolean;
+  langfuse_public_key?: string;
+  langfuse_secret_key_set?: boolean;
+  langfuse_host?: string;
+  // 非 Agent 平台 LLM 自动化辅助能力开关
+  ai_assist_enabled?: boolean;
   // 多 Provider
   providers: ProviderOut[];
   active_provider_id: string;
@@ -54,6 +62,11 @@ export interface AIConfigUpdate {
   embed_base_url?: string;
   embed_api_key?: string;
   max_upload_mb?: number;
+  langfuse_enabled?: boolean;
+  langfuse_public_key?: string;
+  langfuse_secret_key?: string;
+  langfuse_host?: string;
+  ai_assist_enabled?: boolean;
 }
 
 /** 后端返回的 Provider（api_key 脱敏为 api_key_set）。 */
@@ -96,6 +109,7 @@ interface ConfigState {
   deleteProvider: (providerId: string) => Promise<void>;
   activateProvider: (providerId: string) => Promise<void>;
   testConnection: (baseUrl: string, apiKey: string, model: string, providerId?: string) => Promise<{ ok: boolean; message: string }>;
+  testLangfuseConnection: (host: string, publicKey: string, secretKey: string) => Promise<{ ok: boolean; message: string }>;
 }
 
 const BASE = '/api/modules/ai';
@@ -111,6 +125,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
     try {
       const r = await fetch(`${BASE}/config`);
       const config = await r.json();
+      if (typeof config?.ai_assist_enabled === 'boolean') {
+        useCapabilitiesStore.getState().setAiAssistEnabled(config.ai_assist_enabled);
+      }
       set({ config });
     } finally {
       set({ loading: false });
@@ -130,6 +147,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
         throw new Error(msg || `保存失败（${r.status}）`);
       }
       const config = await r.json();
+      if (typeof config?.ai_assist_enabled === 'boolean') {
+        useCapabilitiesStore.getState().setAiAssistEnabled(config.ai_assist_enabled);
+      }
       set({ config });
     } finally {
       set({ saving: false });
@@ -159,6 +179,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
         throw new Error(msg || `保存失败（${r.status}）`);
       }
       const config = await r.json();
+      if (typeof config?.ai_assist_enabled === 'boolean') {
+        useCapabilitiesStore.getState().setAiAssistEnabled(config.ai_assist_enabled);
+      }
       set({ config });
     } finally {
       set({ saving: false });
@@ -176,6 +199,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
         throw new Error(msg || `删除失败（${r.status}）`);
       }
       const config = await r.json();
+      if (typeof config?.ai_assist_enabled === 'boolean') {
+        useCapabilitiesStore.getState().setAiAssistEnabled(config.ai_assist_enabled);
+      }
       set({ config });
     } finally {
       set({ saving: false });
@@ -193,6 +219,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
         throw new Error(msg || `切换失败（${r.status}）`);
       }
       const config = await r.json();
+      if (typeof config?.ai_assist_enabled === 'boolean') {
+        useCapabilitiesStore.getState().setAiAssistEnabled(config.ai_assist_enabled);
+      }
       set({ config });
     } finally {
       set({ saving: false });
@@ -204,6 +233,16 @@ export const useConfigStore = create<ConfigState>((set) => ({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model, provider_id: providerId || '' }),
+    });
+    const data = await r.json();
+    return { ok: !!data.ok, message: data.message || '' };
+  },
+
+  testLangfuseConnection: async (host: string, publicKey: string, secretKey: string) => {
+    const r = await fetch(`${BASE}/config/langfuse/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, public_key: publicKey, secret_key: secretKey }),
     });
     const data = await r.json();
     return { ok: !!data.ok, message: data.message || '' };

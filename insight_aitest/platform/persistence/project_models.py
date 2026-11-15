@@ -38,6 +38,8 @@ class Project(MappedAsDataclass, Base):
     name: Mapped[str] = mapped_column(Text, default="")
     description: Mapped[str] = mapped_column(Text, default="")
     color: Mapped[str] = mapped_column(Text, default="#00e5ff")  # 侧边栏标识色
+    # 当前选中环境（UI 自动化的「当前应用环境」，由环境切换写入；空表示回退默认环境）
+    current_env_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default_factory=datetime.now)
 

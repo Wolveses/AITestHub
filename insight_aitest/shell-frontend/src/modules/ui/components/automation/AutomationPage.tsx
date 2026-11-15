@@ -1,21 +1,24 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import { Download, Play, RefreshCw, Search, Settings2, Sparkles, Wrench, Eye, Square } from 'lucide-react';
+import { Download, Globe, Play, RefreshCw, Search, Sparkles, Wrench, Eye, Square, Bot, Activity } from 'lucide-react';
 import { useProjectStore } from '../../../../shared/store/projectStore';
 import { useConfirmStore } from '../../../../shared/store/confirmStore';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 import { ModuleHelpButton } from '../../../../shared/components/ModuleHelpButton';
-import { useAutomationStore, type AutomationCase } from '../../store/automationStore';
+import { useAutomationStore, type AutomationCase, fetchAuthoringActive, fetchAuthoringTriage, type AuthoringTriageSummary } from '../../store/automationStore';
 import { CategoryTree } from './CategoryTree';
 import { ImportCasesDialog } from './ImportCasesDialog';
 import { CaseDetailDrawer } from './CaseDetailDrawer';
-import { EnvManagerDialog } from './EnvManagerDialog';
+import { AgentAuthoringDialog } from './AgentAuthoringDialog';
+import { AuthoringProgressDialog } from './AuthoringProgressDialog';
 import { Btn, ErrorCategoryTag, StatusBadge, inputStyle } from './common';
 
 const ACTIVE_STATUSES = new Set(['generating', 'fixing', 'running']);
 
 export function AutomationPage() {
   const { t } = useTranslation();
+  const aiAssistEnabled = useCapabilitiesStore((s) => s.aiAssistEnabled);
   const { projects, currentProjectId, loadProjects } = useProjectStore();
   const { confirm } = useConfirmStore();
   const {
@@ -31,7 +34,9 @@ export function AutomationPage() {
     keyword,
     setKeyword,
     loadCases,
+    envs,
     loadEnvs,
+    switchEnv,
     generate,
     fix,
     cancelGenerate,
@@ -41,9 +46,37 @@ export function AutomationPage() {
   } = useAutomationStore();
 
   const [importOpen, setImportOpen] = useState(false);
-  const [envOpen, setEnvOpen] = useState(false);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(false);
+  const [activeCount, setActiveCount] = useState(0);
+  const [triageSummary, setTriageSummary] = useState<AuthoringTriageSummary | null>(null);
+  // 本地 Agent 处理进度快照：用例从进行中消失（已入库）或版本变化时刷新列表
+  const activeSnapshot = useRef<Map<number, string> | null>(null);
+
+  const selectedIds = useMemo(() => Array.from(selected), [selected]);
+  const allSelected = cases.length > 0 && cases.every((c) => selected.has(c.id));
+  const nothingToDo =
+    !!triageSummary &&
+    triageSummary.create + triageSummary.fix + (triageSummary.regenerate || 0) === 0;
+
+  const toggleSelect = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelected((prev) => {
+      if (cases.every((c) => prev.has(c.id))) return new Set();
+      return new Set(cases.map((c) => c.id));
+    });
+  };
 
   useEffect(() => {
     loadProjects();
@@ -81,7 +114,76 @@ export function AutomationPage() {
     return () => clearInterval(timer);
   }, [hasActive, loadCases]);
 
+  // 勾选后预判本轮动作（防抖；失败静默，不影响按钮可用）
+  useEffect(() => {
+    if (projectId === null || selectedIds.length === 0) {
+      setTriageSummary(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      fetchAuthoringTriage(projectId, selectedIds)
+        .then((r) => {
+          if (!cancelled) setTriageSummary(r.summary);
+        })
+        .catch(() => {
+          if (!cancelled) setTriageSummary(null);
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [projectId, selectedIds]);
+
+  // 进行中的编写任务数量（弹窗打开时由弹窗自身轮询并回传，避免重复请求）
+  useEffect(() => {
+    if (projectId === null || progressOpen) return;
+    activeSnapshot.current = null;
+    let stopped = false;
+    const tick = async () => {
+      if (document.hidden) return;
+      try {
+        const list = await fetchAuthoringActive(projectId);
+        if (stopped) return;
+        setActiveCount(list.length);
+        const next = new Map(list.map((item) => [item.case_id, `${item.stage}|${item.script_version}`]));
+        const prev = activeSnapshot.current;
+        // 首次只建基线；之后有新增/消失/阶段或版本变化，说明脚本链路推进了，刷新列表状态
+        if (prev && (prev.size !== next.size || Array.from(prev).some(([id, key]) => next.get(id) !== key))) {
+          void loadCases();
+        }
+        activeSnapshot.current = next;
+      } catch {
+        /* 静默，等待下次 */
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 5000);
+    const onVisible = () => {
+      if (!document.hidden) void tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [projectId, progressOpen]);
+
   const activeProjectName = projects.find((p) => p.id === projectId)?.name || '';
+
+  const currentEnv = envs.find((e) => e.is_default) || envs[0];
+
+  const handleEnvChange = async (envId: number) => {
+    try {
+      await switchEnv(envId);
+      const target = envs.find((e) => e.id === envId);
+      toast.success(t('ui.auto.envSwitched', '已切换到环境「{{name}}」', { name: target?.name || target?.base_url }));
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+  };
 
   const withBusy = async (id: number, fn: () => Promise<void>, okMsg: string) => {
     setBusyId(id);
@@ -103,6 +205,12 @@ export function AutomationPage() {
       onConfirm: async () => {
         try {
           await deleteCase(c.id);
+          setSelected((prev) => {
+            if (!prev.has(c.id)) return prev;
+            const next = new Set(prev);
+            next.delete(c.id);
+            return next;
+          });
           toast.success(t('ui.auto.deleted', '已删除'));
         } catch (e) {
           toast.error((e as Error).message);
@@ -171,9 +279,70 @@ export function AutomationPage() {
         <Btn variant="primary" onClick={() => setImportOpen(true)} disabled={projectId === null}>
           <Download size={14} /> {t('ui.auto.importCases', '导入用例')}
         </Btn>
-        <Btn onClick={() => setEnvOpen(true)} disabled={projectId === null}>
-          <Settings2 size={14} /> {t('ui.auto.manageEnv', '环境管理')}
+
+        <Btn
+          onClick={() => setAgentOpen(true)}
+          disabled={projectId === null || selected.size === 0}
+          title={
+            selected.size === 0
+              ? t('ui.auto.selectCasesFirst', '请先勾选用例')
+              : nothingToDo
+                ? t('ui.auto.nothingToDoHint', '选中用例均正在生成或执行中，暂无需处理')
+                : triageSummary
+                  ? t(
+                      'ui.auto.triageHint',
+                      '编写 {{create}} · 修复 {{fix}} · 重新生成 {{regenerate}} · 跳过 {{skip}}',
+                      {
+                        create: triageSummary.create,
+                        fix: triageSummary.fix,
+                        regenerate: triageSummary.regenerate || 0,
+                        skip: triageSummary.skip,
+                      },
+                    )
+                  : t('ui.auto.agentAuthoringHint', '生成文案并粘贴到本地 Agent，由它分诊后编写、修复或重新生成')
+          }
+        >
+          <Bot size={14} /> {t('ui.auto.agentAuthoring', '本地 Agent 生成/修复')}
+          {selected.size > 0 ? ` (${selected.size})` : ''}
         </Btn>
+
+        <Btn
+          onClick={() => setProgressOpen(true)}
+          disabled={projectId === null}
+          title={t('ui.auto.authoringProgressHint', '查看当前项目中校验/试跑通过、尚未入库的用例')}
+        >
+          <Activity size={14} /> {t('ui.auto.authoringProgress', '编写进度')}
+          {activeCount > 0 ? ` (${activeCount})` : ''}
+        </Btn>
+
+        {/* 环境快速切换下拉 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+          <Globe size={14} style={{ color: 'var(--text-muted)' }} />
+          <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{t('ui.auto.env', '环境')}:</span>
+          <select
+            value={currentEnv?.id ?? ''}
+            disabled={loading || envs.length === 0}
+            onChange={(e) => e.target.value && handleEnvChange(Number(e.target.value))}
+            style={{
+              ...inputStyle,
+              width: 'auto',
+              maxWidth: 240,
+              padding: '4px 8px',
+              fontSize: 12,
+              cursor: envs.length > 0 ? 'pointer' : 'default',
+            }}
+          >
+            {envs.length === 0 ? (
+              <option value="">{t('ui.auto.noEnvProjectTip', '暂无环境 (可在项目管理中添加)')}</option>
+            ) : (
+              envs.map((env) => (
+                <option key={env.id} value={env.id}>
+                  {env.name || '环境'} ({env.base_url}){env.is_default ? ' · 默认' : ''}
+                </option>
+              ))
+            )}
+          </select>
+        </div>
 
         <div style={{ flex: 1 }} />
 
@@ -218,7 +387,7 @@ export function AutomationPage() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 60px 110px 120px',
+              gridTemplateColumns: '28px 1fr 60px 110px 120px',
               gap: 8,
               padding: '8px 16px',
               fontSize: 11,
@@ -228,6 +397,15 @@ export function AutomationPage() {
               flexShrink: 0,
             }}
           >
+            <span style={{ display: 'flex', alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleSelectAll}
+                title={t('ui.auto.selectAll', '全选当前列表')}
+                style={{ accentColor: 'var(--accent)', cursor: 'pointer' }}
+              />
+            </span>
             <span>{t('ui.auto.caseTitle', '用例标题')}</span>
             <span>{t('ui.auto.site', '端')}</span>
             <span>{t('ui.auto.status', '状态')}</span>
@@ -249,7 +427,7 @@ export function AutomationPage() {
                     onClick={() => setDetailId(c.id)}
                     style={{
                       display: 'grid',
-                      gridTemplateColumns: '1fr 60px 110px 120px',
+                      gridTemplateColumns: '28px 1fr 60px 110px 120px',
                       gap: 8,
                       alignItems: 'center',
                       padding: '9px 16px',
@@ -260,6 +438,14 @@ export function AutomationPage() {
                     onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-hover)')}
                     onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
                   >
+                    <span style={{ display: 'flex', alignItems: 'center' }} onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(c.id)}
+                        onChange={() => toggleSelect(c.id)}
+                        style={{ accentColor: 'var(--accent)', cursor: 'pointer' }}
+                      />
+                    </span>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.title}>
                         {c.title}
@@ -304,15 +490,46 @@ export function AutomationPage() {
                     </span>
                     <div style={{ display: 'flex', gap: 4 }} onClick={(e) => e.stopPropagation()}>
                       {!c.has_script ? (
-                        <Btn size="sm" variant="primary" disabled={active} title={t('ui.auto.generateScript', '生成脚本')} onClick={() => withBusy(c.id, () => generate(c.id), t('ui.auto.generateQueued', '已提交生成任务'))}>
+                        <Btn
+                          size="sm"
+                          variant="primary"
+                          disabled={active || !aiAssistEnabled}
+                          title={
+                            !aiAssistEnabled
+                              ? t('ui.auto.aiAssistDisabledHint', '系统设置已关闭内置 LLM 脚本生成，请改用「本地 Agent」或前往系统设置开启')
+                              : t('ui.auto.generateScript', '生成脚本')
+                          }
+                          onClick={() => withBusy(c.id, () => generate(c.id), t('ui.auto.generateQueued', '已提交生成任务'))}
+                        >
                           <Sparkles size={12} />
                         </Btn>
                       ) : (
-                        <Btn size="sm" disabled={active} title={c.status === 'implemented' ? t('ui.auto.runScript', '执行') : t('ui.auto.generateScript', '生成脚本')} onClick={() => c.status === 'implemented' ? withBusy(c.id, () => run(c.id), t('ui.auto.runQueued', '已提交执行任务')) : withBusy(c.id, () => generate(c.id), t('ui.auto.generateQueued', '已提交生成任务'))}>
+                        <Btn
+                          size="sm"
+                          disabled={active || (c.status !== 'implemented' && !aiAssistEnabled)}
+                          title={
+                            c.status === 'implemented'
+                              ? t('ui.auto.runScript', '执行')
+                              : !aiAssistEnabled
+                                ? t('ui.auto.aiAssistDisabledHint', '系统设置已关闭内置 LLM 脚本生成，请改用「本地 Agent」或前往系统设置开启')
+                                : t('ui.auto.generateScript', '生成脚本')
+                          }
+                          onClick={() => c.status === 'implemented' ? withBusy(c.id, () => run(c.id), t('ui.auto.runQueued', '已提交执行任务')) : withBusy(c.id, () => generate(c.id), t('ui.auto.generateQueued', '已提交生成任务'))}
+                        >
                           {c.status === 'implemented' ? <Play size={12} /> : <RefreshCw size={12} />}
                         </Btn>
                       )}
-                      <Btn size="sm" variant="ghost" disabled={active || c.status !== 'implemented'} title={t('ui.auto.autoFix', '自动修复')} onClick={() => withBusy(c.id, () => fix(c.id), t('ui.auto.fixQueued', '已提交修复任务'))}>
+                      <Btn
+                        size="sm"
+                        variant="ghost"
+                        disabled={active || c.status !== 'implemented' || !aiAssistEnabled}
+                        title={
+                          !aiAssistEnabled
+                            ? t('ui.auto.aiAssistDisabledHint', '系统设置已关闭内置 LLM 脚本生成，请改用「本地 Agent」或前往系统设置开启')
+                            : t('ui.auto.autoFix', '自动修复')
+                        }
+                        onClick={() => withBusy(c.id, () => fix(c.id), t('ui.auto.fixQueued', '已提交修复任务'))}
+                      >
                         <Wrench size={12} />
                       </Btn>
                       {generating && (
@@ -333,15 +550,40 @@ export function AutomationPage() {
             )}
           </div>
 
-          <div style={{ padding: '6px 16px', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>
-            {activeProjectName} · {t('ui.auto.total', '共 {{count}} 条', { count: total })}
+          <div style={{ padding: '6px 16px', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span>
+              {activeProjectName} · {t('ui.auto.total', '共 {{count}} 条', { count: total })}
+            </span>
+            {currentEnv && (
+              <span style={{ color: 'var(--text-secondary)' }}>
+                {t('ui.auto.currentEnv', '当前环境')}: <strong style={{ color: 'var(--accent)' }}>{currentEnv.name || '环境'}</strong> ({currentEnv.base_url})
+              </span>
+            )}
           </div>
         </div>
       </div>
 
       <ImportCasesDialog open={importOpen} onClose={() => setImportOpen(false)} />
-      <EnvManagerDialog open={envOpen} onClose={() => setEnvOpen(false)} />
       <CaseDetailDrawer caseId={detailId} onClose={() => setDetailId(null)} />
+      <AgentAuthoringDialog
+        open={agentOpen}
+        onClose={() => {
+          setAgentOpen(false);
+          setTriageSummary(null);
+          loadCases();
+        }}
+        projectId={projectId}
+        caseIds={selectedIds}
+      />
+      <AuthoringProgressDialog
+        open={progressOpen}
+        onClose={() => {
+          setProgressOpen(false);
+          loadCases();
+        }}
+        projectId={projectId}
+        onCount={setActiveCount}
+      />
     </div>
   );
 }

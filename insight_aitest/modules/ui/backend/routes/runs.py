@@ -101,6 +101,14 @@ async def execute_case(
     base_url: str | None = Query(None),
     db: UIRunDatabase = Depends(get_run_db),
 ) -> dict:
+    from insight_aitest.platform.services.kb.deps import is_ai_assist_enabled
+
+    if not is_ai_assist_enabled():
+        raise HTTPException(
+            403,
+            "系统设置已关闭「LLM 自动化辅助能力」，暂不可使用 UI 视觉模型执行；"
+            "请改用 UI 自动化脚本执行或前往系统设置开启",
+        )
     case = _fetch_case_from_d(body.case_id)
     if not case:
         raise HTTPException(404, f"用例 {body.case_id} 不存在")

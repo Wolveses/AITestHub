@@ -22,6 +22,10 @@ export interface AutomationCase {
   status: string;
   script_version: number;
   has_script: boolean;
+  /** 脚本来处：ai（平台）/ local_agent（本地 Agent 提交） */
+  source?: string;
+  authoring_by?: string;
+  authoring_at?: string | null;
   last_error_category: string | null;
   last_error_message: string | null;
   last_run_id: number | null;
@@ -85,6 +89,8 @@ export interface UIEnv {
   token_prefix?: string;
   is_default: boolean;
   has_storage_state: boolean;
+  /** 是否允许本地 Agent 通过 MCP 获取该环境的认证信息 */
+  allow_local_agent?: boolean;
 }
 
 export interface ScriptTemplate {
@@ -119,10 +125,16 @@ export interface GenerationRecord {
   error_message: string | null;
   tool_calls: number;
   model: string;
+  /** local_agent | platform（后端派生） */
+  origin?: 'local_agent' | 'platform';
   corpus_chars: number;
   prompt_chars: number;
   completion_chars: number;
   fix_rounds: number;
+  /** 过程日志相对路径；本地 Agent 会话建行时即写入 */
+  log_rel_path?: string;
+  has_log?: boolean;
+  duration_ms?: number | null;
   /** 生成成功时首跑的终态截图可预览 */
   has_screenshot: boolean;
   started_at: string | null;
@@ -156,6 +168,7 @@ interface AutomationState {
   ) => Promise<{ created: number; skipped: number; failed: unknown[] }>;
   generate: (caseId: number) => Promise<void>;
   fix: (caseId: number) => Promise<void>;
+  regenerate: (caseId: number) => Promise<void>;
   cancelGenerate: (caseId: number) => Promise<void>;
   run: (caseId: number) => Promise<void>;
   getCase: (caseId: number) => Promise<AutomationCase>;
@@ -173,7 +186,9 @@ interface AutomationState {
   listRuns: (caseId: number) => Promise<ScriptRun[]>;
   listGenerations: (caseId: number) => Promise<GenerationRecord[]>;
   saveEnv: (data: Record<string, unknown>, envId?: number) => Promise<UIEnv>;
+  cloneEnv: (envId: number, newName?: string) => Promise<UIEnv>;
   deleteEnv: (envId: number) => Promise<void>;
+  switchEnv: (envId: number) => Promise<void>;
   testEnv: (envId: number, payload?: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
   testCustomEnv: (payload: Record<string, unknown>) => Promise<{ ok: boolean; message: string; token?: string }>;
   loadTemplates: () => Promise<ScriptTemplate[]>;
@@ -298,6 +313,12 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
     await get().loadCases();
   },
 
+  regenerate: async (caseId) => {
+    const r = await fetch(`${BASE}/cases/${caseId}/regenerate`, { method: 'POST' });
+    if (!r.ok) throw new Error(await parseError(r));
+    await get().loadCases();
+  },
+
   cancelGenerate: async (caseId) => {
     const r = await fetch(`${BASE}/cases/${caseId}/cancel`, { method: 'POST' });
     if (!r.ok) throw new Error(await parseError(r));
@@ -375,8 +396,29 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
     return await r.json();
   },
 
+  cloneEnv: async (envId, newName) => {
+    const r = await fetch(`${BASE}/envs/${envId}/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ new_name: newName || undefined }),
+    });
+    if (!r.ok) throw new Error(await parseError(r));
+    await get().loadEnvs();
+    return await r.json();
+  },
+
   deleteEnv: async (envId) => {
     const r = await fetch(`${BASE}/envs/${envId}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await parseError(r));
+    await get().loadEnvs();
+  },
+
+  switchEnv: async (envId) => {
+    const r = await fetch(`${BASE}/envs/${envId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_default: true }),
+    });
     if (!r.ok) throw new Error(await parseError(r));
     await get().loadEnvs();
   },
@@ -432,3 +474,165 @@ export const useAutomationStore = create<AutomationState>((set, get) => ({
     return await r.json();
   },
 }));
+
+// ===== 本地 Agent 编写（MCP）=====
+
+export type AuthoringMode = 'auto' | 'create' | 'fix' | 'regenerate';
+
+export interface AuthoringTriageItem {
+  case_id: number;
+  title: string;
+  site: string;
+  status: string;
+  case_rev: string;
+  has_script: boolean;
+  script_version: number;
+  last_run: {
+    run_id: number;
+    status: string;
+    finished_at: string | null;
+    duration_ms: number | null;
+    error: string;
+  } | null;
+  action: 'create' | 'fix' | 'regenerate' | 'skip';
+  reason: string;
+  next_tool: string | null;
+  mode?: 'auto' | 'regenerate';
+}
+
+export interface AuthoringTriageSummary {
+  create: number;
+  fix: number;
+  regenerate: number;
+  skip: number;
+}
+
+export interface AuthoringPrompt {
+  ok: boolean;
+  project_id: number;
+  project_name: string;
+  case_ids: number[];
+  skipped_case_ids: number[];
+  mode: AuthoringMode;
+  action_required: number;
+  summary: AuthoringTriageSummary;
+  cases: AuthoringTriageItem[];
+  prompt: string | null;
+  token: string | null;
+  mcp_url: string;
+  token_id: number | null;
+  expires_at: string | null;
+}
+
+export interface AuthoringToken {
+  id: number;
+  name: string;
+  prefix: string;
+  created_at: string | null;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked: boolean;
+  expired: boolean;
+  active: boolean;
+}
+
+export interface AuthoringEvent {
+  id: number;
+  case_id: number;
+  kind: string;
+  message: string;
+  payload: Record<string, unknown>;
+  created_at: string | null;
+}
+
+export interface AuthoringStatusItem {
+  case_id: number;
+  exists: boolean;
+  title?: string;
+  status?: string;
+  script_version?: number;
+  source?: string;
+  authoring_at?: string | null;
+  stage?: string;
+  last_error?: string;
+  latest_event_id?: number;
+  recent_events?: AuthoringEvent[];
+}
+
+export interface AuthoringActiveItem {
+  case_id: number;
+  title: string;
+  status: string;
+  stage: string;
+  script_version: number;
+  source_hash: string;
+  last_error: string;
+  updated_at: string | null;
+  busy: boolean;
+  latest_event: { message: string; created_at: string | null } | null;
+}
+
+export async function fetchAuthoringActive(projectId: number): Promise<AuthoringActiveItem[]> {
+  const r = await fetch(`${BASE}/authoring/active?project_id=${projectId}`);
+  if (!r.ok) throw new Error(await parseError(r));
+  const data = await r.json();
+  return data.items || [];
+}
+
+const EMPTY_TRIAGE_SUMMARY: AuthoringTriageSummary = {
+  create: 0,
+  fix: 0,
+  regenerate: 0,
+  skip: 0,
+};
+
+export async function fetchAuthoringTriage(
+  projectId: number,
+  caseIds: number[],
+  mode: 'auto' | 'regenerate' = 'auto'
+): Promise<{ summary: AuthoringTriageSummary; items: AuthoringTriageItem[] }> {
+  if (caseIds.length === 0) return { summary: { ...EMPTY_TRIAGE_SUMMARY }, items: [] };
+  const q = new URLSearchParams({
+    project_id: String(projectId),
+    case_ids: caseIds.join(','),
+    mode,
+  });
+  const r = await fetch(`${BASE}/authoring/triage?${q.toString()}`);
+  if (!r.ok) throw new Error(await parseError(r));
+  const data = await r.json();
+  return { summary: data.summary || { ...EMPTY_TRIAGE_SUMMARY }, items: data.items || [] };
+}
+
+export async function requestAuthoringPrompt(
+  projectId: number,
+  caseIds: number[],
+  mode: AuthoringMode = 'auto'
+): Promise<AuthoringPrompt> {
+  const r = await fetch(`${BASE}/authoring/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: projectId, case_ids: caseIds, mode }),
+  });
+  if (!r.ok) throw new Error(await parseError(r));
+  return await r.json();
+}
+
+export async function fetchAuthoringTokens(projectId: number): Promise<AuthoringToken[]> {
+  const r = await fetch(`${BASE}/authoring/tokens?project_id=${projectId}`);
+  if (!r.ok) throw new Error(await parseError(r));
+  const data = await r.json();
+  return data.items || [];
+}
+
+export async function revokeAuthoringToken(projectId: number, tokenId: number): Promise<void> {
+  const r = await fetch(`${BASE}/authoring/tokens/${tokenId}?project_id=${projectId}`, { method: 'DELETE' });
+  if (!r.ok) throw new Error(await parseError(r));
+}
+
+export async function fetchAuthoringStatus(caseIds: number[]): Promise<AuthoringStatusItem[]> {
+  if (caseIds.length === 0) return [];
+  const r = await fetch(`${BASE}/authoring/status?case_ids=${caseIds.join(',')}`);
+  if (!r.ok) throw new Error(await parseError(r));
+  const data = await r.json();
+  return data.items || [];
+}

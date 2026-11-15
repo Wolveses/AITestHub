@@ -71,6 +71,10 @@ export interface TaskReportSummaryItem {
   error: string;
   run_id: number | null;
   artifacts_rel_path: string;
+  /** 以下为执行产物探测结果，旧批次数据可能缺失 */
+  trace_rel_path?: string;
+  has_final?: boolean;
+  has_failure?: boolean;
 }
 
 export interface TaskReportData {

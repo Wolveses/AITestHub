@@ -173,13 +173,15 @@ def run_script(
     pages_root: Path | None = None,
     retries: int = 0,
     cancel_check: Callable[[], bool] | None = None,
+    capture_network: bool = False,
 ) -> dict:
     """执行一个固化脚本，返回结果摘要（不写 ui_runs，由调用方决定是否落库）。
 
     retries: 失败后额外重试次数（仅用于吸收 UI 抖动，默认 0）。
-    pages_root: 覆盖项目资产根目录（含 common/ 与 pages/ 包）。生成期首跑传暂存目录，
-        避免未验证的资产污染正式目录；不传时默认 ``scripts/<project_id>``。
+    pages_root: 资产根目录（含 common/ 与 pages/ 包）的**优先**覆盖。生成期首跑传暂存目录，
+        暂存目录内的同名资产优先；未提交的存量资产仍从 ``scripts/<project_id>`` 解析。
     cancel_check: 生成期首跑传入终止检查，返回 True 时立即杀掉 pytest 子进程。
+    capture_network: 仅生成期首跑开启，脚手架据此采集网络请求（默认关闭）。
     """
     if env is None:
         raise EnvMissingError("项目未配置环境，请先在环境管理中新增并测试通过")
@@ -237,21 +239,21 @@ def run_script(
             "INSIGHT_UI_HEADERS": json.dumps(auth.headers, ensure_ascii=False),
             "INSIGHT_UI_TOKEN": auth.token or "",
             "INSIGHT_UI_TIMEOUT_MS": "15000",
+            "INSIGHT_UI_CAPTURE_NETWORK": "1" if capture_network else "0",
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUTF8": "1",
         }
     )
-    # 子进程 cwd 在用例目录，需显式补仓库根目录（import 脚手架插件）与资产根目录（import common/pages）
+    # 子进程 cwd 在用例目录，需显式补仓库根目录（import 脚手架插件）与资产根目录（import common/pages）。
+    # 暂存目录必须排在项目资产目录之前：同名资产以本次提交为准，未提交的存量资产仍可复用。
     existing = child_env.get("PYTHONPATH") or ""
-    child_env["PYTHONPATH"] = os.pathsep.join(
-        p
-        for p in (
-            str(REPO_ROOT),
-            str(pages_root or paths.project_scripts_dir(project_id)),
-            existing,
-        )
-        if p
-    )
+    roots = [str(REPO_ROOT)]
+    if pages_root:
+        roots.append(str(pages_root))
+    roots.append(str(paths.project_scripts_dir(project_id)))
+    if existing:
+        roots.append(existing)
+    child_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(p for p in roots if p))
 
     started = time.time()
     status = RunStatus.ERROR
@@ -278,6 +280,9 @@ def run_script(
                     str(script),
                     # -v 让每个用例的进度逐行输出，前端看到的执行过程更具体
                     "-v",
+                    # -s 关闭 pytest 的输出捕获：脚本里的 print 实时写进 stdout.log，
+                    # 执行记录的「日志」才能看到每步操作/输入值/断言实际值
+                    "-s",
                     "-p",
                     "no:cacheprovider",
                     # 脚手架以插件形式加载（不在用例目录写 conftest）

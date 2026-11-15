@@ -3,6 +3,7 @@ import { Play, ArrowLeft, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-r
 import { useTranslation } from 'react-i18next';
 import { useRunStore } from './store/runStore';
 import { useProjectStore } from '../../shared/store/projectStore';
+import { useCapabilitiesStore } from '@/shared/store/capabilitiesStore';
 import { useIsMobile } from '../../shared/hooks/useIsMobile';
 import { CasePicker } from '../../shared/components/CasePicker';
 import { RunList } from '../../shared/components/RunList';
@@ -33,6 +34,7 @@ export function ExecTab() {
   const { cases, loadingCases, selectedCaseId, runs, selectedRun, executing, execError,
           loadCases, selectCase, execute, loadRunDetail } = useRunStore();
   const { t } = useTranslation();
+  const aiAssistEnabled = useCapabilitiesStore((s) => s.aiAssistEnabled);
   const [baseUrl, setBaseUrl] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [config, setConfig] = useState(loadConfig);
@@ -130,11 +132,25 @@ export function ExecTab() {
           )}
 
           {selectedCase && (
-            <button onClick={() => execute(selectedCase.id, baseUrl || undefined, config)} disabled={executing} style={{
-              background: "var(--accent)", color: "var(--bg-base)", border: 'none', borderRadius: 4,
-              padding: '6px 12px', cursor: executing ? 'wait' : 'pointer', fontSize: 12, fontWeight: 600,
-              display: 'inline-flex', alignItems: 'center', gap: 4,
-            }}>{executing ? t('ui.executing') : <><Play size={12} strokeWidth={1.5} /> {t('ui.run')}</>}</button>
+            <>
+              <button
+                onClick={() => execute(selectedCase.id, baseUrl || undefined, config)}
+                disabled={executing || !aiAssistEnabled}
+                title={!aiAssistEnabled ? '系统设置已关闭「LLM 自动化辅助能力」，暂不可使用视觉模型执行' : undefined}
+                style={{
+                  background: "var(--accent)", color: "var(--bg-base)", border: 'none', borderRadius: 4,
+                  padding: '6px 12px', cursor: executing ? 'wait' : !aiAssistEnabled ? 'not-allowed' : 'pointer',
+                  opacity: !aiAssistEnabled ? 0.5 : 1,
+                  fontSize: 12, fontWeight: 600,
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                }}
+              >{executing ? t('ui.executing') : <><Play size={12} strokeWidth={1.5} /> {t('ui.run')}</>}</button>
+              {!aiAssistEnabled && (
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  系统设置已关闭 LLM 自动化辅助，视觉执行已禁用
+                </div>
+              )}
+            </>
           )}
         </div>
         {selectedCase ? (

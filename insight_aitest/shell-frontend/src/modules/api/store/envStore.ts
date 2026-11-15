@@ -1,9 +1,11 @@
 import { create } from 'zustand'
 
 export interface Environment {
-  id: number; name: string; base_url: string
-  variables: Record<string, string>; is_default: boolean
-  variables_meta?: Record<string, string>
+  id: number
+  name: string
+  base_url: string
+  project_id?: number | null
+  is_default: boolean
 }
 
 async function _jsonOrThrow(r: Response) {
@@ -17,35 +19,37 @@ async function _jsonOrThrow(r: Response) {
 interface EnvState {
   envs: Environment[]
   loading: boolean
-  loadEnvs: () => Promise<void>
-  createEnv: (data: { name: string; base_url: string; variables?: Record<string,string>; is_default?: boolean }) => Promise<void>
+  loadEnvs: (projectId?: number | null) => Promise<void>
   updateEnv: (id: number, data: Partial<Environment>) => Promise<void>
-  deleteEnv: (id: number) => Promise<void>
 }
 
-const BASE = '/api/modules/api/environments'
+// 统一复用 UI 自动化的环境接口
+const BASE = '/api/modules/ui/automation/envs'
 
 export const useEnvStore = create<EnvState>((set, get) => ({
-  envs: [], loading: false,
-  loadEnvs: async () => {
+  envs: [],
+  loading: false,
+  loadEnvs: async (projectId?: number | null) => {
     set({ loading: true })
-    try { const r = await fetch(`${BASE}`); set({ envs: await _jsonOrThrow(r) }) }
-    catch (e) { console.error('loadEnvs failed:', e); throw e }
-    finally { set({ loading: false }) }
-  },
-  createEnv: async (data) => {
-    const r = await fetch(BASE, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) })
-    await _jsonOrThrow(r)
-    await get().loadEnvs()
+    try {
+      const url = projectId ? `${BASE}?project_id=${projectId}` : BASE
+      const r = await fetch(url)
+      set({ envs: await _jsonOrThrow(r) })
+    } catch (e) {
+      console.error('loadEnvs failed:', e)
+      throw e
+    } finally {
+      set({ loading: false })
+    }
   },
   updateEnv: async (id, data) => {
-    const r = await fetch(`${BASE}/${id}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) })
+    const r = await fetch(`${BASE}/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })
     await _jsonOrThrow(r)
-    await get().loadEnvs()
-  },
-  deleteEnv: async (id) => {
-    const r = await fetch(`${BASE}/${id}`, { method: 'DELETE' })
-    if (!r.ok) throw new Error(`删除环境失败: ${r.status}`)
-    await get().loadEnvs()
+    const currentProj = get().envs.find((e) => e.id === id)?.project_id
+    await get().loadEnvs(currentProj)
   },
 }))

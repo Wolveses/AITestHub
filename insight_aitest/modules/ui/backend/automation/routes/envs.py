@@ -10,11 +10,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from insight_aitest.modules.ui.backend.automation.database import UIAutomationDatabase
+from insight_aitest.modules.ui.backend.automation.current_env import (
+    current_env_id,
+    set_current_env,
+)
 from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
 from insight_aitest.modules.ui.backend.automation.env_service import (
     AUTH_SCRIPT_TEMPLATES,
     delete_password,
     env_public,
+    get_password,
     get_project_auth_script,
     set_project_auth_script,
     set_password,
@@ -35,6 +40,7 @@ class EnvIn(BaseModel):
     token_name: str = "token"
     token_prefix: str = ""
     is_default: bool = False
+    allow_local_agent: bool = True
 
 
 class EnvPatch(BaseModel):
@@ -48,9 +54,15 @@ class EnvPatch(BaseModel):
     token_prefix: str | None = None
     clear_password: bool = False
     is_default: bool | None = None
+    allow_local_agent: bool | None = None
+
+
+class EnvCloneIn(BaseModel):
+    new_name: str | None = None
 
 
 class EnvTestPayload(BaseModel):
+    project_id: int | None = None
     base_url: str | None = None
     username: str | None = None
     password: str | None = None
@@ -104,7 +116,10 @@ def create_env(body: EnvIn, db: UIAutomationDatabase = Depends(get_automation_db
         token_name=body.token_name or "token",
         token_prefix=body.token_prefix or "",
         is_default=1 if body.is_default else 0,
+        allow_local_agent=1 if body.allow_local_agent else 0,
     )
+    if body.is_default:
+        set_current_env(body.project_id, env_id)
     return env_public(db.get_env(env_id))
 
 
@@ -126,7 +141,11 @@ def update_env(
     fields.pop("password", None)
     if "is_default" in fields:
         fields["is_default"] = 1 if fields["is_default"] else 0
+    if "allow_local_agent" in fields:
+        fields["allow_local_agent"] = 1 if fields["allow_local_agent"] else 0
     db.update_env(env_id, **fields)
+    if fields.get("is_default") == 1:
+        set_current_env(env.project_id, env_id)
     return env_public(db.get_env(env_id))
 
 
@@ -137,8 +156,47 @@ def delete_env(env_id: int, db: UIAutomationDatabase = Depends(get_automation_db
         raise HTTPException(404, "环境不存在")
     if env.password_ref:
         delete_password(env.password_ref)
+    if current_env_id(env.project_id) == env_id:
+        set_current_env(env.project_id, None)
     db.delete_env(env_id)
     return {"deleted": env_id}
+
+
+@router.post("/{env_id}/clone")
+def clone_env(
+    env_id: int,
+    body: EnvCloneIn | None = None,
+    db: UIAutomationDatabase = Depends(get_automation_db),
+) -> dict:
+    """复制/克隆指定测试环境配置。"""
+    env = db.get_env(env_id)
+    if env is None:
+        raise HTTPException(404, "环境不存在")
+
+    raw_name = (body.new_name if body and body.new_name else "").strip()
+    new_name = raw_name or f"{env.name or '环境'}-副本"
+
+    # 若原环境有密码，独立拷贝一份密码 secret
+    new_ref = ""
+    if env.password_ref:
+        pwd = get_password(env.password_ref)
+        if pwd:
+            new_ref = uuid.uuid4().hex
+            set_password(new_ref, pwd)
+
+    new_id = db.create_env(
+        project_id=env.project_id,
+        name=new_name,
+        base_url=env.base_url,
+        username=env.username,
+        password_ref=new_ref,
+        auth_script=env.auth_script or "",
+        token_inject=env.token_inject or "cookie",
+        token_name=env.token_name or "token",
+        token_prefix=env.token_prefix or "",
+        is_default=0,
+    )
+    return env_public(db.get_env(new_id))
 
 
 @router.post("/test-custom")
@@ -146,7 +204,7 @@ async def test_custom_env(body: EnvTestPayload) -> dict:
     """对表单中填写的临时环境与前置脚本进行调试与连通性测试。"""
     class _TempEnv:
         id = 0
-        project_id = 0
+        project_id = body.project_id or 0
         name = "temp"
         base_url = body.base_url or ""
         username = body.username or ""

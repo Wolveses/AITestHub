@@ -66,21 +66,27 @@ class Generator:
             TestCase,
             TestType,
         )
+        from insight_aitest.platform.services.llm.tracing import trace_context
 
         case_type = CaseType(override_type) if override_type else point.suggested_type
         design = TestType(override_design) if override_design else point.suggested_design
 
-        scored = self._retrieve(
-            point.summary,
-            document_ids,
-            project_id=project_id,
-            exclude_document_ids=exclude_document_ids,
-        )
-        chunks = [(s.document.filename, s.chunk.text) for s in scored]
-        prompt = build_generate_prompt(
-            case_type.value, design.value, point.summary, chunks, documents_text=documents_text
-        )
-        raw = self.llm.chat([{"role": "user", "content": prompt}])
+        with trace_context(
+            name="testcase.generate",
+            tags=["module:testcase", "phase:generate"],
+            metadata={"project_id": project_id, "point_id": getattr(point, "id", "")},
+        ):
+            scored = self._retrieve(
+                point.summary,
+                document_ids,
+                project_id=project_id,
+                exclude_document_ids=exclude_document_ids,
+            )
+            chunks = [(s.document.filename, s.chunk.text) for s in scored]
+            prompt = build_generate_prompt(
+                case_type.value, design.value, point.summary, chunks, documents_text=documents_text
+            )
+            raw = self.llm.chat([{"role": "user", "content": prompt}])
         data = _extract_json(raw)
 
         if not data or not isinstance(data, dict):

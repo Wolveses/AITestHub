@@ -17,7 +17,7 @@ _BASE_RULES = """你是 Insight-AITest 平台的 AI 助手。请基于下面提�
 
 _EMPTY_NOTE = """【参考资料为空】（知识库无内容或未检索到相关片段，未基于知识库回答）。请严格遵循防幻觉准则：由于参考资料为空，请直接明确回复用户无法回答该问题（例如："根据当前的知识库参考资料，未检索到相关内容，无法回答该问题。"），切勿随意发散或编造。"""
 
-_CHAT_ONLY = """本会话已关闭知识库检索（纯对话模式）。请直接用自己的知识回答用户问题，无需引用任何参考资料。"""
+_CHAT_ONLY = """你是 Insight-AITest 平台的 AI 助手。本会话已关闭知识库检索（纯对话模式）。请直接用自己的知识回答用户问题，无需引用任何参考资料，并用与用户提问相同的语言回答。"""
 
 
 def build_system_message(chunks: list[tuple[str, str]]) -> str:
@@ -33,7 +33,7 @@ def build_system_message(chunks: list[tuple[str, str]]) -> str:
 
 def build_chat_only_message() -> str:
     """RAG 已关闭（会话级开关关掉）的纯对话提示词，区别于'开 RAG 但没命中'的降级。"""
-    return _BASE_RULES + "\n\n" + _CHAT_ONLY
+    return _CHAT_ONLY
 
 
 _AGENT_CHAT = """你是小阅，一个专业的测试 AI 助手。你可以解答测试理论、设计方法、质量保障方案，也可以辅助分析需求与讨论测试思路。

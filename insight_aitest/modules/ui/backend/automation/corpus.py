@@ -77,19 +77,24 @@ def _snippets(source: str) -> list[tuple[str, str]]:
     return blocks
 
 
-def reference_snippets(case, db, limit: int = TOTAL_CHAR_LIMIT) -> str:
-    """返回可直接拼进提示词的参考片段；无可用参考时返回空串。"""
+def ranked_snippets(case, db, limit: int = MAX_SNIPPETS) -> list[dict]:
+    """结构化动作片段（example.get 与 reference_snippets 共用同一套选片逻辑）。
+
+    返回项：``{action, code, source_case_id, source_title, category_path, same_folder, score}``。
+    """
     try:
         items, _ = db.list_cases(project_id=int(case.project_id), page_size=200)
     except Exception:  # noqa: BLE001 - 参考片段只是加速手段，取失败不影响生成
-        return ""
+        return []
 
     base = _text(case)
     folder = str(getattr(case, "category_path", "") or "")
     site = str(getattr(case, "site", "") or "")
-    ranked: list[tuple[float, object, tuple[str, str]]] = []
+    ranked: list[tuple[float, object, tuple[str, str], bool]] = []
     for other in items:
         if int(other.id) == int(case.id) or not other.script_rel_path:
+            continue
+        if str(getattr(other, "status", "") or "") != "implemented":
             continue
         same_folder = str(other.category_path or "") == folder
         same_site = str(other.site or "") == site
@@ -108,17 +113,16 @@ def reference_snippets(case, db, limit: int = TOTAL_CHAR_LIMIT) -> str:
         for action, block in _snippets(source):
             score = difflib.SequenceMatcher(None, base, block).ratio()
             score += case_score + (0.25 if same_folder else 0.0)
-            ranked.append((score, other, (action, block)))
+            ranked.append((score, other, (action, block), same_folder))
     if not ranked:
-        return ""
+        return []
 
     ranked.sort(key=lambda row: row[0], reverse=True)
     seen: set[str] = set()
     per_source: dict[int, int] = {}
-    blocks: list[str] = []
-    used = 0
-    for _, other, (action, block) in ranked:
-        if len(blocks) >= MAX_SNIPPETS:
+    out: list[dict] = []
+    for score, other, (action, block), same_folder in ranked:
+        if len(out) >= limit:
             break
         key = re.sub(r"\s+", " ", block).strip()
         if key in seen:
@@ -126,15 +130,34 @@ def reference_snippets(case, db, limit: int = TOTAL_CHAR_LIMIT) -> str:
         source_id = int(other.id)
         if per_source.get(source_id, 0) >= MAX_PER_SOURCE:
             continue
-        header = (
-            f"【参考片段】动作：{action}｜来源《{other.title}》"
-            f"（目录：{other.category_path or '未分类'}）"
-        )
-        text = f"{header}\n```python\n{block}\n```"
-        if used + len(text) > limit:
-            break
         seen.add(key)
         per_source[source_id] = per_source.get(source_id, 0) + 1
+        out.append(
+            {
+                "action": action,
+                "code": block,
+                "source_case_id": source_id,
+                "source_title": str(other.title or ""),
+                "category_path": str(other.category_path or ""),
+                "same_folder": same_folder,
+                "score": round(float(score), 4),
+            }
+        )
+    return out
+
+
+def reference_snippets(case, db, limit: int = TOTAL_CHAR_LIMIT) -> str:
+    """返回可直接拼进提示词的参考片段；无可用参考时返回空串。"""
+    blocks: list[str] = []
+    used = 0
+    for item in ranked_snippets(case, db):
+        header = (
+            f"【参考片段】动作：{item['action']}｜来源《{item['source_title']}》"
+            f"（目录：{item['category_path'] or '未分类'}）"
+        )
+        text = f"{header}\n```python\n{item['code']}\n```"
+        if used + len(text) > limit:
+            break
         used += len(text)
         blocks.append(text)
     return "\n\n".join(blocks)

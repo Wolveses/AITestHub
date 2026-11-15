@@ -43,7 +43,25 @@ def _format_cases(cases) -> str:
     parts = []
     for c in cases:
         desc = (c.description or "")[:100]
-        parts.append(f"- ID: {c.id}, 标题: {c.title}, 描述: {desc}")
+        content = c.content if isinstance(getattr(c, "content", None), dict) else {}
+        raw_steps = content.get("steps") if isinstance(content.get("steps"), list) else []
+        step_texts: list[str] = []
+        for s in raw_steps[:5]:
+            if isinstance(s, dict):
+                txt = (
+                    s.get("action")
+                    or s.get("assert")
+                    or (f"{s.get('method', '')} {s.get('path', '')}".strip())
+                    or ""
+                )
+                if txt:
+                    step_texts.append(str(txt)[:60])
+        steps_summary = " -> ".join(step_texts)
+        expected = str(content.get("expected") or "")[:80]
+        extra = f", 步骤: {steps_summary}" if steps_summary else ""
+        if expected:
+            extra += f", 预期: {expected}"
+        parts.append(f"- ID: {c.id}, 标题: {c.title}, 描述: {desc}{extra}")
     return "\n".join(parts)
 
 

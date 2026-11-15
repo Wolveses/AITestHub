@@ -1,17 +1,46 @@
 import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useEnvStore } from '../store/envStore'
+import { useProjectStore } from '../../../shared/store/projectStore'
 
-export function EnvironmentSelect({ value, onChange }: {
-  value: number | null; onChange: (id: number | null) => void
+export function EnvironmentSelect({ value, onChange, style }: {
+  value: number | null; onChange: (id: number | null) => void; style?: React.CSSProperties
 }) {
-  const { envs, loadEnvs } = useEnvStore()
+  const { envs, loadEnvs, updateEnv } = useEnvStore()
+  const currentProjectId = useProjectStore((s) => s.currentProjectId)
   const { t } = useTranslation()
-  useEffect(() => { loadEnvs() }, [loadEnvs])
+
+  useEffect(() => {
+    loadEnvs(currentProjectId)
+  }, [loadEnvs, currentProjectId])
+
+  // 当外部 value 为 null 时，若当前列表有环境，自动选择已启用的环境或首个环境
+  useEffect(() => {
+    if (value === null && envs.length > 0) {
+      const active = envs.find((e) => e.is_default) || envs[0]
+      onChange(active.id)
+    }
+  }, [envs, value, onChange])
+
   return (
-    <select style={selectStyle} value={value ?? ''} onChange={(e) => onChange(e.target.value ? Number(e.target.value) : null)}>
-      <option value="">{t('api.noEnv')}</option>
-      {envs.map((e) => <option key={e.id} value={e.id}>{e.name}{e.is_default ? t('api.defaultEnv') : ''}</option>)}
+    <select
+      style={{ ...selectStyle, ...style }}
+      value={value ?? (envs[0]?.id ? String(envs[0].id) : '')}
+      onChange={(e) => {
+        const newId = e.target.value ? Number(e.target.value) : null
+        onChange(newId)
+        if (newId) {
+          // 切换环境后双向同步启用状态 (is_default: true)
+          updateEnv(newId, { is_default: true }).catch(() => {})
+        }
+      }}
+    >
+      {envs.length === 0 && <option value="">{t('api.noEnvs', '暂无环境')}</option>}
+      {envs.map((e) => (
+        <option key={e.id} value={e.id}>
+          {e.name}{e.is_default ? t('api.defaultEnv') : ''}
+        </option>
+      ))}
     </select>
   )
 }

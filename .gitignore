@@ -96,6 +96,9 @@ playwright-results.xml
 CLAUDE.md
 EPISODIC-MEMORY-GUIDE.md
 
+# ==================== AI 需求/计划文档（本地草稿，不入库） ====================
+.trae/
+
 # ==================== Git Worktrees ====================
 .worktrees/
 

@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from insight_aitest.modules.ai.backend.deps import get_agent, get_db, get_config
 from insight_aitest.modules.ai.backend.persistence.database import AIDatabase
 from insight_aitest.modules.ai.backend.persistence.models import Role
+from insight_aitest.platform.services.llm.tracing import trace_context
 
 router = APIRouter(prefix="/chat", tags=["ai-chat"])
 
@@ -82,48 +83,54 @@ def chat_stream(
 
     async def event_gen():
         try:
-            async for event in agent.stream_answer_async(
-                body.query,
-                history_msgs,
-                body.document_ids,
-                use_rag=use_rag,
-                thinking_level=thinking_switch,
-                project_id=proj_id,
+            with trace_context(
+                name="ai.chat.request",
+                session_id=f"conv-{body.conversation_id}",
+                tags=["module:ai", f"rag:{use_rag}"],
+                metadata={"conversation_id": body.conversation_id, "project_id": proj_id},
             ):
-                if event.type == "citations":
-                    citations_holder[0] = event.data
-                    # spec §6.4：data 包成 {"citations":[...]}，对齐前端解析
-                    yield _sse("citations", {"citations": [c.__dict__ for c in event.data]})
-                elif event.type == "thinking":
-                    if thinking_switch != "off":
-                        thinking_text[0] += event.data
-                        yield _sse("thinking", {"text": event.data})
-                elif event.type == "token":
-                    full_answer[0] += event.data
-                    yield _sse("token", {"text": event.data})
-                elif event.type == "done":
-                    logger.info(
-                        "[AI Chat] 对话流式完成 (会话 %s): 回复字数=%d, 引用文献数=%d",
-                        body.conversation_id,
-                        len(full_answer[0]),
-                        len(citations_holder[0]),
-                    )
-                    db.add_message(
-                        body.conversation_id,
-                        Role.ASSISTANT,
-                        full_answer[0],
-                        citations_holder[0],
-                        thinking=thinking_text[0] or None,
-                    )
-                    yield _sse("done", {})
-                elif event.type == "error":
-                    # 写入错误占位消息，保证历史完整（避免 DB 残留孤立 user 消息）
-                    db.add_message(
-                        body.conversation_id,
-                        Role.ASSISTANT,
-                        "⚠️ 回复失败，请重试",
-                    )
-                    yield _sse("error", {"code": "internal", "message": _safe_error(event.data)})
+                async for event in agent.stream_answer_async(
+                    body.query,
+                    history_msgs,
+                    body.document_ids,
+                    use_rag=use_rag,
+                    thinking_level=thinking_switch,
+                    project_id=proj_id,
+                ):
+                    if event.type == "citations":
+                        citations_holder[0] = event.data
+                        # spec §6.4：data 包成 {"citations":[...]}，对齐前端解析
+                        yield _sse("citations", {"citations": [c.__dict__ for c in event.data]})
+                    elif event.type == "thinking":
+                        if thinking_switch != "off":
+                            thinking_text[0] += event.data
+                            yield _sse("thinking", {"text": event.data})
+                    elif event.type == "token":
+                        full_answer[0] += event.data
+                        yield _sse("token", {"text": event.data})
+                    elif event.type == "done":
+                        logger.info(
+                            "[AI Chat] 对话流式完成 (会话 %s): 回复字数=%d, 引用文献数=%d",
+                            body.conversation_id,
+                            len(full_answer[0]),
+                            len(citations_holder[0]),
+                        )
+                        db.add_message(
+                            body.conversation_id,
+                            Role.ASSISTANT,
+                            full_answer[0],
+                            citations_holder[0],
+                            thinking=thinking_text[0] or None,
+                        )
+                        yield _sse("done", {})
+                    elif event.type == "error":
+                        # 写入错误占位消息，保证历史完整（避免 DB 残留孤立 user 消息）
+                        db.add_message(
+                            body.conversation_id,
+                            Role.ASSISTANT,
+                            "⚠️ 回复失败，请重试",
+                        )
+                        yield _sse("error", {"code": "internal", "message": _safe_error(event.data)})
         except Exception as e:
             # 写入错误占位消息，保证历史完整（避免 DB 残留孤立 user 消息）
             db.add_message(

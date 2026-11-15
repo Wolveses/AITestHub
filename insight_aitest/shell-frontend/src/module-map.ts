@@ -47,11 +47,15 @@ export const childrenMap: Record<string, Record<string, ComponentType>> = {
     agent: lazy(() => import('./modules/ai').then((m) => ({ default: m.AgentWorkbench }))),
   },
   api: {
+    assets: lazy(() => import('./modules/api').then((m) => ({ default: m.AssetsTab }))),
     cases: lazy(() => import('./modules/api').then((m) => ({ default: m.CasesTab }))),
-    suites: lazy(() => import('./modules/api').then((m) => ({ default: m.SuitesTab }))),
-    envs: lazy(() => import('./modules/api').then((m) => ({ default: m.EnvironmentPanel }))),
+    suites: lazy(() => import('./modules/api').then((m) => ({ default: m.CasesTab }))),
     dashboard: lazy(() => import('./modules/api').then((m) => ({ default: m.Dashboard }))),
     schedules: lazy(() => import('./modules/api').then((m) => ({ default: m.SchedulePanel }))),
+  },
+  performance: {
+    scripts: lazy(() => import('./modules/performance').then((m) => ({ default: m.PerformanceScriptsApp }))),
+    monitoring: lazy(() => import('./modules/performance').then((m) => ({ default: m.PerformanceMonitoringApp }))),
   },
   testcase: {
     list: lazy(() => import('./modules/testcase').then((m) => ({ default: m.CaseList }))),

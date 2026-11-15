@@ -24,6 +24,11 @@ def get_llm_config() -> LLMConfig:
     return _llm_config
 
 
+def is_ai_assist_enabled() -> bool:
+    """检查非 Agent 平台 LLM 自动化辅助能力是否开启（实时读取当前配置）。"""
+    return bool(getattr(get_llm_config(), "ai_assist_enabled", True))
+
+
 def set_config_file(path: str | None) -> None:
     global _config_file
     _config_file = path
@@ -72,6 +77,8 @@ def reset_llm_singletons() -> None:
         _llm_config.config_file = prev_cfg.config_file
         _llm_config.db_path = prev_cfg.db_path
         _llm_config.docs_dir = prev_cfg.docs_dir
+    if _llm is not None and getattr(_llm, "_tracer", None) is not None:
+        _llm._tracer.flush()
     _llm = None
     _vector_store = None
     _retriever = None

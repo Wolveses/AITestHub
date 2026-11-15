@@ -1,0 +1,51 @@
+# Langfuse v2 本地一键部署（含预置 Insight-AITest 项目与密钥，开箱即连）
+# 启动命令：docker compose -f deploy/langfuse/docker-compose.yml up -d
+services:
+  langfuse-server:
+    image: langfuse/langfuse:2
+    container_name: insight-langfuse
+    restart: always
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@langfuse-db:5432/postgres
+      - NEXTAUTH_SECRET=insight-aitest-nextauth-secret-key-2026
+      - SALT=insight-aitest-salt-2026
+      - ENCRYPTION_KEY=0000000000000000000000000000000000000000000000000000000000000000
+      - NEXTAUTH_URL=http://localhost:3000
+      - TELEMETRY_ENABLED=false
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=false
+      # 首次启动自动初始化组织、项目、默认管理员账号与 API Key（无需手工创建）
+      - LANGFUSE_INIT_ORG_ID=insight-org
+      - LANGFUSE_INIT_ORG_NAME=Insight-AITest
+      - LANGFUSE_INIT_PROJECT_ID=insight-aitest-proj
+      - LANGFUSE_INIT_PROJECT_NAME=Insight-AITest
+      - LANGFUSE_INIT_PROJECT_PUBLIC_KEY=pk-lf-insight-aitest
+      - LANGFUSE_INIT_PROJECT_SECRET_KEY=sk-lf-insight-aitest
+      - LANGFUSE_INIT_USER_EMAIL=admin@insight.local
+      - LANGFUSE_INIT_USER_NAME=Admin
+      - LANGFUSE_INIT_USER_PASSWORD=Admin123456!
+
+  langfuse-db:
+    image: postgres:15-alpine
+    container_name: insight-langfuse-db
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  langfuse_postgres_data:

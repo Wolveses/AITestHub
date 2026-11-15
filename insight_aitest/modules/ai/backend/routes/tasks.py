@@ -1540,91 +1540,181 @@ def list_kb_documents(
     ]
 
 
-# 批量重新解析进度（供前端轮询判断完成并弹出完成提示）
-_reindex_batch = {"running": False, "total": 0, "done": 0}
-# 批量入口全局互斥：多用户同时点批量时只允许一个批次在跑
-_batch_lock = threading.Lock()
+# 批量任务进度：重新解析 / 重新向量化各自独立，可并行执行（作用域不同文档互不阻塞）
+_batch_state = {
+    "reparse": {"running": False, "total": 0, "done": 0},
+    "reembed": {"running": False, "total": 0, "done": 0},
+}
+_batch_locks = {"reparse": threading.Lock(), "reembed": threading.Lock()}
 
 
-@router.post("/kb/reindex")
-def reindex_documents(
-    body: dict,  # 接收 {all: bool, document_ids: list[int]}
+class BatchScopeIn(BaseModel):
+    """批量任务作用域：project_id / source_type / folder_id 至少给一项。"""
+
+    project_id: int | None = None
+    source_type: str | None = None
+    folder_id: int | None = None
+    # reparse: parse_failed（默认）| all；reembed: pending（默认）| all
+    mode: str = ""
+    dry_run: bool = False
+
+
+def _validate_batch_scope(body: BatchScopeIn) -> None:
+    if body.project_id is None and not body.source_type and body.folder_id is None:
+        raise HTTPException(400, "批量操作必须指定作用域（项目、来源或目录）")
+
+
+def _batch_filters(kb_db, body: BatchScopeIn) -> list:
+    """按作用域构造 SQLAlchemy 过滤条件（排除 TAPD 软删除文档）。"""
+    from sqlalchemy import func
+
+    from insight_aitest.platform.services.kb.models import Document
+
+    conds: list = [func.coalesce(Document.tags, "").notlike("%deleted-in-tapd%")]
+    if body.project_id is not None:
+        conds.append(Document.project_id == body.project_id)
+    if body.source_type:
+        conds.append(Document.source_type == body.source_type)
+    if body.folder_id is not None:
+        if body.folder_id <= 0:
+            conds.append(Document.folder_id.is_(None))
+        else:
+            conds.append(Document.folder_id.in_(kb_db.folder_subtree_ids(body.folder_id)))
+    return conds
+
+
+def _batch_targets(kb_db, body: BatchScopeIn, kind: str) -> tuple[list[int], int]:
+    """返回 (文档 id 列表, 待处理字符数)。
+
+    reparse 的 all 模式包含所有状态（含卡在过程态的僵尸文档），运行时会跳过正在执行的任务；
+    reembed 只处理已有分块的文档，all 模式额外包含已就绪文档（用于修复换模型后的空壳）。
+    """
+    from sqlalchemy import func
+
+    from insight_aitest.platform.persistence import session_scope
+    from insight_aitest.platform.services.kb.models import Chunk, Document, DocumentStatus
+
+    conds = _batch_filters(kb_db, body)
+    if kind == "reparse":
+        if body.mode != "all":
+            conds.append(Document.status == DocumentStatus.PARSE_FAILED.value)
+    else:
+        statuses = [
+            DocumentStatus.NOT_VECTORIZED,
+            DocumentStatus.EMBED_FAILED,
+            DocumentStatus.EMBED_PARTIAL,
+        ]
+        if body.mode == "all":
+            statuses.append(DocumentStatus.READY)
+        conds.append(Document.status.in_([s.value for s in statuses]))
+        conds.append(Document.chunk_count > 0)
+
+    with session_scope(kb_db.db_path) as s:
+        ids = [r[0] for r in s.query(Document.id).filter(*conds).order_by(Document.id).all()]
+        if kind == "reparse":
+            chars = int(
+                s.query(func.coalesce(func.sum(Document.char_count), 0)).filter(*conds).scalar() or 0
+            )
+        else:
+            chars = int(
+                s.query(func.coalesce(func.sum(func.length(Chunk.text)), 0))
+                .join(Document, Document.id == Chunk.document_id)
+                .filter(*conds)
+                .scalar()
+                or 0
+            )
+    return ids, chars
+
+
+def _estimate_tokens(chars: int) -> int:
+    """粗估 embedding token 数（中文约 1.5 字符/token）。"""
+    return int(chars / 1.5) if chars > 0 else 0
+
+
+def _start_batch(kind: str, ids: list[int], kb_db) -> None:
+    """启动批量后台线程（串行处理；每文档独立占用任务槽位）。"""
+    from insight_aitest.modules.kb.backend.routes.documents import (
+        _reembed_in_bg,
+        _reindex_in_bg,
+        is_reindexing,
+    )
+
+    state = _batch_state[kind]
+    lock = _batch_locks[kind]
+    with lock:
+        if state["running"]:
+            raise HTTPException(409, "同类批量任务正在进行中，请稍后再试")
+        state.update(running=True, total=len(ids), done=0)
+
+    def _run() -> None:
+        try:
+            for doc_id in ids:
+                try:
+                    if not is_reindexing(doc_id):
+                        if kind == "reparse":
+                            _reindex_in_bg(doc_id, kb_db)
+                        else:
+                            _reembed_in_bg(doc_id, kb_db)
+                except Exception:
+                    logger.exception("批量任务处理文档失败 kind=%s doc_id=%s", kind, doc_id)
+                with lock:
+                    state["done"] += 1
+        finally:
+            with lock:
+                state["running"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+@router.post("/kb/reparse")
+def batch_reparse(
+    body: BatchScopeIn,
     kb_db=Depends(get_kb_db),
     config=Depends(get_config),
 ) -> dict:
-    """重新向量化指定文档（用于向量开启后批量重建索引）。
+    """批量重新解析。mode=parse_failed（默认）只处理解析失败的文档，mode=all 处理作用域内全部文档。"""
+    _validate_batch_scope(body)
+    ids, chars = _batch_targets(kb_db, body, "reparse")
+    rag_on = getattr(config, "vector_enabled", False)
+    if body.dry_run:
+        return {
+            "dry_run": True,
+            "total": len(ids),
+            "chars": chars,
+            "estimated_tokens": _estimate_tokens(chars) if rag_on else 0,
+        }
+    if not ids:
+        return {"total": 0}
+    _start_batch("reparse", ids, kb_db)
+    return {"total": len(ids)}
 
-    body 支持两种模式：
-      - document_ids=[1,2,3] : 显式指定文档列表
-      - all=true             : 自动查所有需要 reindex 的文档（终态：ready / not_vectorized / embed_failed / embed_partial / parse_failed）
-    不再强制 RAG 开启——关闭时只做重新解析分块（不向量化），与单文档 reindex 入口一致。
+
+@router.post("/kb/reembed")
+def batch_reembed(
+    body: BatchScopeIn,
+    kb_db=Depends(get_kb_db),
+    config=Depends(get_config),
+) -> dict:
+    """批量重新向量化（不重新解析）。
+
+    mode=pending（默认）处理未向量化/向量化失败/部分失败；
+    mode=all 额外包含已就绪文档，用于修复换 embedding 模型后向量缺失的空壳文档。
     """
-    from insight_aitest.modules.kb.backend.routes.documents import _reindex_in_bg, is_reindexing
-
-    all_mode = bool(body.get("all", False))
-    document_ids = body.get("document_ids") or []
-
-    if all_mode:
-        # 自动查所有需要 reindex 的文档
-        from insight_aitest.platform.persistence import session_scope
-        from insight_aitest.platform.services.kb.models import Document, DocumentStatus
-
-        need_reindex = (
-            DocumentStatus.READY.value,
-            DocumentStatus.NOT_VECTORIZED.value,
-            DocumentStatus.EMBED_FAILED.value,
-            DocumentStatus.EMBED_PARTIAL.value,
-            DocumentStatus.PARSE_FAILED.value,
-        )
-        with session_scope(kb_db.db_path) as s:
-            document_ids = [
-                r[0]
-                for r in s.query(Document.id)
-                .filter(Document.status.in_(need_reindex))
-                .all()
-            ]
-        if not document_ids:
-            return {"results": [], "message": "没有需要向量化的文档"}
-    elif not document_ids:
-        raise HTTPException(400, "请提供 document_ids 或 all=true")
-
-    results = []
-    valid_ids = []
-    for doc_id in document_ids:
-        if kb_db.get_document(doc_id) is None:
-            results.append({"id": doc_id, "status": "not_found"})
-        elif is_reindexing(doc_id):
-            # 该文档已有重解析任务在跑（可能是其他用户触发的单文档重解析）
-            results.append({"id": doc_id, "status": "already_running"})
-        else:
-            valid_ids.append(doc_id)
-            results.append({"id": doc_id, "status": "reindexing"})
-
-    if not valid_ids:
-        return {"results": results, "message": "所选文档均已在重新解析中"}
-
-    # 多用户同时触发批量：running 标志的检查与置位必须原子完成，
-    # 否则两个请求会各自起一条串行流水线，同时写 kb.db 并互相覆盖进度。
-    with _batch_lock:
-        if _reindex_batch["running"]:
-            raise HTTPException(409, "批量重新解析正在进行中，请稍后再试")
-        _reindex_batch.update(running=True, total=len(valid_ids), done=0)
-
-    # 批量 reindex 串行执行：只起一个后台线程逐个处理。
-    # 若每文档起一个线程，并发线程会把 kb.db 的 SQLAlchemy 连接池
-    # （默认 5+10）打爆，30s 等不到连接即抛 QueuePool 超时。
-    def _batch():
-        try:
-            for doc_id in valid_ids:
-                _reindex_in_bg(doc_id, kb_db)  # 内部异常已自捕获并写入文档状态
-                with _batch_lock:
-                    _reindex_batch["done"] += 1
-        finally:
-            with _batch_lock:
-                _reindex_batch["running"] = False
-
-    threading.Thread(target=_batch, daemon=True).start()
-    return {"results": results}
+    _validate_batch_scope(body)
+    if not getattr(config, "vector_enabled", False):
+        raise HTTPException(400, "向量检索未开启，无法执行重新向量化")
+    ids, chars = _batch_targets(kb_db, body, "reembed")
+    if body.dry_run:
+        return {
+            "dry_run": True,
+            "total": len(ids),
+            "chars": chars,
+            "estimated_tokens": _estimate_tokens(chars),
+        }
+    if not ids:
+        return {"total": 0}
+    _start_batch("reembed", ids, kb_db)
+    return {"total": len(ids)}
 
 
 @router.get("/kb/stats")
@@ -1667,5 +1757,6 @@ def kb_stats(
         "vector_enabled": getattr(config, "vector_enabled", False),
         "embed_model": getattr(config, "embed_model", ""),
         "need_reindex_count": need_reindex_count,
-        "reindex_progress": dict(_reindex_batch),
+        "reindex_progress": dict(_batch_state["reparse"]),
+        "reembed_progress": dict(_batch_state["reembed"]),
     }

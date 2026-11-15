@@ -14,7 +14,6 @@ from logzero import logger
 from pydantic import BaseModel
 
 from insight_aitest.modules.api.backend.deps import (
-    get_env_db,
     get_run_db,
     get_suite_db,
     get_suite_run_db,
@@ -90,12 +89,25 @@ def execute_suite_endpoint(
         raise HTTPException(404, "套件不存在")
     env = None
     if environment_id is not None:
-        env = get_env_db().get(environment_id)
+        try:
+            from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+            env = get_automation_db().get_env(environment_id)
+        except Exception:
+            env = None
         if not env:
             raise HTTPException(404, "环境不存在")
     else:
-        # 无指定环境时自动使用默认环境
-        env = get_env_db().get_default()
+        # 无指定环境时从套件内首条用例关联的项目取已启用的 UI 自动化环境
+        for cid in suite.case_ids or []:
+            c_info = _fetch_case_from_d(cid)
+            pid = c_info.get("project_id") if c_info else None
+            if pid:
+                try:
+                    from insight_aitest.modules.ui.backend.automation.deps import get_automation_db
+                    env = get_automation_db().default_env(pid)
+                except Exception:
+                    env = None
+                break
         environment_id = env.id if env else None
 
     # 立即写一条 running 的 suite_run（快照冻结当时定义）

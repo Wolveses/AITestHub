@@ -60,17 +60,22 @@ _UNDERSTAND_PROMPT = """你是一个资深测试 Agent。用户给了你一个�
 4. test_execute: 用户希望执行接口测试、UI测试或自动化测试套件。
 5. other: 其它明确的测试相关任务。
 
-请分析并输出一个 JSON 对象（不要额外解释）：
+字段约束：
+- intent_type 取值必须是 "greeting_or_empty"、"case_generate"、"case_review"、"test_execute"、"other" 之一。
+- is_actionable 为布尔值（true 或 false）：当 intent_type 为 greeting_or_empty 或严重缺少被测目标时必须为 false；有明确测试任务目标时为 true。
+- scope 为字符串数组：若不可执行（is_actionable 为 false）则填 []。
+
+请分析并输出一个严格合法的 JSON 对象（不要包含 // 注释或额外解释）：
 {{
-  "intent_type": "greeting_or_empty" | "case_generate" | "case_review" | "test_execute" | "other",
-  "is_actionable": true或false, // 当 intent_type 为 greeting_or_empty 或严重缺少被测目标时必须为 false；有明确测试任务目标时为 true
+  "intent_type": "case_generate",
+  "is_actionable": true,
   "summary": "用2-3句话总结你理解的测试范围；若 is_actionable 为 false，则简明说明未提供具体的测试需求",
   "guidance": "当 is_actionable 为 false 时，给出友好的引导话术，提示用户提供功能需求、接口描述或上传 PRD/API 文档，并提示如果只想咨询或交流可切换至「对话模式」；若 is_actionable 为 true 则填空字符串''",
-  "scope": ["测试范围1", "测试范围2", "测试范围3"], // 若不可执行则为 []
+  "scope": ["测试范围1", "测试范围2", "测试范围3"],
   "doc_types": {{
-    "has_prd": true或false,
-    "has_api_doc": true或false,
-    "has_ui_image": true或false,
+    "has_prd": true,
+    "has_api_doc": false,
+    "has_ui_image": false,
     "detail": "简要说明：有哪些文档，分别是什么类型（PRD需求文档/API接口文档/UI截图/其他）"
   }},
   "missing_for": {{

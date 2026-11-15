@@ -48,6 +48,11 @@ def get_progress(case_id: int) -> dict | None:
         return dict(p) if p else None
 
 
+def clear_progress(case_id: int) -> None:
+    with _guard:
+        _progress.pop(case_id, None)
+
+
 def request_cancel(case_id: int) -> None:
     """标记用例的生成/修复任务需要终止（由任务线程在关键节点检查）。"""
     with _guard:

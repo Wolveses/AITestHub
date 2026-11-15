@@ -3,6 +3,7 @@
 
 from fastapi import APIRouter
 
+from .authoring import router as authoring_router
 from .cases import router as cases_router
 from .envs import router as envs_router
 from .tasks import router as tasks_router
@@ -11,5 +12,6 @@ router = APIRouter()
 router.include_router(cases_router)
 router.include_router(envs_router)
 router.include_router(tasks_router)
+router.include_router(authoring_router)
 
 __all__ = ["router"]

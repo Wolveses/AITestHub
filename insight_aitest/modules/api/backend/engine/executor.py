@@ -184,17 +184,24 @@ def _run_step(
         pass  # 非 JSON，保留原始文本
     response_body = _truncate_body(response_body)
 
-    # 4. 跑断言
-    assertion_results = [
-        check_assertion(
-            a,
-            status_code=status_code,
-            headers=resp_headers,
-            body=response_body,
-            elapsed_ms=elapsed_ms,
+    # 4. 跑断言（期望值支持 {{变量}}，用于「返回 ID 与已创建 ID 一致」这类断言）
+    assertion_results = []
+    for a in assertions:
+        expected = a.get("expected")
+        if isinstance(expected, str) and "{{" in expected:
+            try:
+                expected = inject_variables(expected, variables)
+            except UndefinedVariableError:
+                expected = a.get("expected")
+        assertion_results.append(
+            check_assertion(
+                {**a, "expected": expected},
+                status_code=status_code,
+                headers=resp_headers,
+                body=response_body,
+                elapsed_ms=elapsed_ms,
+            )
         )
-        for a in assertions
-    ]
     passed = all(a["passed"] for a in assertion_results) if assertion_results else True
 
     # 5. 提取变量（提取失败 → 本步 error，但请求结果仍保留）

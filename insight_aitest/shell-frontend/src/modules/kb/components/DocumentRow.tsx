@@ -1,4 +1,4 @@
-import { FileText, Eye, Download, Tag as TagIcon, History, FolderInput, CheckCircle2, CircleDashed, AlertCircle, XCircle, RefreshCw, Scissors } from 'lucide-react';
+import { FileText, Eye, Download, Tag as TagIcon, History, FolderInput, CheckCircle2, CircleDashed, AlertCircle, XCircle, RefreshCw, Scissors, Zap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { isNonTerminal, type Document } from '../store/knowledgeStore';
 import { useConfirmStore } from '../../../shared/store/confirmStore';
@@ -80,6 +80,7 @@ interface DocumentRowProps {
   onMove?: (doc: Document) => void;
   onSelectFolder?: (folderId: number | null) => void;
   onReindex?: (id: number) => void;
+  onReembed?: (id: number) => void;
   onPreviewChunks?: (doc: Document) => void;
 }
 
@@ -95,6 +96,7 @@ export function DocumentRow({
   onMove,
   onSelectFolder,
   onReindex,
+  onReembed,
   onPreviewChunks,
 }: DocumentRowProps) {
   const { t } = useTranslation();
@@ -109,6 +111,8 @@ export function DocumentRow({
   // 解析中：后端内存标记（reindexing）早于状态落库，优先使用；其次看非终态状态。
   // 解析期间该行所有操作置灰，避免多用户/本用户对同一文档并发读写。
   const isParsing = !!doc.reindexing || isNonTerminal(doc.status);
+  // 后端任务是否真实在跑：仅此时禁止再次触发；卡在过程态的僵尸文档仍可手动重新解析
+  const taskRunning = !!doc.reindexing;
   const st = isParsing
     ? { text: t('kb.statusParsing', '解析中'), color: 'var(--accent)' }
     : { text: statusKey ? t(statusKey) : doc.status, color: statusColor };
@@ -390,20 +394,40 @@ export function DocumentRow({
             <FolderInput size={14} />
           </button>
         )}
-        {onReindex && (doc.status === 'ready' || doc.status === 'parse_failed' || doc.status === 'not_vectorized' || doc.status === 'embed_failed' || doc.status === 'embed_partial') && (
+        {onReindex && (
           <button
             onClick={() => confirm({
-              title: t('kb.confirmReindexTitle', '重新向量化'),
+              title: t('kb.reparseTitle', '重新解析'),
               message: vectorEnabled
-                ? t('kb.confirmReindexMsg', '将重新解析并向量化文档「{{name}}」，需要调用 embedding API，确定？', { name: doc.filename })
-                : t('kb.confirmReindexMsgRagOff', '当前 RAG 未开启，将重新解析文档「{{name}}」并重置分块（不执行向量化），确定？', { name: doc.filename }),
+                ? t('kb.reparseMsg', '将重新解析并向量化文档「{{name}}」，需要调用 embedding API，确定？', { name: doc.filename })
+                : t('kb.reparseMsgRagOff', '当前 RAG 未开启，将重新解析文档「{{name}}」并重置分块（不执行向量化），确定？', { name: doc.filename }),
               onConfirm: () => onReindex(doc.id),
             })}
-            title={t('kb.reindexHint', '重新解析（复用 reindex 接口）')}
-            disabled={isParsing}
-            style={actionStyle}
+            title={t('kb.reparseHint', '重新解析（重新加载原始文件并切块）')}
+            disabled={taskRunning}
+            style={taskRunning ? { ...iconBtnStyle, opacity: 0.45, cursor: 'not-allowed' } : iconBtnStyle}
           >
             <RefreshCw size={14} />
+          </button>
+        )}
+        {onReembed && doc.status !== 'parse_failed' && doc.chunk_count > 0 && (
+          <button
+            onClick={() => confirm({
+              title: t('kb.reembedTitle', '重新向量化'),
+              message: t('kb.reembedMsg', '将重新计算文档「{{name}}」的向量（不重新解析分块），需要调用 embedding API，确定？', { name: doc.filename }),
+              onConfirm: () => onReembed(doc.id),
+            })}
+            title={
+              !vectorEnabled
+                ? t('kb.reembedRagOff', '向量检索未开启，无法重新向量化')
+                : taskRunning
+                  ? t('kb.taskRunningHint', '任务执行中，请稍后再试')
+                  : t('kb.reembedHint', '重新向量化（仅重算向量，不重新解析）')
+            }
+            disabled={taskRunning || !vectorEnabled}
+            style={(taskRunning || !vectorEnabled) ? { ...iconBtnStyle, opacity: 0.45, cursor: 'not-allowed' } : iconBtnStyle}
+          >
+            <Zap size={14} />
           </button>
         )}
         <button
