@@ -146,7 +146,7 @@ export function AppManagerPanel() {
         <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
           被测 App 环境 ({apps.length})
         </div>
-        <Btn variant="primary" onClick={openCreate}>
+        <Btn variant="primary" onClick={openCreate} disabled={projectId === null}>
           <Plus size={13} /> 新增 App 配置
         </Btn>
       </div>

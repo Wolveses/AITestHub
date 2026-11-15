@@ -5,7 +5,7 @@ name:
 version: 2.0.0
 category: testing
 icon: Gauge
-order: 5
+order: 7
 description:
   zh: JMeter 服务端压测与移动设备性能监控
   en: JMeter Load Testing & Mobile Device Performance Monitoring

@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy import func, select
 
 from insight_aitest.modules.mobile.backend.persistence.models import (
+    CaseStatus,
     GenerationStatus,
     MobileApp,
     MobileCase,
@@ -197,6 +198,24 @@ class MobileDatabase:
                     MobileGeneration.status == GenerationStatus.RUNNING,
                 )
             )
+
+    def list_cases_with_running_generation(self, project_id: int) -> list[MobileCase]:
+        running_case_ids = select(MobileGeneration.mobile_case_id).where(
+            MobileGeneration.status == GenerationStatus.RUNNING
+        )
+        stmt = (
+            select(MobileCase)
+            .where(
+                MobileCase.project_id == project_id,
+                (
+                    MobileCase.status.in_((CaseStatus.GENERATING, CaseStatus.FIXING))
+                    | MobileCase.id.in_(running_case_ids)
+                ),
+            )
+            .order_by(MobileCase.id.desc())
+        )
+        with session_scope(self.db_path) as s:
+            return list(s.scalars(stmt))
 
     def list_generations(self, case_id: int, limit: int = 20) -> list[MobileGeneration]:
         with session_scope(self.db_path) as s:

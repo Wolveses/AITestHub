@@ -7,6 +7,7 @@ import hashlib
 import threading
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -17,6 +18,8 @@ from insight_aitest.modules.mobile.backend.automation.importer import import_cas
 from insight_aitest.modules.mobile.backend.automation.runner import MobileEnvError, run_script
 from insight_aitest.modules.mobile.backend.automation.session_manager import (
     cancel_generation_session,
+    get_active_generation,
+    list_active_generations,
     list_step_screenshots,
     read_events,
     start_generation_session,
@@ -185,6 +188,11 @@ def do_import(
     return import_cases(body.project_id, body.document_ids, db, body.platform_map)
 
 
+@router.get("/generations/active")
+def list_project_active_generations(project_id: int = Query(...)) -> list[dict]:
+    return list_active_generations(project_id)
+
+
 @router.get("/generations/{gen_id}")
 def get_generation_detail(gen_id: int, db: MobileDatabase = Depends(get_mobile_db)) -> dict:
     gen = db.get_generation(gen_id)
@@ -302,6 +310,23 @@ def put_script(
 # ===== 本地 Agent 生成会话 =====
 
 
+def _client_base(request: Request) -> str:
+    """推导浏览器实际访问的地址（适配 Vite/Nginx 代理重写 Host 的场景，对齐 UI 模块）。"""
+    base = str(request.base_url).rstrip("/")
+    forwarded = request.headers.get("x-forwarded-host") or ""
+    if forwarded:
+        scheme = (request.headers.get("x-forwarded-proto") or "http").split(",")[0].strip()
+        return f"{scheme}://{forwarded.split(',')[0].strip()}"
+    origin = request.headers.get("origin") or request.headers.get("referer") or ""
+    if origin:
+        parsed = urlparse(origin)
+        host = parsed.hostname or ""
+        if host and host not in ("localhost", "127.0.0.1"):
+            port = urlparse(base).port
+            return f"{parsed.scheme}://{host}:{port}" if port else f"{parsed.scheme}://{host}"
+    return base
+
+
 @router.post("/{case_id}/generation-sessions")
 def create_generation_session(
     case_id: int,
@@ -317,7 +342,7 @@ def create_generation_session(
     if not app_id:
         raise HTTPException(400, "项目尚未配置 App 环境，请先在「设备与 App」中添加")
 
-    base_url = str(request.base_url).rstrip("/")
+    base_url = _client_base(request)
     try:
         return start_generation_session(
             case_id,
@@ -338,6 +363,19 @@ def cancel_generate(case_id: int, db: MobileDatabase = Depends(get_mobile_db)) -
     _get_or_404(case_id, db)
     ok = cancel_generation_session(case_id)
     return {"cancelled": ok, "case_id": case_id}
+
+
+@router.get("/{case_id}/active-generation")
+def get_case_active_generation(case_id: int, db: MobileDatabase = Depends(get_mobile_db)) -> dict:
+    _get_or_404(case_id, db)
+    active = get_active_generation(case_id)
+    if active is None:
+        return {"active": False, "generation": None}
+    gen, lease = active
+    out = _gen_out(gen)
+    out["events"] = read_events(int(gen.mobile_case_id), int(gen.id))
+    out["expires_at"] = lease.expires_at.isoformat() if lease else None
+    return {"active": True, "generation": out}
 
 
 @router.get("/{case_id}/generations")

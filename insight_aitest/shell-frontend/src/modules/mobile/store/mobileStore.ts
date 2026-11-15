@@ -105,6 +105,32 @@ export interface MobileGenerationDetail {
   }>;
 }
 
+export interface MobileActiveGenerationItem {
+  generation_id: number;
+  case_id: number;
+  title: string;
+  kind: string;
+  status: string;
+  stage: 'waiting' | 'generating' | 'dry_run_ok' | string;
+  device_id: string;
+  tool_calls: number;
+  last_dry_run_passed: boolean;
+  latest_event: {
+    ts?: string;
+    type?: string;
+    tool?: string;
+    error?: string;
+    filename?: string;
+    passed?: boolean;
+    run_id?: number;
+    [k: string]: unknown;
+  } | null;
+  last_error: string | null;
+  started_at: string | null;
+  expires_at: string | null;
+  step_screenshots: string[];
+}
+
 export interface MobileRunItem {
   id: number;
   case_id: number;
@@ -143,7 +169,16 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
     let msg = `HTTP ${res.status}`;
     try {
       const data = await res.json();
-      msg = data.detail || data.message || msg;
+      if (Array.isArray(data.detail)) {
+        msg =
+          data.detail
+            .map((d: { loc?: unknown[]; msg?: string }) =>
+              d.loc ? `${d.loc.join('.')}: ${d.msg || ''}` : d.msg || JSON.stringify(d)
+            )
+            .join('; ') || msg;
+      } else {
+        msg = data.detail || data.message || msg;
+      }
     } catch {
       // ignore non-json error
     }
@@ -165,6 +200,7 @@ interface MobileState {
   appiumReady: boolean;
   appiumDetail: string;
   devicesLoading: boolean;
+  activeSessions: Record<number, MobileGenerationSession>;
 
   setProjectId: (id: number | null) => void;
   setStatusFilter: (s: string) => void;
@@ -184,7 +220,7 @@ interface MobileState {
     page: number;
     folders: { path: string; count: number }[];
   }>;
-  importCases: (docIds: number[], platformMap: Record<number, string>) => Promise<{
+  importCases: (docIds: number[], platformMap?: Record<number, string>) => Promise<{
     created: number;
     skipped: number;
   }>;
@@ -198,6 +234,11 @@ interface MobileState {
     payload: { device_id: string; app_id?: number | null; kind?: string }
   ) => Promise<MobileGenerationSession>;
   cancelGenerate: (caseId: number) => Promise<void>;
+  getActiveGeneration: (
+    caseId: number
+  ) => Promise<{ active: boolean; generation: MobileGenerationDetail | null }>;
+  getActiveGenerations: (projectId: number) => Promise<MobileActiveGenerationItem[]>;
+  clearActiveSession: (caseId: number) => void;
   getGenerations: (caseId: number) => Promise<MobileGenerationDetail[]>;
   getGenerationDetail: (genId: number) => Promise<MobileGenerationDetail>;
 
@@ -231,6 +272,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   appiumReady: false,
   appiumDetail: '',
   devicesLoading: false,
+  activeSessions: {},
 
   setProjectId: (id) => set({ projectId: id }),
   setStatusFilter: (statusFilter) => set({ statusFilter }),
@@ -268,7 +310,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     return req(`${BASE}/automation/cases/importable?${sp}`);
   },
 
-  importCases: async (document_ids, platform_map) => {
+  importCases: async (document_ids, platform_map = {}) => {
     const { projectId, loadCases } = get();
     const res = await req<{ created: number; skipped: number }>(`${BASE}/automation/cases/import`, {
       method: 'POST',
@@ -315,14 +357,31 @@ export const useMobileStore = create<MobileState>((set, get) => ({
         body: JSON.stringify(payload),
       }
     );
+    set((s) => ({
+      activeSessions: { ...s.activeSessions, [caseId]: res },
+    }));
     await Promise.all([get().loadCases(), get().loadDevices()]);
     return res;
   },
 
   cancelGenerate: async (caseId) => {
     await req(`${BASE}/automation/cases/${caseId}/cancel-generate`, { method: 'POST' });
+    get().clearActiveSession(caseId);
     await Promise.all([get().loadCases(), get().loadDevices()]);
   },
+
+  getActiveGeneration: (caseId) => req(`${BASE}/automation/cases/${caseId}/active-generation`),
+
+  getActiveGenerations: (projectId) =>
+    req(`${BASE}/automation/cases/generations/active?project_id=${projectId}`),
+
+  clearActiveSession: (caseId) =>
+    set((s) => {
+      if (!(caseId in s.activeSessions)) return s;
+      const next = { ...s.activeSessions };
+      delete next[caseId];
+      return { activeSessions: next };
+    }),
 
   getGenerations: (caseId) => req(`${BASE}/automation/cases/${caseId}/generations`),
 
@@ -357,12 +416,16 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   },
 
   createApp: async (payload) => {
+    const { projectId, loadApps } = get();
+    if (projectId === null) {
+      throw new Error('请先选择项目');
+    }
     const res = await req<MobileAppEnv>(`${BASE}/automation/apps`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ project_id: projectId, ...payload }),
     });
-    await get().loadApps();
+    await loadApps();
     return res;
   },
 
@@ -420,6 +483,17 @@ export const useMobileStore = create<MobileState>((set, get) => ({
 
   releaseDevice: async (deviceId) => {
     await req(`${BASE}/devices/${encodeURIComponent(deviceId)}/release`, { method: 'POST' });
+    set((s) => {
+      const next = { ...s.activeSessions };
+      let changed = false;
+      for (const [k, v] of Object.entries(next)) {
+        if (v.device_id === deviceId) {
+          delete next[Number(k)];
+          changed = true;
+        }
+      }
+      return changed ? { activeSessions: next } : s;
+    });
     await Promise.all([get().loadDevices(), get().loadCases()]);
   },
 }));

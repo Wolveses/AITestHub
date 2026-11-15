@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -87,6 +87,8 @@ def build_app() -> FastAPI:
     set_registry_view(registry.to_public_list)
     set_dashboard_provider(build_dashboard_provider())
 
+    loaded_ids = {lm.manifest.id for lm in registry.modules}
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logger.info("Insight-AITest 平台启动")
@@ -113,8 +115,16 @@ def build_app() -> FastAPI:
         # 本地 Agent MCP 服务（Bearer Token 鉴权）；不可用则启动失败，不提供降级路径
         from insight_aitest.modules.ui.backend.automation.mcp_server import get_mcp_server
 
-        async with get_mcp_server().session_manager.run():
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(get_mcp_server().session_manager.run())
             logger.info("MCP 服务已启动: /mcp")
+            if "mobile" in loaded_ids:
+                from insight_aitest.modules.mobile.backend.automation.mcp_server import (
+                    get_mcp_server as get_mobile_mcp_server,
+                )
+
+                await stack.enter_async_context(get_mobile_mcp_server().session_manager.run())
+                logger.info("Mobile MCP 服务已启动: /api/modules/mobile/mcp")
             yield
         logger.info("Insight-AITest 平台关闭")
 
@@ -165,6 +175,12 @@ def build_app() -> FastAPI:
 
     mount_mcp(app)
     logger.info("已挂载 MCP 服务: /mcp")
+
+    if "mobile" in loaded_ids:
+        from insight_aitest.modules.mobile.backend.automation.mcp_server import mount_mobile_mcp
+
+        mount_mobile_mcp(app)
+        logger.info("已挂载 Mobile MCP 服务: /api/modules/mobile/mcp")
 
     @app.get("/")
     async def root():

@@ -27,7 +27,7 @@ export function Btn({
     },
     primary: {
       background: 'var(--accent)',
-      color: 'var(--text-on-accent)',
+      color: 'var(--text-on-accent, #fff)',
       border: 'none',
     },
     danger: {
@@ -59,6 +59,7 @@ export function Btn({
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.45 : 1,
         whiteSpace: 'nowrap',
+        transition: 'opacity .15s ease',
       }}
     >
       {children}
@@ -66,21 +67,21 @@ export function Btn({
   );
 }
 
-const STATUS_STYLE: Record<string, { label: string; color: string }> = {
-  not_implemented: { label: '未实现', color: 'var(--text-muted)' },
-  generating: { label: '生成中', color: 'var(--info)' },
-  implemented: { label: '已实现', color: 'var(--success)' },
-  fixing: { label: '修复中', color: 'var(--warning)' },
-  running: { label: '执行中', color: 'var(--info)' },
-  passed: { label: '通过', color: 'var(--success)' },
-  failed: { label: '失败', color: 'var(--error)' },
-  error: { label: '异常', color: 'var(--error)' },
-  cancelled: { label: '已取消', color: 'var(--text-muted)' },
-  success: { label: '成功', color: 'var(--success)' },
+export const STATUS_META: Record<string, { label: string; color: string; bg: string }> = {
+  not_implemented: { label: '未实现', color: 'var(--text-muted)', bg: 'var(--bg-card)' },
+  generating: { label: '生成中', color: 'var(--info, #3b82f6)', bg: 'rgba(59,130,246,.12)' },
+  implemented: { label: '已实现', color: 'var(--success, #10b981)', bg: 'rgba(16,185,129,.12)' },
+  fixing: { label: '修复中', color: 'var(--warning, #f59e0b)', bg: 'rgba(245,158,11,.12)' },
+  running: { label: '执行中', color: 'var(--info, #3b82f6)', bg: 'rgba(59,130,246,.12)' },
+  passed: { label: '通过', color: 'var(--success, #10b981)', bg: 'rgba(16,185,129,.12)' },
+  failed: { label: '失败', color: 'var(--error, #ef4444)', bg: 'rgba(239,68,68,.12)' },
+  error: { label: '异常', color: 'var(--error, #ef4444)', bg: 'rgba(239,68,68,.12)' },
+  cancelled: { label: '已取消', color: 'var(--text-muted)', bg: 'var(--bg-card)' },
+  success: { label: '成功', color: 'var(--success, #10b981)', bg: 'rgba(16,185,129,.12)' },
 };
 
-export function StatusBadge({ status }: { status: string }) {
-  const meta = STATUS_STYLE[status] || { label: status, color: 'var(--text-muted)' };
+export function StatusBadge({ status, label }: { status: string; label?: string }) {
+  const meta = STATUS_META[status] || { label: status, color: 'var(--text-muted)', bg: 'var(--bg-card)' };
   return (
     <span
       style={{
@@ -91,12 +92,23 @@ export function StatusBadge({ status }: { status: string }) {
         borderRadius: 999,
         fontSize: 11,
         color: meta.color,
-        background: 'var(--surface-tint)',
+        background: meta.bg,
         border: `1px solid ${meta.color}`,
         whiteSpace: 'nowrap',
       }}
     >
-      {meta.label}
+      {(status === 'generating' || status === 'fixing' || status === 'running') && (
+        <span
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: meta.color,
+            animation: 'pulse 1.2s ease-in-out infinite',
+          }}
+        />
+      )}
+      {label ?? meta.label}
     </span>
   );
 }
@@ -114,11 +126,49 @@ export function Field({ label, children, hint }: { label: string; children: Reac
 export const inputStyle: CSSProperties = {
   width: '100%',
   boxSizing: 'border-box',
-  padding: '6px 10px',
+  padding: '6px 9px',
   borderRadius: 6,
   border: '1px solid var(--border-strong)',
-  background: 'var(--bg-card)',
+  background: 'var(--bg-base)',
   color: 'var(--text-primary)',
-  fontSize: 13,
+  fontSize: 12,
   outline: 'none',
 };
+
+export function ErrorCategoryTag({
+  category,
+  label,
+}: {
+  category: string | null;
+  label?: string;
+}) {
+  if (!category) return null;
+  const fallback: Record<string, string> = {
+    environment: '环境问题',
+    case_info: '用例信息不完善',
+    model: '模型问题',
+    script: '脚本缺陷',
+  };
+  const color =
+    category === 'environment'
+      ? 'var(--warning, #f59e0b)'
+      : category === 'case_info'
+        ? 'var(--error, #ef4444)'
+        : category === 'model'
+          ? 'var(--info, #3b82f6)'
+          : 'var(--text-muted)';
+  return (
+    <span
+      style={{
+        fontSize: 10,
+        padding: '1px 6px',
+        borderRadius: 4,
+        border: `1px solid ${color}`,
+        color,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {label ?? fallback[category] ?? category}
+    </span>
+  );
+}

@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from insight_aitest.modules.mobile.backend.automation import paths
+from insight_aitest.modules.mobile.backend.automation import paths, prompt_builder
 from insight_aitest.modules.mobile.backend.automation.runner import run_script
 from insight_aitest.modules.mobile.backend.automation.tree_pruner import ElementRef, prune_android_xml
 from insight_aitest.modules.mobile.backend.automation.validator import validate_staging_dir
@@ -33,6 +33,55 @@ from insight_aitest.modules.mobile.backend.persistence.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MobileToolError(RuntimeError):
+    """带结构化错误码与修复指引的 MCP 工具业务异常。"""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        fix: str = "",
+        retryable: bool = True,
+        required_next: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.fix = fix
+        self.retryable = retryable
+        self.required_next = required_next
+        self.extra = dict(extra or {})
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": False,
+            "code": self.code,
+            "message": self.message,
+            "fix": self.fix,
+            "retryable": self.retryable,
+            "required_next": self.required_next,
+        }
+        payload.update(self.extra)
+        return payload
+
+
+def build_agent_prompt(
+    case,
+    *,
+    kind: str = GenerationKind.GENERATE,
+    token: str = "",
+    mcp_url: str = "",
+) -> str:
+    return prompt_builder.render_session_prompt(
+        kind="fix" if kind == GenerationKind.FIX else "create",
+        case_id=int(case.id),
+        token=token,
+        mcp_url=mcp_url,
+    )
 
 
 @dataclass
@@ -134,25 +183,88 @@ def list_step_screenshots(case_id: int, gen_id: int) -> list[str]:
     return sorted(p.name for p in d.glob("*.png"))
 
 
-def build_agent_prompt(case, app, device_id: str) -> str:
-    steps_text = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(case.steps or []))
-    return (
-        f"请为手机 App 自动化用例 #{case.id}「{case.title}」生成并验证通过 Python pytest 脚本。\n\n"
-        f"## 目标环境\n"
-        f"- 平台: {app.platform} (包名: {app.app_package}, Activity: {app.app_activity or '默认'})\n"
-        f"- 平台主机设备 ID: {device_id}\n\n"
-        f"## 用例详情\n"
-        f"- 前置条件: {case.precondition or '无'}\n"
-        f"- 测试步骤:\n{steps_text or '(无)'}\n"
-        f"- 预期结果: {case.expected or '无'}\n\n"
-        f"## 执行要求（必须严格遵守）\n"
-        f"1. 先调用 `get_case_context` 获取项目已有 `pages/` 页面对象和避坑经验；\n"
-        f"2. 使用 `mobile_launch_app`、`mobile_snapshot`、`mobile_screenshot`、`mobile_tap`、`mobile_input`、`mobile_swipe` 在真机上真实探索每一步；\n"
-        f"3. 优先按工具返回的推荐定位器（accessibility_id / resource-id / text）编写 `case.py`（禁止绝对像素坐标 `tap([(x, y)])`）；\n"
-        f"4. 脚本必须包含 `def test_case(driver, params, app_env):`（使用脚手架注入的 `driver` fixture，不要自己创建 `webdriver.Remote`）；\n"
-        f"5. 通过 `write_staging_file` 写入 `case.py` 后，必须调用 `run_server_dry_run` 在平台主机真实试跑验证；失败请根据返回报错修复再试；\n"
-        f"6. 试跑通过后，调用 `commit_staging_script` 完成固化入库。"
-    )
+def _restore_idle_case_status(db, case) -> None:
+    if case.status in (CaseStatus.GENERATING, CaseStatus.FIXING):
+        next_status = CaseStatus.IMPLEMENTED if case.script_rel_path else CaseStatus.NOT_IMPLEMENTED
+        db.update_case(int(case.id), status=next_status)
+
+
+def get_active_generation(case_id: int) -> tuple[Any, Any] | None:
+    """获取用例当前有效的运行中生成会话，并清理租约已失效的僵尸会话。"""
+    db = get_mobile_db()
+    case = db.get_case(case_id)
+    if case is None:
+        return None
+
+    lease_mgr = get_lease_manager()
+    active_gen = None
+    active_lease = None
+
+    for gen in db.list_generations(case_id, limit=20):
+        if gen.status != GenerationStatus.RUNNING:
+            continue
+        lease = lease_mgr.get(gen.device_id) if gen.device_id else None
+        if lease is not None and lease.holder_type == "generation" and lease.generation_id == int(gen.id):
+            if active_gen is None:
+                active_gen = gen
+                active_lease = lease
+                continue
+        db.update_generation(
+            int(gen.id),
+            status=GenerationStatus.CANCELLED,
+            error_message="设备租约已超时或失效，会话已自动释放",
+            finished_at=datetime.now(),
+        )
+        rt = get_runtime(int(gen.id))
+        if rt is not None:
+            _close_driver(rt)
+            with _RUNTIME_LOCK:
+                _RUNTIMES.pop(int(gen.id), None)
+        append_event(case_id, int(gen.id), "session_cancelled", reason="设备租约已超时或失效")
+
+    if active_gen is None:
+        _restore_idle_case_status(db, case)
+        return None
+    return active_gen, active_lease
+
+
+def list_active_generations(project_id: int) -> list[dict]:
+    """列出项目下所有进行中的生成/修复会话（同步清理租约已失效的僵尸会话）。"""
+    db = get_mobile_db()
+    candidates = db.list_cases_with_running_generation(project_id)
+    out: list[dict] = []
+    for case in candidates:
+        active = get_active_generation(int(case.id))
+        if active is None:
+            continue
+        gen, lease = active
+        events = read_events(int(case.id), int(gen.id), limit=20)
+        latest_ev = events[-1] if events else None
+        if gen.last_dry_run_passed:
+            stage = "dry_run_ok"
+        elif int(gen.tool_calls or 0) > 0:
+            stage = "generating"
+        else:
+            stage = "waiting"
+        out.append(
+            {
+                "generation_id": int(gen.id),
+                "case_id": int(case.id),
+                "title": case.title,
+                "kind": gen.kind,
+                "status": gen.status,
+                "stage": stage,
+                "device_id": gen.device_id,
+                "tool_calls": int(gen.tool_calls or 0),
+                "last_dry_run_passed": bool(gen.last_dry_run_passed),
+                "latest_event": latest_ev,
+                "last_error": gen.error_message,
+                "started_at": gen.started_at.isoformat() if gen.started_at else None,
+                "expires_at": lease.expires_at.isoformat() if lease else None,
+                "step_screenshots": list_step_screenshots(int(case.id), int(gen.id)),
+            }
+        )
+    return out
 
 
 def start_generation_session(
@@ -175,6 +287,14 @@ def start_generation_session(
     app = db.get_app(app_id)
     if app is None or int(app.project_id) != int(case.project_id):
         raise ValueError("选定的 App 环境不存在或不属于当前项目")
+
+    active = get_active_generation(case_id)
+    if active is not None:
+        active_gen, _ = active
+        raise DeviceBusyError(
+            f"用例 #{case_id} 已有进行中的生成会话 (#{active_gen.id})，"
+            f"正在占用设备 {active_gen.device_id}；请先停止或复用当前会话"
+        )
 
     lease_mgr = get_lease_manager()
     attempt = db.count_generations(case_id) + 1
@@ -262,7 +382,12 @@ def start_generation_session(
         "expires_at": lease.expires_at.isoformat(),
         "mcp_url": mcp_url,
         "mcp_config": mcp_config,
-        "agent_prompt": build_agent_prompt(case, app, device_id),
+        "agent_prompt": build_agent_prompt(
+            case,
+            kind=kind,
+            token=raw_token,
+            mcp_url=mcp_url,
+        ),
     }
 
 
@@ -302,7 +427,8 @@ def cancel_generation_session(case_id: int, reason: str = "用户取消生成") 
     if case is None:
         return False
 
-    gens = db.list_generations(case_id, limit=5)
+    lease_mgr = get_lease_manager()
+    gens = db.list_generations(case_id, limit=20)
     cancelled_any = False
     for gen in gens:
         if gen.status != GenerationStatus.RUNNING:
@@ -314,7 +440,7 @@ def cancel_generation_session(case_id: int, reason: str = "用户取消生成") 
             finished_at=datetime.now(),
         )
         if gen.device_id:
-            get_lease_manager().release(gen.device_id, force=True)
+            lease_mgr.release(gen.device_id, force=True)
         rt = get_runtime(int(gen.id))
         if rt is not None:
             _close_driver(rt)
@@ -323,8 +449,12 @@ def cancel_generation_session(case_id: int, reason: str = "用户取消生成") 
         append_event(case_id, int(gen.id), "session_cancelled", reason=reason)
         cancelled_any = True
 
-    next_status = CaseStatus.IMPLEMENTED if case.script_rel_path else CaseStatus.NOT_IMPLEMENTED
-    db.update_case(case_id, status=next_status)
+    for did, lease in list(lease_mgr.list_leases().items()):
+        if lease.holder_type == "generation" and lease.case_id == case_id:
+            lease_mgr.release(did, force=True)
+            cancelled_any = True
+
+    _restore_idle_case_status(db, case)
     return cancelled_any
 
 
@@ -375,26 +505,46 @@ def _pages_summary(project_id: int) -> list[dict]:
     for f in sorted(pdir.glob("*.py")):
         if f.name == "__init__.py":
             continue
-        txt = f.read_text(encoding="utf-8", errors="replace")
-        out.append({"path": f"pages/{f.name}", "preview": txt[:1200]})
+        raw = f.read_bytes()
+        txt = raw.decode("utf-8", errors="replace")
+        out.append(
+            {
+                "path": f"pages/{f.name}",
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "size": len(raw),
+                "preview": txt[:1200],
+            }
+        )
     return out
 
 
 def tool_get_case_context(rt: SessionRuntime) -> dict:
     db = get_mobile_db()
     case = db.get_case(rt.case_id)
+    if case is None:
+        raise MobileToolError("CASE_NOT_FOUND", f"用例 {rt.case_id} 不存在", retryable=False)
+    gen = db.get_generation(rt.generation_id)
     app = db.get_app(rt.app_id)
     lessons = [
         {"title": l.title, "content": l.content}
         for l in db.list_lessons(rt.project_id, limit=5)
     ]
+    intent = "fix" if (gen and gen.kind == GenerationKind.FIX) or bool(case.script_rel_path) else "create"
     return {
+        "intent": intent,
+        "workflow": prompt_builder.workflow_for_intent(intent),
         "case": {
             "id": case.id,
             "title": case.title,
             "precondition": case.precondition,
             "steps": list(case.steps or []),
             "expected": case.expected,
+            "category_path": case.category_path or "",
+            "status": case.status,
+            "script_version": int(case.script_version or 0),
+            "has_script": bool(case.script_rel_path),
+            "last_error_category": case.last_error_category,
+            "last_error_message": case.last_error_message,
             "params": dict(case.params_json or {}),
             "params_schema": list(case.params_schema_json or []),
         },
@@ -487,7 +637,12 @@ def _find_element_for_ref(drv, item: ElementRef):
 def tool_tap(rt: SessionRuntime, ref: str) -> dict:
     item = rt.ref_map.get(ref)
     if item is None:
-        raise ValueError(f"无效的 ref={ref}，请先调用 mobile_snapshot 获取当前界面控件")
+        raise MobileToolError(
+            "INVALID_REF",
+            f"无效的 ref={ref}，请先调用 mobile_snapshot 获取当前界面控件",
+            fix="先调用 mobile_snapshot 重新采集控件树并读取最新 ref",
+            required_next="mobile_snapshot",
+        )
     drv = _ensure_driver(rt)
     try:
         el = _find_element_for_ref(drv, item)
@@ -509,7 +664,12 @@ def tool_input(
 ) -> dict:
     item = rt.ref_map.get(ref)
     if item is None:
-        raise ValueError(f"无效的 ref={ref}，请先调用 mobile_snapshot 获取当前界面控件")
+        raise MobileToolError(
+            "INVALID_REF",
+            f"无效的 ref={ref}，请先调用 mobile_snapshot 获取当前界面控件",
+            fix="先调用 mobile_snapshot 重新采集控件树并读取最新 ref",
+            required_next="mobile_snapshot",
+        )
     drv = _ensure_driver(rt)
     el = _find_element_for_ref(drv, item)
     if clear_first:
@@ -556,12 +716,20 @@ def tool_swipe(rt: SessionRuntime, direction: str = "up", distance_ratio: float 
 def _resolve_staging_path(staging: Path, rel_path: str) -> Path:
     norm = (rel_path or "").replace("\\", "/").lstrip("/")
     if not norm or ".." in Path(norm).parts:
-        raise ValueError("非法的暂存文件路径")
+        raise MobileToolError(
+            "INVALID_PATH",
+            "非法的暂存文件路径",
+            fix="仅允许相对路径 case.py 或 pages/<name>.py，不得包含 ..",
+        )
     if norm != "case.py" and not norm.startswith("pages/"):
-        raise ValueError("仅允许读写 case.py 或 pages/*.py")
+        raise MobileToolError(
+            "INVALID_PATH",
+            "仅允许读写 case.py 或 pages/*.py",
+            fix="将 rel_path 修改为 case.py 或 pages/<name>.py",
+        )
     target = (staging / norm).resolve()
     if not str(target).startswith(str(staging.resolve())):
-        raise ValueError("路径越界")
+        raise MobileToolError("INVALID_PATH", "路径越界", fix="仅允许访问会话暂存区内的文件")
     return target
 
 
@@ -587,7 +755,13 @@ def tool_run_server_dry_run(rt: SessionRuntime) -> dict:
     if err:
         get_mobile_db().update_generation(rt.generation_id, last_dry_run_passed=0)
         append_event(rt.case_id, rt.generation_id, "dry_run_rejected", error=err)
-        return {"passed": False, "stage": "static_validation", "error": err}
+        raise MobileToolError(
+            "VALIDATION_FAILED",
+            f"静态校验未通过: {err}",
+            fix="按校验报错修正 case.py 或 pages/*.py 并调用 write_staging_file 重新写入",
+            required_next="write_staging_file",
+            extra={"passed": False, "stage": "static_validation", "error": err},
+        )
 
     db = get_mobile_db()
     case = db.get_case(rt.case_id)
@@ -618,7 +792,13 @@ def tool_run_server_dry_run(rt: SessionRuntime) -> dict:
         )
         db.update_generation(rt.generation_id, last_dry_run_passed=0)
         append_event(rt.case_id, rt.generation_id, "dry_run_error", error=str(e))
-        return {"passed": False, "stage": "runner_error", "error": str(e)}
+        raise MobileToolError(
+            "RUNNER_ERROR",
+            f"试跑执行器异常: {e}",
+            fix="检查 Appium 服务与设备连接状态后重试 run_server_dry_run",
+            required_next="run_server_dry_run",
+            extra={"passed": False, "stage": "runner_error", "run_id": run_id, "error": str(e)},
+        ) from e
 
     passed = res["status"] == "passed"
     db.update_run(
@@ -643,11 +823,29 @@ def tool_run_server_dry_run(rt: SessionRuntime) -> dict:
         duration_ms=res["duration_ms"],
         error=res["error_message"][:500] if res["error_message"] else "",
     )
+    if not passed:
+        raise MobileToolError(
+            "DRY_RUN_FAILED",
+            res["error_message"] or "服务端真机试跑失败",
+            fix="根据 stdout_tail / logcat_tail / 截图排查定位器或断言问题，修改后重新 write_staging_file 并 run_server_dry_run",
+            required_next="write_staging_file",
+            extra={
+                "passed": False,
+                "stage": "dry_run",
+                "run_id": run_id,
+                "duration_ms": res["duration_ms"],
+                "error": res["error_message"],
+                "stdout_tail": res["stdout_tail"],
+                "logcat_tail": res["logcat_tail"],
+                "screenshots": res["screenshots"],
+            },
+        )
     return {
-        "passed": passed,
+        "passed": True,
+        "stage": "dry_run_ok",
         "run_id": run_id,
         "duration_ms": res["duration_ms"],
-        "error": res["error_message"],
+        "error": "",
         "stdout_tail": res["stdout_tail"],
         "logcat_tail": res["logcat_tail"],
         "screenshots": res["screenshots"],
@@ -660,19 +858,34 @@ def tool_commit_staging_script(rt: SessionRuntime) -> dict:
     gen = db.get_generation(rt.generation_id)
     case = db.get_case(rt.case_id)
     if gen is None or case is None:
-        raise RuntimeError("生成会话或用例不存在")
+        raise MobileToolError("CASE_NOT_FOUND", "生成会话或用例不存在", retryable=False)
 
     stg_case = rt.staging / "case.py"
     if not stg_case.exists():
-        raise ValueError("暂存区缺少 case.py，请先写入脚本并执行 run_server_dry_run")
+        raise MobileToolError(
+            "DRY_RUN_REQUIRED",
+            "暂存区缺少 case.py，请先写入脚本并执行 run_server_dry_run",
+            fix="先调用 write_staging_file 写入 case.py，再调用 run_server_dry_run",
+            required_next="write_staging_file",
+        )
 
     err = validate_staging_dir(rt.staging)
     if err:
-        raise ValueError(f"静态校验失败，拒绝固化: {err}")
+        raise MobileToolError(
+            "VALIDATION_FAILED",
+            f"静态校验失败，拒绝固化: {err}",
+            fix="按校验报错修复脚本后调用 write_staging_file 与 run_server_dry_run",
+            required_next="write_staging_file",
+        )
 
     digest = hashlib.sha256(stg_case.read_bytes()).hexdigest()
     if not gen.last_dry_run_passed or gen.last_dry_run_hash != digest:
-        raise ValueError("当前 case.py 尚未在平台主机试跑通过（或试跑后被修改），请先调用 run_server_dry_run")
+        raise MobileToolError(
+            "DRY_RUN_REQUIRED",
+            "当前 case.py 尚未在平台主机试跑通过（或试跑后被修改），请先调用 run_server_dry_run",
+            fix="先调用 run_server_dry_run 试跑当前暂存脚本并确认通过，不要重复 write_staging_file",
+            required_next="run_server_dry_run",
+        )
 
     # 合并 pages/
     stg_pages = rt.staging / "pages"
