@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next';
 import * as echarts from 'echarts';
 import { api } from '@/shared/api/api';
 import type { MetricsData } from '@/shared/api/api';
-import { chartColors, getChartNeutral } from '@/shared/theme/chart-tokens';
+import { chartColors, getChartNeutral, getTimeAxisInterval } from '@/shared/theme/chart-tokens';
 import { useIsMobile } from '@/shared/hooks/useIsMobile';
 import { useThemeStore } from '@/shared/store/themeStore';
 
@@ -29,11 +29,11 @@ interface ChartCardConfig {
 
 // 图表配置（颜色用 chartColors 真实 hex，echarts canvas 不支持 CSS variables）
 const CHART_CONFIGS: ChartCardConfig[] = [
-  { metricId: 'cpu_app', title: 'performance.sessionCharts.cpuTitle', color: chartColors.cpu, unit: '%', decimals: 2, yMin: 0, yMax: 100 },
-  { metricId: 'fps', title: 'performance.sessionCharts.fpsTitle', color: chartColors.fps, unit: 'fps', decimals: 1, yMin: 0 },
-  { metricId: 'memory_pss', title: 'performance.sessionCharts.memoryTitle', color: chartColors.memory, unit: 'MB', decimals: 1, yMin: 0 },
-  { metricId: 'network_down_speed', title: 'performance.sessionCharts.networkDownTitle', color: chartColors.networkDown, unit: 'KB/s', decimals: 2, yMin: 0 },
-  { metricId: 'network_up_speed', title: 'performance.sessionCharts.networkUpTitle', color: chartColors.networkUp, unit: 'KB/s', decimals: 2, yMin: 0 },
+  { metricId: 'cpu_app', title: 'sessionCharts.cpuTitle', color: chartColors.cpu, unit: '%', decimals: 2, yMin: 0, yMax: 100 },
+  { metricId: 'fps', title: 'sessionCharts.fpsTitle', color: chartColors.fps, unit: 'fps', decimals: 1, yMin: 0 },
+  { metricId: 'memory_pss', title: 'sessionCharts.memoryTitle', color: chartColors.memory, unit: 'MB', decimals: 1, yMin: 0 },
+  { metricId: 'network_down_speed', title: 'sessionCharts.networkDownTitle', color: chartColors.networkDown, unit: 'KB/s', decimals: 2, yMin: 0 },
+  { metricId: 'network_up_speed', title: 'sessionCharts.networkUpTitle', color: chartColors.networkUp, unit: 'KB/s', decimals: 2, yMin: 0 },
 ];
 
 // 指标优先级顺序（桌面版一致）
@@ -226,25 +226,19 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
           // 添加 resize 监听
           const handleResize = () => chart?.resize();
           window.addEventListener('resize', handleResize);
-          container.addEventListener('resize', handleResize);
+          const observer = typeof ResizeObserver !== 'undefined'
+            ? new ResizeObserver(() => chart?.resize())
+            : null;
+          observer?.observe(container);
         }
 
-        // 构建 ECharts 配置（完全复刻桌面版样式）
+        // 标题与 Max/Min/Avg 均在上方 DOM 标题栏渲染，避免与 canvas 重叠
         const option: echarts.EChartsOption = {
-          title: {
-            text: t(config.title),
-            left: 12,
-            top: 10,
-            textStyle: {
-              color: chartNeutral.seriesLabel,
-              fontSize: 14,
-            },
-          },
           grid: {
-            top: 40,
-            left: 60,
-            right: 30,
-            bottom: 30,
+            top: 16,
+            left: 58,
+            right: 20,
+            bottom: 28,
           },
           tooltip: {
             trigger: 'axis',
@@ -259,7 +253,10 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
             axisLabel: {
               color: chartNeutral.axisLabel,
               fontSize: 11,
+              interval: getTimeAxisInterval(timestamps.length, container.clientWidth || 360, 90),
+              hideOverlap: true,
             },
+            axisTick: { alignWithLabel: true, lineStyle: { color: chartNeutral.axisLine } },
             axisLine: { lineStyle: { color: chartNeutral.axisLine } },
           },
           yAxis: {
@@ -365,32 +362,68 @@ export default function SessionCharts({ sessionId }: SessionChartsProps) {
                 key={metricKey}
                 style={{
                   backgroundColor: "var(--bg-card)",
-                  border: '1px solid var(--bg-card)',
+                  border: '1px solid var(--hairline-soft)',
                   borderRadius: '8px',
                   overflow: 'hidden',
-                  minHeight: '200px',
+                  minHeight: '210px',
                   height: '100%',
                   display: 'flex',
                   flexDirection: 'column',
-                  position: 'relative',
                 }}
               >
-                {/* 统计信息 - 右上角 */}
-                {metricsStatistics[metricKey] && (
-                  <div style={{
-                    position: 'absolute',
-                    top: 8,
-                    right: 8,
-                    fontSize: '11px',
-                    color: config.color,
-                    fontFamily: "'Roboto Mono', monospace",
-                    opacity: 0.8,
-                    zIndex: 10,
-                  }}>
-                    Max: {metricsStatistics[metricKey]!.max.toFixed(config.decimals)}{config.unit} | Min: {metricsStatistics[metricKey]!.min.toFixed(config.decimals)}{config.unit} | Avg: {metricsStatistics[metricKey]!.avg.toFixed(config.decimals)}{config.unit}
-                  </div>
-                )}
+                {/* 卡片标题栏：标题与统计信息分栏/换行排列，避免重叠 */}
                 <div
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    alignItems: 'baseline',
+                    justifyContent: 'space-between',
+                    columnGap: '8px',
+                    rowGap: '2px',
+                    padding: '10px 12px 2px',
+                    flexShrink: 0,
+                  }}
+                >
+                  <span
+                    data-testid={`session-chart-title-${metricKey}`}
+                    style={{
+                      fontSize: '13px',
+                      fontWeight: 600,
+                      color: 'var(--text-primary)',
+                      flexShrink: 0,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {t(config.title)}
+                  </span>
+                  {metricsStatistics[metricKey] && (
+                    <div
+                      data-testid={`session-chart-stats-${metricKey}`}
+                      style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        columnGap: '8px',
+                        rowGap: '1px',
+                        fontSize: '11px',
+                        color: config.color,
+                        fontFamily: "'Roboto Mono', monospace",
+                        minWidth: 0,
+                      }}
+                    >
+                      <span style={{ whiteSpace: 'nowrap' }}>
+                        Max: {metricsStatistics[metricKey]!.max.toFixed(config.decimals)}{config.unit}
+                      </span>
+                      <span style={{ whiteSpace: 'nowrap' }}>
+                        Min: {metricsStatistics[metricKey]!.min.toFixed(config.decimals)}{config.unit}
+                      </span>
+                      <span style={{ whiteSpace: 'nowrap' }}>
+                        Avg: {metricsStatistics[metricKey]!.avg.toFixed(config.decimals)}{config.unit}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div
+                  data-testid={`session-chart-canvas-${metricKey}`}
                   ref={(el) => {
                     if (el) chartRefs.current[chartId] = el;
                   }}
